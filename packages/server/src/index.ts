@@ -2,11 +2,14 @@ import 'dotenv/config';
 import express from 'express';
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
-import type { Light, WSMessage, DebugLogEntry } from '@lightbox/shared';
+import type { Light, WSMessage, DebugLogEntry, RoomState, PalettePositions } from '@lightbox/shared';
+import { Database } from './lib/database.js';
 import { LightManager } from './lib/light-manager.js';
+import { PaletteAnimator } from './lib/palette-animator.js';
 import { createLightsRouter } from './routes/lights.js';
 import { createGroupsRouter } from './routes/groups.js';
 import { createPalettesRouter } from './routes/palettes.js';
+import { createRoomsRouter } from './routes/rooms.js';
 import { createChatRouter } from './routes/chat.js';
 
 const PORT = process.env.PORT || 3001;
@@ -29,8 +32,13 @@ app.use((req, res, next) => {
 const server = createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
-// Initialize light manager
-const lightManager = new LightManager();
+// Initialize shared database
+const db = new Database();
+db.initialize();
+
+// Initialize light manager and palette animator (share database)
+const lightManager = new LightManager(db);
+const paletteAnimator = new PaletteAnimator(db, lightManager);
 
 // Broadcast to all connected clients
 function broadcast(message: WSMessage) {
@@ -61,6 +69,19 @@ lightManager.on('diagnostics', (diagnostics) => {
   broadcast({ type: 'diagnostics_sync', diagnostics });
 });
 
+// Subscribe to palette animator events
+paletteAnimator.on('room_state', (state: RoomState) => {
+  broadcast({ type: 'room_state', ...state } as WSMessage);
+});
+
+paletteAnimator.on('palette_positions', (data: { roomId: string; paletteId: string; positions: PalettePositions }) => {
+  broadcast({ type: 'palette_positions', ...data } as WSMessage);
+});
+
+paletteAnimator.on('position_update', (data: { roomId: string; paletteId: string; lightId: string; position: number }) => {
+  broadcast({ type: 'position_update', ...data } as WSMessage);
+});
+
 // WebSocket connection handling
 wss.on('connection', async (ws) => {
   console.log('Client connected');
@@ -73,6 +94,10 @@ wss.on('connection', async (ws) => {
   const diagnostics = lightManager.getDiagnostics();
   ws.send(JSON.stringify({ type: 'diagnostics_sync', diagnostics } satisfies WSMessage));
 
+  // Send room states on connect
+  const roomStates = paletteAnimator.getAllRoomStates();
+  ws.send(JSON.stringify({ type: 'room_states_sync', roomStates }));
+
   ws.on('close', () => {
     console.log('Client disconnected');
   });
@@ -82,6 +107,7 @@ wss.on('connection', async (ws) => {
 app.use('/api/lights', createLightsRouter(lightManager));
 app.use('/api/groups', createGroupsRouter(lightManager));
 app.use('/api/palettes', createPalettesRouter(lightManager));
+app.use('/api/rooms', createRoomsRouter(paletteAnimator));
 app.use('/api/chat', createChatRouter(lightManager));
 
 // Health check
@@ -95,6 +121,9 @@ async function start() {
     await lightManager.initialize();
     console.log(`Discovered ${lightManager.getAllLights().length} lights`);
 
+    await paletteAnimator.initialize();
+    console.log('Palette animator initialized');
+
     server.listen(PORT, () => {
       console.log(`Lightbox server running on http://localhost:${PORT}`);
       console.log(`WebSocket available at ws://localhost:${PORT}/ws`);
@@ -104,5 +133,15 @@ async function start() {
     process.exit(1);
   }
 }
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('Shutting down...');
+  paletteAnimator.dispose();
+  lightManager.dispose().then(() => {
+    db.close();
+    process.exit(0);
+  });
+});
 
 start();

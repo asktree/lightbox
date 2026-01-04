@@ -102,7 +102,12 @@ export type WSMessage =
   | { type: 'connection'; status: 'connected' | 'disconnected' }
   | { type: 'debug_log'; entry: DebugLogEntry }
   | { type: 'debug_log_update'; id: string; message: string }
-  | { type: 'diagnostics_sync'; diagnostics: DeviceDiagnostics[] };
+  | { type: 'diagnostics_sync'; diagnostics: DeviceDiagnostics[] }
+  // Room/palette animation messages
+  | { type: 'room_states_sync'; roomStates: RoomState[] }
+  | { type: 'room_state'; roomId: string; activePaletteId: string | null; isPlaying: boolean }
+  | { type: 'palette_positions'; roomId: string; paletteId: string; positions: PalettePositions }
+  | { type: 'position_update'; roomId: string; paletteId: string; lightId: string; position: number };
 
 // Driver interface (for server-side implementation)
 export interface LightDriver {
@@ -119,3 +124,24 @@ export interface LightDriver {
   // Optional: Start listening for real-time updates (SSE, WebSocket, etc.)
   startListening?(): Promise<void>;
 }
+
+// Room animation state (per room)
+export interface RoomState {
+  roomId: string;
+  activePaletteId: string | null;
+  isPlaying: boolean;
+}
+
+// Light positions on a palette track
+export type PalettePositions = Record<string, number>; // lightId -> position (0-1)
+
+// Re-export room config
+export { ROOMS, ROOM_IDS, HIDDEN_LIGHT_IDS, type Room } from './rooms.js';
+
+// Re-export palette utilities
+export {
+  catmullRom,
+  getPointOnPalette,
+  positionToColor,
+  findClosestPointOnTrack,
+} from './palette-utils.js';

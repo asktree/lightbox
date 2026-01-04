@@ -2,33 +2,42 @@ import { useEffect, useState, useRef } from 'react';
 import { usePalettesStore } from '../stores/palettes';
 
 interface PaletteControlsProps {
-  lightIds: string[]; // Current room's light IDs
+  roomId: string; // Current room ID
 }
 
-export function PaletteControls({ lightIds }: PaletteControlsProps) {
+export function PaletteControls({ roomId }: PaletteControlsProps) {
   const palettes = usePalettesStore((s) => s.palettes);
-  const activePaletteId = usePalettesStore((s) => s.activePaletteId);
-  const isAnimating = usePalettesStore((s) => s.isAnimating);
   const isEditing = usePalettesStore((s) => s.isEditing);
   const editingNodes = usePalettesStore((s) => s.editingNodes);
   const fetchPalettes = usePalettesStore((s) => s.fetchPalettes);
+  const getRoomState = usePalettesStore((s) => s.getRoomState);
+
+  // Server-side actions
   const selectPalette = usePalettesStore((s) => s.selectPalette);
+  const deselectPalette = usePalettesStore((s) => s.deselectPalette);
   const playPalette = usePalettesStore((s) => s.playPalette);
   const pausePalette = usePalettesStore((s) => s.pausePalette);
-  const deselectPalette = usePalettesStore((s) => s.deselectPalette);
+
+  // Editing actions (client-side)
   const startEditing = usePalettesStore((s) => s.startEditing);
   const cancelEditing = usePalettesStore((s) => s.cancelEditing);
   const savePalette = usePalettesStore((s) => s.savePalette);
+
+  // Palette modification
   const setTension = usePalettesStore((s) => s.setTension);
   const setSpeed = usePalettesStore((s) => s.setSpeed);
   const deletePalette = usePalettesStore((s) => s.deletePalette);
   const renamePalette = usePalettesStore((s) => s.renamePalette);
-  const initializeLightPositions = usePalettesStore((s) => s.initializeLightPositions);
 
   const [newName, setNewName] = useState('');
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState('');
   const renameInputRef = useRef<HTMLInputElement>(null);
+
+  // Get current room's palette state from server
+  const roomState = getRoomState(roomId);
+  const activePaletteId = roomState.activePaletteId;
+  const isAnimating = roomState.isPlaying;
 
   const activePalette = palettes.find((p) => p.id === activePaletteId);
 
@@ -81,25 +90,21 @@ export function PaletteControls({ lightIds }: PaletteControlsProps) {
     return `${(seconds / 3600).toFixed(1)}h`;
   };
 
-  const handlePaletteClick = (id: string) => {
+  const handlePaletteClick = async (id: string) => {
     if (id === activePaletteId) {
       // Already selected - toggle play/pause
       if (isAnimating) {
-        pausePalette();
+        await pausePalette(roomId);
       } else {
-        playPalette(lightIds);
+        await playPalette(roomId);
       }
     } else {
       // Switching to different palette
       const wasAnimating = isAnimating;
-      selectPalette(id);
-      // Initialize light positions so they show on the track immediately
-      initializeLightPositions(lightIds);
-      // Only auto-play if we were already playing
+      await selectPalette(roomId, id);
+      // Auto-play if we were already playing
       if (wasAnimating) {
-        setTimeout(() => {
-          usePalettesStore.getState().playPalette(lightIds);
-        }, 0);
+        await playPalette(roomId);
       }
     }
   };
@@ -108,6 +113,24 @@ export function PaletteControls({ lightIds }: PaletteControlsProps) {
     if (newName.trim() && editingNodes.length >= 2) {
       savePalette(newName.trim());
       setNewName('');
+    }
+  };
+
+  const handleDeselect = async () => {
+    await deselectPalette(roomId);
+  };
+
+  const handlePlayPause = async () => {
+    if (isAnimating) {
+      await pausePalette(roomId);
+    } else {
+      await playPalette(roomId);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (activePalette && confirm(`Delete "${activePalette.name}"?`)) {
+      await deletePalette(activePalette.id);
     }
   };
 
@@ -219,20 +242,20 @@ export function PaletteControls({ lightIds }: PaletteControlsProps) {
               {/* Play/Pause button */}
               <div className="flex gap-2">
                 <button
-                  onClick={() => isAnimating ? pausePalette() : playPalette(lightIds)}
+                  onClick={handlePlayPause}
                   className={`flex-1 py-2 text-sm rounded font-medium transition-colors ${
                     isAnimating
                       ? 'bg-amber-600 hover:bg-amber-500 text-white'
                       : 'bg-green-600 hover:bg-green-500 text-white'
                   }`}
                 >
-                  {isAnimating ? '⏸ Pause' : '▶ Play'}
+                  {isAnimating ? '|| Pause' : '> Play'}
                 </button>
                 <button
-                  onClick={deselectPalette}
+                  onClick={handleDeselect}
                   className="px-3 py-2 text-sm bg-zinc-700 text-white rounded hover:bg-zinc-600"
                 >
-                  ✕
+                  X
                 </button>
               </div>
 
@@ -247,7 +270,7 @@ export function PaletteControls({ lightIds }: PaletteControlsProps) {
                   max="1"
                   step="0.05"
                   value={activePalette.tension}
-                  onChange={(e) => setTension(parseFloat(e.target.value))}
+                  onChange={(e) => setTension(activePalette.id, parseFloat(e.target.value))}
                   className="w-full h-1 bg-zinc-700 rounded-full appearance-none cursor-pointer"
                 />
               </div>
@@ -263,18 +286,14 @@ export function PaletteControls({ lightIds }: PaletteControlsProps) {
                   max="1"
                   step="0.02"
                   value={speedToSlider(activePalette.secondsPerNode)}
-                  onChange={(e) => setSpeed(sliderToSpeed(parseFloat(e.target.value)))}
+                  onChange={(e) => setSpeed(activePalette.id, sliderToSpeed(parseFloat(e.target.value)))}
                   className="w-full h-1 bg-zinc-700 rounded-full appearance-none cursor-pointer"
                 />
               </div>
 
               {/* Delete */}
               <button
-                onClick={() => {
-                  if (confirm(`Delete "${activePalette.name}"?`)) {
-                    deletePalette(activePalette.id);
-                  }
-                }}
+                onClick={handleDelete}
                 className="w-full py-1.5 text-sm bg-red-600/20 text-red-400 rounded hover:bg-red-600/30"
               >
                 Delete Palette

@@ -1,29 +1,35 @@
 import { create } from 'zustand';
-import type { Palette, PaletteNode } from '@lightbox/shared';
+import type { Palette, PaletteNode, RoomState, PalettePositions } from '@lightbox/shared';
 
 interface PalettesStore {
+  // Palette definitions (global - same for all rooms)
   palettes: Palette[];
-  activePaletteId: string | null;
-  isAnimating: boolean;
 
-  // For editing a new palette before saving
+  // Room animation state from server (per-room)
+  roomStates: Record<string, RoomState>;
+  roomPositions: Record<string, { paletteId: string; positions: PalettePositions }>;
+
+  // For editing a new palette before saving (client-side only)
   editingNodes: PaletteNode[];
   isEditing: boolean;
 
-  // Light positions on track (0-1) - keyed by light id
-  lightPositions: Record<string, number>;
-
-  // Actions
+  // Actions - fetch palette definitions
   fetchPalettes: () => Promise<void>;
 
-  // Playback
-  selectPalette: (id: string) => void;
-  playPalette: (lightIds: string[]) => void;
-  pausePalette: () => void;
-  deselectPalette: () => void;
-  setLightPosition: (lightId: string, position: number) => void;
+  // Server state sync (called from WebSocket handler)
+  syncRoomStates: (states: RoomState[]) => void;
+  updateRoomState: (roomId: string, activePaletteId: string | null, isPlaying: boolean) => void;
+  updatePalettePositions: (roomId: string, paletteId: string, positions: PalettePositions) => void;
+  updateLightPosition: (roomId: string, paletteId: string, lightId: string, position: number) => void;
 
-  // Editing (for creating new palettes)
+  // Room controls - call server APIs
+  selectPalette: (roomId: string, paletteId: string) => Promise<void>;
+  deselectPalette: (roomId: string) => Promise<void>;
+  playPalette: (roomId: string) => Promise<void>;
+  pausePalette: (roomId: string) => Promise<void>;
+  setLightTrackPosition: (roomId: string, lightId: string, position: number) => Promise<void>;
+
+  // Editing (for creating new palettes - client-side)
   startEditing: () => void;
   addNode: (x: number, y: number) => void;
   updateNode: (index: number, x: number, y: number) => void;
@@ -31,33 +37,26 @@ interface PalettesStore {
   cancelEditing: () => void;
   savePalette: (name: string) => Promise<void>;
 
-  // Modify active palette
-  setTension: (tension: number) => Promise<void>;
-  setSpeed: (secondsPerNode: number) => Promise<void>;
+  // Modify existing palette (server-side)
+  setTension: (id: string, tension: number) => Promise<void>;
+  setSpeed: (id: string, secondsPerNode: number) => Promise<void>;
   deletePalette: (id: string) => Promise<void>;
-  updateNodePosition: (nodeIndex: number, x: number, y: number) => void;
-  saveNodePositions: () => Promise<void>;
-  addNodeToActive: (x: number, y: number) => Promise<void>;
-  removeNodeFromActive: (index: number) => Promise<void>;
+  updateNodePosition: (id: string, nodeIndex: number, x: number, y: number) => void;
+  saveNodePositions: (id: string) => Promise<void>;
+  addNodeToActive: (id: string, x: number, y: number) => Promise<void>;
+  removeNodeFromActive: (id: string, index: number) => Promise<void>;
   renamePalette: (id: string, name: string) => Promise<void>;
 
-  // Sync positions from animation ref to store (for UI display)
-  syncPositions: (positions: Record<string, number>) => void;
-
-  // Edit a single light's position on the track
-  setLightTrackPosition: (lightId: string, position: number) => void;
-
-  // Initialize light positions without starting animation
-  initializeLightPositions: (lightIds: string[]) => void;
+  // Helper to get room state
+  getRoomState: (roomId: string) => { activePaletteId: string | null; isPlaying: boolean; positions: PalettePositions };
 }
 
 export const usePalettesStore = create<PalettesStore>((set, get) => ({
   palettes: [],
-  activePaletteId: null,
-  isAnimating: false,
+  roomStates: {},
+  roomPositions: {},
   editingNodes: [],
   isEditing: false,
-  lightPositions: {},
 
   fetchPalettes: async () => {
     const res = await fetch('/api/palettes');
@@ -65,63 +64,103 @@ export const usePalettesStore = create<PalettesStore>((set, get) => ({
     set({ palettes });
   },
 
-  selectPalette: (id: string) => {
-    const palette = get().palettes.find((p) => p.id === id);
-    if (!palette || palette.nodes.length < 2) return;
-
-    set({
-      activePaletteId: id,
-      isEditing: false,
-      editingNodes: [],
-    });
-  },
-
-  playPalette: (lightIds: string[]) => {
-    const { activePaletteId, palettes, lightPositions } = get();
-    if (!activePaletteId) return;
-
-    const palette = palettes.find((p) => p.id === activePaletteId);
-    if (!palette || palette.nodes.length < 2) return;
-
-    // Only initialize positions if not already set (preserve positions on resume)
-    let positions = lightPositions;
-    if (Object.keys(positions).length === 0) {
-      positions = {};
-      lightIds.forEach((lightId, index) => {
-        positions[lightId] = index / Math.max(lightIds.length, 1);
-      });
+  // Server state sync
+  syncRoomStates: (states: RoomState[]) => {
+    const roomStates: Record<string, RoomState> = {};
+    for (const state of states) {
+      roomStates[state.roomId] = state;
     }
-
-    set({
-      lightPositions: positions,
-      isAnimating: true,
-    });
+    set({ roomStates });
   },
 
-  pausePalette: () => {
-    set({ isAnimating: false });
-  },
-
-  deselectPalette: () => {
-    set({
-      isAnimating: false,
-      activePaletteId: null,
-      lightPositions: {},
-    });
-  },
-
-  setLightPosition: (lightId: string, position: number) => {
+  updateRoomState: (roomId: string, activePaletteId: string | null, isPlaying: boolean) => {
     set((s) => ({
-      lightPositions: { ...s.lightPositions, [lightId]: position },
+      roomStates: {
+        ...s.roomStates,
+        [roomId]: { roomId, activePaletteId, isPlaying },
+      },
     }));
   },
 
+  updatePalettePositions: (roomId: string, paletteId: string, positions: PalettePositions) => {
+    set((s) => ({
+      roomPositions: {
+        ...s.roomPositions,
+        [roomId]: { paletteId, positions },
+      },
+    }));
+  },
+
+  updateLightPosition: (roomId: string, paletteId: string, lightId: string, position: number) => {
+    set((s) => {
+      const current = s.roomPositions[roomId];
+      if (!current || current.paletteId !== paletteId) {
+        return {
+          roomPositions: {
+            ...s.roomPositions,
+            [roomId]: { paletteId, positions: { [lightId]: position } },
+          },
+        };
+      }
+      return {
+        roomPositions: {
+          ...s.roomPositions,
+          [roomId]: {
+            paletteId,
+            positions: { ...current.positions, [lightId]: position },
+          },
+        },
+      };
+    });
+  },
+
+  // Helper to get room state with defaults
+  getRoomState: (roomId: string) => {
+    const { roomStates, roomPositions } = get();
+    const state = roomStates[roomId];
+    const posData = roomPositions[roomId];
+    return {
+      activePaletteId: state?.activePaletteId ?? null,
+      isPlaying: state?.isPlaying ?? false,
+      positions: posData?.positions ?? {},
+    };
+  },
+
+  // Room controls - call server APIs
+  selectPalette: async (roomId: string, paletteId: string) => {
+    await fetch(`/api/rooms/${roomId}/palette/${paletteId}`, { method: 'POST' });
+    // State will be updated via WebSocket
+  },
+
+  deselectPalette: async (roomId: string) => {
+    await fetch(`/api/rooms/${roomId}/palette`, { method: 'DELETE' });
+    // State will be updated via WebSocket
+  },
+
+  playPalette: async (roomId: string) => {
+    await fetch(`/api/rooms/${roomId}/play`, { method: 'POST' });
+    // State will be updated via WebSocket
+  },
+
+  pausePalette: async (roomId: string) => {
+    await fetch(`/api/rooms/${roomId}/pause`, { method: 'POST' });
+    // State will be updated via WebSocket
+  },
+
+  setLightTrackPosition: async (roomId: string, lightId: string, position: number) => {
+    await fetch(`/api/rooms/${roomId}/lights/${lightId}/position`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ position }),
+    });
+    // State will be updated via WebSocket
+  },
+
+  // Editing (client-side only)
   startEditing: () => {
     set({
       isEditing: true,
       editingNodes: [],
-      isAnimating: false,
-      activePaletteId: null,
     });
   },
 
@@ -175,129 +214,99 @@ export const usePalettesStore = create<PalettesStore>((set, get) => ({
     }));
   },
 
-  setTension: async (tension: number) => {
-    const { activePaletteId, palettes } = get();
-    if (!activePaletteId) return;
-
-    await fetch(`/api/palettes/${activePaletteId}`, {
+  setTension: async (id: string, tension: number) => {
+    await fetch(`/api/palettes/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ tension }),
     });
 
-    set({
-      palettes: palettes.map((p) =>
-        p.id === activePaletteId ? { ...p, tension } : p
+    set((s) => ({
+      palettes: s.palettes.map((p) =>
+        p.id === id ? { ...p, tension } : p
       ),
-    });
+    }));
   },
 
-  setSpeed: async (secondsPerNode: number) => {
-    const { activePaletteId, palettes } = get();
-    if (!activePaletteId) return;
-
-    await fetch(`/api/palettes/${activePaletteId}`, {
+  setSpeed: async (id: string, secondsPerNode: number) => {
+    await fetch(`/api/palettes/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ secondsPerNode }),
     });
 
-    set({
-      palettes: palettes.map((p) =>
-        p.id === activePaletteId ? { ...p, secondsPerNode } : p
+    set((s) => ({
+      palettes: s.palettes.map((p) =>
+        p.id === id ? { ...p, secondsPerNode } : p
       ),
-    });
+    }));
   },
 
   deletePalette: async (id: string) => {
     await fetch(`/api/palettes/${id}`, { method: 'DELETE' });
     set((s) => ({
       palettes: s.palettes.filter((p) => p.id !== id),
-      activePaletteId: s.activePaletteId === id ? null : s.activePaletteId,
-      isAnimating: s.activePaletteId === id ? false : s.isAnimating,
     }));
   },
 
-  syncPositions: (positions: Record<string, number>) => {
-    set({ lightPositions: { ...positions } });
-  },
-
-  setLightTrackPosition: (lightId: string, position: number) => {
+  updateNodePosition: (id: string, nodeIndex: number, x: number, y: number) => {
     set((s) => ({
-      lightPositions: { ...s.lightPositions, [lightId]: position },
-    }));
-  },
-
-  updateNodePosition: (nodeIndex: number, x: number, y: number) => {
-    const { activePaletteId, palettes } = get();
-    if (!activePaletteId) return;
-
-    set({
-      palettes: palettes.map((p) => {
-        if (p.id !== activePaletteId) return p;
+      palettes: s.palettes.map((p) => {
+        if (p.id !== id) return p;
         const nodes = [...p.nodes];
         nodes[nodeIndex] = { x, y };
         return { ...p, nodes };
       }),
-    });
+    }));
   },
 
-  saveNodePositions: async () => {
-    const { activePaletteId, palettes } = get();
-    if (!activePaletteId) return;
-
-    const palette = palettes.find((p) => p.id === activePaletteId);
+  saveNodePositions: async (id: string) => {
+    const palette = get().palettes.find((p) => p.id === id);
     if (!palette) return;
 
-    await fetch(`/api/palettes/${activePaletteId}`, {
+    await fetch(`/api/palettes/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ nodes: palette.nodes }),
     });
   },
 
-  addNodeToActive: async (x: number, y: number) => {
-    const { activePaletteId, palettes } = get();
-    if (!activePaletteId) return;
-
-    const palette = palettes.find((p) => p.id === activePaletteId);
+  addNodeToActive: async (id: string, x: number, y: number) => {
+    const palette = get().palettes.find((p) => p.id === id);
     if (!palette) return;
 
     const newNodes = [...palette.nodes, { x, y }];
 
     // Update locally first
-    set({
-      palettes: palettes.map((p) =>
-        p.id === activePaletteId ? { ...p, nodes: newNodes } : p
+    set((s) => ({
+      palettes: s.palettes.map((p) =>
+        p.id === id ? { ...p, nodes: newNodes } : p
       ),
-    });
+    }));
 
     // Save to server
-    await fetch(`/api/palettes/${activePaletteId}`, {
+    await fetch(`/api/palettes/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ nodes: newNodes }),
     });
   },
 
-  removeNodeFromActive: async (index: number) => {
-    const { activePaletteId, palettes } = get();
-    if (!activePaletteId) return;
-
-    const palette = palettes.find((p) => p.id === activePaletteId);
-    if (!palette || palette.nodes.length <= 2) return; // Keep at least 2 nodes
+  removeNodeFromActive: async (id: string, index: number) => {
+    const palette = get().palettes.find((p) => p.id === id);
+    if (!palette || palette.nodes.length <= 2) return;
 
     const newNodes = palette.nodes.filter((_, i) => i !== index);
 
     // Update locally first
-    set({
-      palettes: palettes.map((p) =>
-        p.id === activePaletteId ? { ...p, nodes: newNodes } : p
+    set((s) => ({
+      palettes: s.palettes.map((p) =>
+        p.id === id ? { ...p, nodes: newNodes } : p
       ),
-    });
+    }));
 
     // Save to server
-    await fetch(`/api/palettes/${activePaletteId}`, {
+    await fetch(`/api/palettes/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ nodes: newNodes }),
@@ -305,31 +314,16 @@ export const usePalettesStore = create<PalettesStore>((set, get) => ({
   },
 
   renamePalette: async (id: string, name: string) => {
-    const { palettes } = get();
-
     await fetch(`/api/palettes/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name }),
     });
 
-    set({
-      palettes: palettes.map((p) =>
+    set((s) => ({
+      palettes: s.palettes.map((p) =>
         p.id === id ? { ...p, name } : p
       ),
-    });
-  },
-
-  initializeLightPositions: (lightIds: string[]) => {
-    const { lightPositions } = get();
-    // Only initialize if positions are empty (don't overwrite existing positions)
-    if (Object.keys(lightPositions).length > 0) return;
-
-    const positions: Record<string, number> = {};
-    lightIds.forEach((lightId, index) => {
-      positions[lightId] = index / Math.max(lightIds.length, 1);
-    });
-
-    set({ lightPositions: positions });
+    }));
   },
 }));

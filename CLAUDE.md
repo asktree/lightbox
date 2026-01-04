@@ -20,21 +20,16 @@ WebSocket: ws://localhost:3001/ws
 
 ## Dev Server Management (for Claude)
 
-Claude runs `pnpm dev` in a background task. This starts 3 watch processes:
+**Server runs in a separate terminal** - the user manages it manually. Don't try to kill or restart it. It's in watch mode with 3 processes:
 - `tsx watch` for server (auto-restarts on .ts changes)
 - `vite` for client (HMR on file changes)
 - `tsc --watch` for shared types
 
+**Logs**: Server logs are in `/tmp/lightbox.log` - read this to debug issues.
+
 **Code changes**: Automatic - just edit files, watch mode handles restart.
 
-**Config/data changes** (e.g., `tuya-devices.json`): Need server restart.
-
-**To restart the server**, ALWAYS kill first to avoid port conflicts:
-```bash
-pnpm kill && sleep 1 && pnpm dev
-```
-
-The dev server output is written to a task output file - read it to monitor logs.
+**Config/data changes** (e.g., `tuya-devices.json`): User needs to restart server manually.
 
 To build a single package:
 ```bash
@@ -147,6 +142,15 @@ Animated color paths on the wheel:
 - Lights animate along the path
 - Double-click wheel to add node, double-click node to delete
 - Stored in SQLite: `packages/server/data/lightbox.db`
+
+**Server-side animation**: Palette animation runs on the server, not the client.
+- Closing the browser doesn't stop the palette animation
+- Animation state is per-room (activePaletteId, isPlaying, light positions)
+- Palette definitions are global (same list for all rooms)
+- Light positions persist per-palette in database
+- Multiple clients viewing the same room see synchronized state
+- WebSocket broadcasts: `room_state`, `palette_positions`, `position_update`
+- REST API: `/api/rooms/:roomId/play`, `/api/rooms/:roomId/pause`, etc.
 
 ## Color Accuracy Notes
 

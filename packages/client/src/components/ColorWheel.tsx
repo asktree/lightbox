@@ -11,6 +11,7 @@ interface Props {
   size?: number;
   selectedLightId?: string | null;
   onLightSelect?: (lightId: string | null) => void;
+  roomId: string; // Current room for palette state
 }
 
 function hsvToHex(h: number, s: number, v: number = 100): string {
@@ -38,7 +39,7 @@ function hsvToHex(h: number, s: number, v: number = 100): string {
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 }
 
-export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect }: Props) {
+export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect, roomId }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [dragging, setDragging] = useState<string | null>(null);
@@ -48,15 +49,19 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect 
   const stopControlling = useLightsStore((s) => s.stopControlling);
   const bridgeStates = useLightsStore((s) => s.bridgeStates);
 
-  const activePaletteId = usePalettesStore((s) => s.activePaletteId);
   const palettes = usePalettesStore((s) => s.palettes);
-  const lightPositions = usePalettesStore((s) => s.lightPositions);
+  const getRoomState = usePalettesStore((s) => s.getRoomState);
   const isEditing = usePalettesStore((s) => s.isEditing);
   const editingNodes = usePalettesStore((s) => s.editingNodes);
   const addNode = usePalettesStore((s) => s.addNode);
   const addNodeToActive = usePalettesStore((s) => s.addNodeToActive);
 
   const diagnostics = useDebugStore((s) => s.diagnostics);
+
+  // Get room-specific palette state
+  const roomState = getRoomState(roomId);
+  const activePaletteId = roomState.activePaletteId;
+  const lightPositions = roomState.positions;
 
   const activePalette = palettes.find((p) => p.id === activePaletteId);
 
@@ -118,7 +123,7 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect 
         const idx = (y * size + x) * 4;
 
         if (distance <= radius) {
-          // Calculate hue from angle (0° at top, clockwise)
+          // Calculate hue from angle (0 at top, clockwise)
           let angle = Math.atan2(dy, dx) * 180 / Math.PI + 90;
           if (angle < 0) angle += 360;
 
@@ -193,7 +198,7 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect 
     const x = (e.clientX - rect.left) / size;
     const y = (e.clientY - rect.top) / size;
 
-    addNodeToActive(x, y);
+    addNodeToActive(activePalette.id, x, y);
   }, [activePalette, isEditing, size, addNodeToActive]);
 
   // Handle drag (only used when no palette is active)
@@ -270,6 +275,7 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect 
           palette={activePalette}
           size={size}
           lightPositions={lightPositions}
+          roomId={roomId}
           onLightClick={handleLightClick}
           selectedLightId={selectedLightId}
         />

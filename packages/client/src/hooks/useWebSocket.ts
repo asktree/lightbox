@@ -2,11 +2,18 @@ import { useEffect, useRef } from 'react';
 import type { WSMessage } from '@lightbox/shared';
 import { useLightsStore } from '../stores/lights';
 import { useDebugStore } from '../stores/debug';
+import { usePalettesStore } from '../stores/palettes';
 
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const { setConnected, syncLights, updateLight } = useLightsStore();
   const { addLog, updateLog, syncDiagnostics } = useDebugStore();
+  const {
+    syncRoomStates,
+    updateRoomState,
+    updatePalettePositions,
+    updateLightPosition,
+  } = usePalettesStore();
 
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -51,6 +58,19 @@ export function useWebSocket() {
           case 'diagnostics_sync':
             syncDiagnostics(msg.diagnostics);
             break;
+          // Room/palette state messages
+          case 'room_states_sync':
+            syncRoomStates(msg.roomStates);
+            break;
+          case 'room_state':
+            updateRoomState(msg.roomId, msg.activePaletteId, msg.isPlaying);
+            break;
+          case 'palette_positions':
+            updatePalettePositions(msg.roomId, msg.paletteId, msg.positions);
+            break;
+          case 'position_update':
+            updateLightPosition(msg.roomId, msg.paletteId, msg.lightId, msg.position);
+            break;
         }
       };
     }
@@ -60,5 +80,16 @@ export function useWebSocket() {
     return () => {
       wsRef.current?.close();
     };
-  }, [setConnected, syncLights, updateLight, addLog, updateLog, syncDiagnostics]);
+  }, [
+    setConnected,
+    syncLights,
+    updateLight,
+    addLog,
+    updateLog,
+    syncDiagnostics,
+    syncRoomStates,
+    updateRoomState,
+    updatePalettePositions,
+    updateLightPosition,
+  ]);
 }

@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import type { Palette, PaletteNode, Light } from '@lightbox/shared';
+import { getPointOnPalette, findClosestPointOnTrack } from '@lightbox/shared';
 import { usePalettesStore } from '../stores/palettes';
 import { useLightsStore } from '../stores/lights';
 import { useDebugStore } from '../stores/debug';
@@ -34,65 +35,18 @@ interface Props {
   palette: Palette;
   size: number;
   lightPositions: Record<string, number>;
+  roomId?: string; // Required for active palettes, not needed for editing preview
   isEditing?: boolean;
   onLightClick?: (lightId: string) => void;
   selectedLightId?: string | null;
 }
 
-// Catmull-Rom spline interpolation with tension
-function catmullRom(
-  p0: PaletteNode,
-  p1: PaletteNode,
-  p2: PaletteNode,
-  p3: PaletteNode,
-  t: number,
-  tension: number
-): PaletteNode {
-  const s = tension;
-
-  // Linear interpolation
-  const linearX = p1.x + t * (p2.x - p1.x);
-  const linearY = p1.y + t * (p2.y - p1.y);
-
-  // Catmull-Rom interpolation
-  const t2 = t * t;
-  const t3 = t2 * t;
-  const crX =
-    0.5 *
-    ((2 * p1.x) +
-      (-p0.x + p2.x) * t +
-      (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 +
-      (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3);
-  const crY =
-    0.5 *
-    ((2 * p1.y) +
-      (-p0.y + p2.y) * t +
-      (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 +
-      (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3);
-
+// Convert normalized (0-1) coords to canvas coords
+function toCanvasCoords(node: PaletteNode, size: number): { x: number; y: number } {
   return {
-    x: linearX * (1 - s) + crX * s,
-    y: linearY * (1 - s) + crY * s,
+    x: node.x * size,
+    y: node.y * size,
   };
-}
-
-// Get point on track at position t (0-1)
-function getPointOnPalette(palette: Palette, t: number): PaletteNode {
-  const nodes = palette.nodes;
-  if (nodes.length === 0) return { x: 0.5, y: 0.5 };
-  if (nodes.length === 1) return nodes[0];
-
-  const n = nodes.length;
-  const totalT = t * n;
-  const segment = Math.floor(totalT) % n;
-  const localT = totalT - Math.floor(totalT);
-
-  const p0 = nodes[(segment - 1 + n) % n];
-  const p1 = nodes[segment];
-  const p2 = nodes[(segment + 1) % n];
-  const p3 = nodes[(segment + 2) % n];
-
-  return catmullRom(p0, p1, p2, p3, localT, palette.tension);
 }
 
 // Convert normalized x,y (0-1, center at 0.5) to H/S
@@ -104,14 +58,6 @@ function normalizedToHs(x: number, y: number): { h: number; s: number } {
   return {
     h: Math.round(((angle % 360) + 360) % 360),
     s: Math.round(Math.min(100, distance * 2 * 100)),
-  };
-}
-
-// Convert normalized (0-1) coords to canvas coords
-function toCanvasCoords(node: PaletteNode, size: number): { x: number; y: number } {
-  return {
-    x: node.x * size,
-    y: node.y * size,
   };
 }
 
@@ -132,39 +78,12 @@ function generateTrackPath(palette: Palette, size: number): string {
   return points.join(' ') + ' Z';
 }
 
-// Find closest point on track (sample many points, return t value)
-function findClosestPointOnTrack(
-  palette: Palette,
-  targetX: number,
-  targetY: number,
-  samples: number = 100
-): number {
-  let closestT = 0;
-  let closestDist = Infinity;
-
-  for (let i = 0; i <= samples; i++) {
-    const t = i / samples;
-    const point = getPointOnPalette(palette, t);
-    const dx = point.x - targetX;
-    const dy = point.y - targetY;
-    const dist = dx * dx + dy * dy;
-
-    if (dist < closestDist) {
-      closestDist = dist;
-      closestT = t;
-    }
-  }
-
-  return closestT;
-}
-
-export function PaletteTrack({ palette, size, lightPositions, isEditing, onLightClick, selectedLightId }: Props) {
+export function PaletteTrack({ palette, size, lightPositions, roomId, isEditing, onLightClick, selectedLightId }: Props) {
   const [draggingNode, setDraggingNode] = useState<number | null>(null);
   const [draggingLight, setDraggingLight] = useState<string | null>(null);
   const didDragLightRef = useRef(false);
   const updateNodePosition = usePalettesStore((s) => s.updateNodePosition);
   const saveNodePositions = usePalettesStore((s) => s.saveNodePositions);
-  const activePaletteId = usePalettesStore((s) => s.activePaletteId);
   const setLightTrackPosition = usePalettesStore((s) => s.setLightTrackPosition);
   const removeNodeFromActive = usePalettesStore((s) => s.removeNodeFromActive);
   const setLightState = useLightsStore((s) => s.setLightState);
@@ -187,8 +106,8 @@ export function PaletteTrack({ palette, size, lightPositions, isEditing, onLight
   const strokeColor = isEditing ? 'rgba(251, 191, 36, 0.7)' : 'rgba(168, 85, 247, 0.7)';
   const nodeColor = isEditing ? '#fbbf24' : '#a855f7';
 
-  // Can drag nodes if this is the active palette (not in editing mode for new palettes)
-  const canDragNodes = palette.id === activePaletteId && !isEditing;
+  // Can drag nodes if this is a real palette (not editing preview) and roomId is provided
+  const canDragNodes = !isEditing && !!roomId;
 
   // Double-click on a node to delete it (if more than 2 nodes)
   const handleNodeDoubleClick = useCallback((e: React.MouseEvent, index: number) => {
@@ -196,8 +115,8 @@ export function PaletteTrack({ palette, size, lightPositions, isEditing, onLight
     if (palette.nodes.length <= 2) return; // Keep at least 2 nodes
     e.preventDefault();
     e.stopPropagation();
-    removeNodeFromActive(index);
-  }, [canDragNodes, palette.nodes.length, removeNodeFromActive]);
+    removeNodeFromActive(palette.id, index);
+  }, [canDragNodes, palette.nodes.length, palette.id, removeNodeFromActive]);
 
   const handleMouseDown = useCallback((e: React.MouseEvent, index: number) => {
     if (!canDragNodes) return;
@@ -217,7 +136,7 @@ export function PaletteTrack({ palette, size, lightPositions, isEditing, onLight
     const x = Math.max(0, Math.min(1, (e.clientX - rect.left) / size));
     const y = Math.max(0, Math.min(1, (e.clientY - rect.top) / size));
 
-    updateNodePosition(draggingNode, x, y);
+    updateNodePosition(palette.id, draggingNode, x, y);
 
     // Update all lights to reflect new track shape
     // Create a temporary palette with the updated node position
@@ -234,10 +153,10 @@ export function PaletteTrack({ palette, size, lightPositions, isEditing, onLight
 
   const handleMouseUp = useCallback(() => {
     if (draggingNode !== null) {
-      saveNodePositions();
+      saveNodePositions(palette.id);
       setDraggingNode(null);
     }
-  }, [draggingNode, saveNodePositions]);
+  }, [draggingNode, palette.id, saveNodePositions]);
 
   // Light pin drag handlers
   const handleLightMouseDown = useCallback((e: React.MouseEvent, lightId: string) => {
@@ -250,7 +169,7 @@ export function PaletteTrack({ palette, size, lightPositions, isEditing, onLight
   }, [canDragNodes, startControlling]);
 
   const handleLightMouseMove = useCallback((e: MouseEvent) => {
-    if (!draggingLight) return;
+    if (!draggingLight || !roomId) return;
 
     didDragLightRef.current = true;
 
@@ -264,14 +183,14 @@ export function PaletteTrack({ palette, size, lightPositions, isEditing, onLight
     // Find closest point on the track
     const closestT = findClosestPointOnTrack(palette, x, y);
 
-    // Update light position on track
-    setLightTrackPosition(draggingLight, closestT);
+    // Update light position on track (via server)
+    setLightTrackPosition(roomId, draggingLight, closestT);
 
     // Update light color to match track position
     const point = getPointOnPalette(palette, closestT);
     const { h, s } = normalizedToHs(point.x, point.y);
     setLightState(draggingLight, { color: { h, s } }, 50);
-  }, [draggingLight, size, palette, setLightTrackPosition, setLightState]);
+  }, [draggingLight, roomId, size, palette, setLightTrackPosition, setLightState]);
 
   const handleLightMouseUp = useCallback(() => {
     if (draggingLight) {

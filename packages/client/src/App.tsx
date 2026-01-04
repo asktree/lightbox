@@ -1,9 +1,9 @@
 import { useState } from 'react';
+import { ROOMS, HIDDEN_LIGHT_IDS } from '@lightbox/shared';
 import { useLightsStore } from './stores/lights';
 import { usePalettesStore } from './stores/palettes';
 import { useDebugStore } from './stores/debug';
 import { useWebSocket } from './hooks/useWebSocket';
-import { usePaletteAnimation } from './hooks/usePaletteAnimation';
 import { LightCard } from './components/LightCard';
 import { ColorWheel } from './components/ColorWheel';
 import { PaletteControls } from './components/PaletteControls';
@@ -13,40 +13,14 @@ import { DebugPanel } from './components/DebugPanel';
 
 type View = 'grid' | 'wheel';
 
-// Room definitions - lights grouped by location
-const ROOMS: Record<string, { name: string; lightIds: string[] }> = {
-  bedroom: {
-    name: 'Bedroom',
-    lightIds: ['hue:3', 'hue:4'], // spaceship floor, cockpit
-  },
-  living: {
-    name: 'Living Room',
-    lightIds: [
-      'hue:2', 'hue:7', 'hue:6', // couch lights, iris
-      'tuya:eb58e8db101aa08a03txnf', 'tuya:ebbacf4e20fe4b56366pik', // SUNVIE GU10s
-      'tuya-ble:eb9f3b3flegezedk', 'tuya-ble:eba738os6ajviwqc', // BLE: Sunset Lamp, Smart Bulb
-    ],
-  },
-  all: {
-    name: 'All Lights',
-    lightIds: [], // empty = show all
-  },
-};
-
-// Lights to hide from all views (roommate's room, etc)
-const HIDDEN_LIGHTS = new Set(['hue:8']); // Floor Lamp
-
 export default function App() {
   useWebSocket();
-  usePaletteAnimation();
 
   const lights = useLightsStore((s) => s.lights);
   const connected = useLightsStore((s) => s.connected);
-  const activePaletteId = usePalettesStore((s) => s.activePaletteId);
   const palettes = usePalettesStore((s) => s.palettes);
+  const getRoomState = usePalettesStore((s) => s.getRoomState);
   const isEditing = usePalettesStore((s) => s.isEditing);
-
-  const activePalette = palettes.find((p) => p.id === activePaletteId);
 
   const debugOpen = useDebugStore((s) => s.isOpen);
   const setDebugOpen = useDebugStore((s) => s.setOpen);
@@ -56,11 +30,16 @@ export default function App() {
   const [currentRoom, setCurrentRoom] = useState<string>('bedroom');
   const [selectedTrackLight, setSelectedTrackLight] = useState<string | null>(null);
 
-  const allLights = Array.from(lights.values()).filter((l) => !HIDDEN_LIGHTS.has(l.id));
+  // Get current room's palette state
+  const roomState = getRoomState(currentRoom);
+  const activePaletteId = roomState.activePaletteId;
+  const activePalette = palettes.find((p) => p.id === activePaletteId);
+
+  const allLights = Array.from(lights.values()).filter((l) => !HIDDEN_LIGHT_IDS.has(l.id));
 
   // Filter lights by current room
   const roomConfig = ROOMS[currentRoom];
-  const lightsList = roomConfig.lightIds.length > 0
+  const lightsList = roomConfig?.lightIds.length > 0
     ? allLights.filter((l) => roomConfig.lightIds.includes(l.id))
     : allLights;
   const reachableLights = lightsList.filter((l) => l.reachable);
@@ -81,11 +60,6 @@ export default function App() {
     }
     setSelectedLightIds(next);
   };
-
-  // Get light IDs for current room (for passing to palette) - only reachable lights
-  const roomLightIds = roomConfig.lightIds.length > 0
-    ? reachableLights.filter(l => roomConfig.lightIds.includes(l.id)).map(l => l.id)
-    : reachableLights.map(l => l.id);
 
   // Get selected light for LightPane
   const selectedLight = selectedTrackLight ? lights.get(selectedTrackLight) : null;
@@ -248,6 +222,7 @@ export default function App() {
               size={Math.min(600, Math.floor(window.innerWidth * 0.65))}
               selectedLightId={selectedTrackLight}
               onLightSelect={setSelectedTrackLight}
+              roomId={currentRoom}
             />
           </div>
 
@@ -316,12 +291,13 @@ export default function App() {
       {selectedLight && (
         <LightPane
           light={selectedLight}
+          roomId={currentRoom}
           onClose={() => setSelectedTrackLight(null)}
         />
       )}
 
       {/* Palette Controls */}
-      <PaletteControls lightIds={roomLightIds} />
+      <PaletteControls roomId={currentRoom} />
 
       {/* Agent Chat */}
       <AgentChat />
@@ -329,7 +305,7 @@ export default function App() {
       {/* Debug Panel */}
       {debugOpen && (
         <DebugPanel
-          filterDevices={roomConfig.lightIds.length > 0 ? lightsList.map((l) => l.name) : undefined}
+          filterDevices={roomConfig?.lightIds.length > 0 ? lightsList.map((l) => l.name) : undefined}
         />
       )}
     </div>

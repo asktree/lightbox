@@ -10,19 +10,28 @@ export class LightManager extends EventEmitter {
   private drivers: LightDriver[] = [];
   private lights: Map<string, Light> = new Map();
   private db: Database;
+  private ownsDb: boolean;
 
   // Track recently controlled lights to skip polling (prevents race conditions)
   private recentlyControlled: Map<string, number> = new Map();
   private readonly CONTROL_COOLDOWN_MS = 3000;
 
-  constructor() {
+  constructor(db?: Database) {
     super();
-    this.db = new Database();
+    if (db) {
+      this.db = db;
+      this.ownsDb = false;
+    } else {
+      this.db = new Database();
+      this.ownsDb = true;
+    }
   }
 
   async initialize(): Promise<void> {
-    // Initialize database
-    this.db.initialize();
+    // Initialize database (only if we own it)
+    if (this.ownsDb) {
+      this.db.initialize();
+    }
 
     // Initialize drivers
     this.drivers = [
@@ -268,6 +277,8 @@ export class LightManager extends EventEmitter {
     for (const driver of this.drivers) {
       await driver.dispose();
     }
-    this.db.close();
+    if (this.ownsDb) {
+      this.db.close();
+    }
   }
 }

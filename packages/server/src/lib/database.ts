@@ -1,6 +1,6 @@
 import BetterSqlite3 from 'better-sqlite3';
 import type { Database as BetterSqlite3Database } from 'better-sqlite3';
-import type { Group, Palette, PaletteNode } from '@lightbox/shared';
+import type { Group, Palette, PaletteNode, RoomState, PalettePositions } from '@lightbox/shared';
 import { randomUUID } from 'crypto';
 import { existsSync, mkdirSync } from 'fs';
 import { dirname, join } from 'path';
@@ -33,6 +33,19 @@ export class Database {
         nodes TEXT NOT NULL,
         tension REAL DEFAULT 0.5,
         seconds_per_node REAL DEFAULT 2
+      );
+
+      CREATE TABLE IF NOT EXISTS palette_positions (
+        palette_id TEXT NOT NULL,
+        light_id TEXT NOT NULL,
+        position REAL NOT NULL DEFAULT 0,
+        PRIMARY KEY (palette_id, light_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS room_state (
+        room_id TEXT PRIMARY KEY,
+        active_palette_id TEXT,
+        is_playing INTEGER DEFAULT 0
       );
     `);
   }
@@ -164,6 +177,85 @@ export class Database {
 
   deletePalette(id: string): void {
     this.db.prepare('DELETE FROM palettes WHERE id = ?').run(id);
+    // Also clean up positions for this palette
+    this.db.prepare('DELETE FROM palette_positions WHERE palette_id = ?').run(id);
+    // Clear from any room state
+    this.db.prepare('UPDATE room_state SET active_palette_id = NULL, is_playing = 0 WHERE active_palette_id = ?').run(id);
+  }
+
+  // Palette Positions (light positions on track)
+  getPalettePositions(paletteId: string): PalettePositions {
+    const rows = this.db.prepare(
+      'SELECT light_id, position FROM palette_positions WHERE palette_id = ?'
+    ).all(paletteId) as Array<{ light_id: string; position: number }>;
+
+    const positions: PalettePositions = {};
+    for (const row of rows) {
+      positions[row.light_id] = row.position;
+    }
+    return positions;
+  }
+
+  setPalettePosition(paletteId: string, lightId: string, position: number): void {
+    this.db.prepare(`
+      INSERT INTO palette_positions (palette_id, light_id, position)
+      VALUES (?, ?, ?)
+      ON CONFLICT (palette_id, light_id) DO UPDATE SET position = excluded.position
+    `).run(paletteId, lightId, position);
+  }
+
+  savePalettePositions(paletteId: string, positions: PalettePositions): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO palette_positions (palette_id, light_id, position)
+      VALUES (?, ?, ?)
+      ON CONFLICT (palette_id, light_id) DO UPDATE SET position = excluded.position
+    `);
+
+    const saveAll = this.db.transaction(() => {
+      for (const [lightId, position] of Object.entries(positions)) {
+        stmt.run(paletteId, lightId, position);
+      }
+    });
+    saveAll();
+  }
+
+  // Room State
+  getRoomState(roomId: string): RoomState {
+    const row = this.db.prepare(
+      'SELECT room_id, active_palette_id, is_playing FROM room_state WHERE room_id = ?'
+    ).get(roomId) as { room_id: string; active_palette_id: string | null; is_playing: number } | undefined;
+
+    if (!row) {
+      return { roomId, activePaletteId: null, isPlaying: false };
+    }
+    return {
+      roomId: row.room_id,
+      activePaletteId: row.active_palette_id,
+      isPlaying: row.is_playing === 1,
+    };
+  }
+
+  getAllRoomStates(): RoomState[] {
+    const rows = this.db.prepare('SELECT room_id, active_palette_id, is_playing FROM room_state').all() as Array<{
+      room_id: string;
+      active_palette_id: string | null;
+      is_playing: number;
+    }>;
+    return rows.map(row => ({
+      roomId: row.room_id,
+      activePaletteId: row.active_palette_id,
+      isPlaying: row.is_playing === 1,
+    }));
+  }
+
+  setRoomState(roomId: string, activePaletteId: string | null, isPlaying: boolean): void {
+    this.db.prepare(`
+      INSERT INTO room_state (room_id, active_palette_id, is_playing)
+      VALUES (?, ?, ?)
+      ON CONFLICT (room_id) DO UPDATE SET
+        active_palette_id = excluded.active_palette_id,
+        is_playing = excluded.is_playing
+    `).run(roomId, activePaletteId, isPlaying ? 1 : 0);
   }
 
   close(): void {
