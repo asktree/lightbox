@@ -396,6 +396,8 @@ export function PaletteTrack({ palette, size, lightPositions, isEditing, onLight
               key={lightId}
               style={{
                 cursor: canDragNodes ? 'grab' : (onLightClick ? 'pointer' : 'default'),
+                transform: `translate(${x}px, ${y}px)`,
+                transition: isDragging ? 'none' : 'transform 100ms ease-out',
               }}
               onMouseDown={(e) => handleLightMouseDown(e, lightId)}
               onClick={(e) => {
@@ -408,16 +410,16 @@ export function PaletteTrack({ palette, size, lightPositions, isEditing, onLight
             >
               {/* Larger hit area */}
               <circle
-                cx={x}
-                cy={y}
+                cx={0}
+                cy={0}
                 r={pinRadius + 4}
                 fill="transparent"
                 style={{ pointerEvents: canDragNodes || onLightClick ? 'auto' : 'none' }}
               />
               {/* Colored pin circle */}
               <circle
-                cx={x}
-                cy={y}
+                cx={0}
+                cy={0}
                 r={pinRadius}
                 fill={pinColor}
                 stroke="white"
@@ -430,8 +432,8 @@ export function PaletteTrack({ palette, size, lightPositions, isEditing, onLight
               {/* Label - shown when not dragging */}
               {!isDragging && (
                 <text
-                  x={x}
-                  y={y - pinRadius - 6}
+                  x={0}
+                  y={-pinRadius - 6}
                   textAnchor="middle"
                   fill="white"
                   fontSize="10"

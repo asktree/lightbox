@@ -163,3 +163,28 @@ Future improvement: Use CIE xy color space with per-bulb gamut handling
 - Different Hue bulbs have Gamut A, B, or C (different color triangles)
 - Colors outside gamut get clipped to nearest point
 - More accurate but more complex
+
+## Tuya Transition Behavior
+
+Tuya bulbs have **built-in ~800ms fade** between color/brightness changes - cannot be disabled.
+- Hue has `transitiontime` parameter (100ms units) - works great
+- Tuya has no equivalent - fade is baked into firmware
+- For palette animations: send more frequent updates to Tuya lights to compensate
+- The built-in fade actually helps smooth out the animation
+
+Sources:
+- https://github.com/jasonacox/tinytuya/issues/29
+- https://developer.tuya.com/en/docs/iot-device-dev/light_of_control
+
+## Tuya BLE
+
+BLE-only devices (Sunset Lamp, Galaxy Projector) require separate handling:
+- Uses `@abandonware/noble` for BLE communication
+- Encrypted protocol with login key (MD5 of local_key[0:6]) and session key
+- Packets chunked to 20-byte MTU for BLE transmission
+- Devices only accept connections when in pairing mode (flaky)
+
+**TODO:** Move BLE driver to separate service process:
+- Avoids noble blocking issues in main server
+- Can restart BLE independently
+- Could run on separate device (Pi near BLE devices)

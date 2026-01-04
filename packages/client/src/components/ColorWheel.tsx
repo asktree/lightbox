@@ -337,11 +337,12 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect 
                 isDragging ? 'z-20' : 'z-10'
               }`}
               style={{
-                left: pos.x - pinRadius,
-                top: pos.y - pinRadius,
+                left: 0,
+                top: 0,
                 width: pinRadius * 2,
                 height: pinRadius * 2,
-                transition: isDragging ? 'none' : 'left 0.15s, top 0.15s',
+                transform: `translate(${pos.x - pinRadius}px, ${pos.y - pinRadius}px)`,
+                transition: isDragging ? 'none' : 'transform 100ms ease-out',
                 opacity: isLightConnected(light) ? 1 : 0.5,
               }}
             >

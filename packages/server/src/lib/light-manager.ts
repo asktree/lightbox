@@ -3,7 +3,7 @@ import type { Light, LightState, LightDriver, Group, Palette, PaletteNode, Debug
 import { HueDriver } from '../drivers/hue.js';
 import { GoveeDriver } from '../drivers/govee.js';
 import { TuyaDriver } from '../drivers/tuya.js';
-import { TuyaBLEDriver } from '../drivers/tuya-ble.js';
+import { TuyaBLEProxyDriver } from '../drivers/tuya-ble-proxy.js';
 import { Database } from './database.js';
 
 export class LightManager extends EventEmitter {
@@ -29,7 +29,7 @@ export class LightManager extends EventEmitter {
       new HueDriver(),
       new GoveeDriver(),
       new TuyaDriver(),
-      new TuyaBLEDriver(),
+      new TuyaBLEProxyDriver(),
     ];
 
     // Initialize each driver and discover lights
