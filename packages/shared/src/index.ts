@@ -92,4 +92,9 @@ export interface LightDriver {
   getState(deviceId: string): Promise<LightState>;
   setState(deviceId: string, state: Partial<LightState>, transition?: number): Promise<void>;
   dispose(): Promise<void>;
+
+  // Optional: Driver can push updates instead of being polled
+  onUpdate?: (deviceId: string, state: LightState) => void;
+  // Optional: Start listening for real-time updates (SSE, WebSocket, etc.)
+  startListening?(): Promise<void>;
 }

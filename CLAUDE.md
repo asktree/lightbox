@@ -9,6 +9,14 @@ pnpm install
 pnpm dev        # Run all packages in dev mode
 pnpm server     # Run server only
 pnpm client     # Run client only
+pnpm build      # Build all packages
+```
+
+To build a single package:
+```bash
+cd packages/client && pnpm build
+cd packages/server && pnpm build
+# Or use filter: pnpm --filter @lightbox/client build
 ```
 
 Server: http://localhost:3001

@@ -37,6 +37,8 @@ interface PalettesStore {
   deletePalette: (id: string) => Promise<void>;
   updateNodePosition: (nodeIndex: number, x: number, y: number) => void;
   saveNodePositions: () => Promise<void>;
+  addNodeToActive: (x: number, y: number) => Promise<void>;
+  removeNodeFromActive: (index: number) => Promise<void>;
 
   // Sync positions from animation ref to store (for UI display)
   syncPositions: (positions: Record<string, number>) => void;
@@ -247,6 +249,54 @@ export const usePalettesStore = create<PalettesStore>((set, get) => ({
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ nodes: palette.nodes }),
+    });
+  },
+
+  addNodeToActive: async (x: number, y: number) => {
+    const { activePaletteId, palettes } = get();
+    if (!activePaletteId) return;
+
+    const palette = palettes.find((p) => p.id === activePaletteId);
+    if (!palette) return;
+
+    const newNodes = [...palette.nodes, { x, y }];
+
+    // Update locally first
+    set({
+      palettes: palettes.map((p) =>
+        p.id === activePaletteId ? { ...p, nodes: newNodes } : p
+      ),
+    });
+
+    // Save to server
+    await fetch(`/api/palettes/${activePaletteId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nodes: newNodes }),
+    });
+  },
+
+  removeNodeFromActive: async (index: number) => {
+    const { activePaletteId, palettes } = get();
+    if (!activePaletteId) return;
+
+    const palette = palettes.find((p) => p.id === activePaletteId);
+    if (!palette || palette.nodes.length <= 2) return; // Keep at least 2 nodes
+
+    const newNodes = palette.nodes.filter((_, i) => i !== index);
+
+    // Update locally first
+    set({
+      palettes: palettes.map((p) =>
+        p.id === activePaletteId ? { ...p, nodes: newNodes } : p
+      ),
+    });
+
+    // Save to server
+    await fetch(`/api/palettes/${activePaletteId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nodes: newNodes }),
     });
   },
 }));

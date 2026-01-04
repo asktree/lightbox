@@ -9,6 +9,7 @@ interface Props {
   lightPositions: Record<string, number>;
   isEditing?: boolean;
   onLightClick?: (lightId: string) => void;
+  selectedLightId?: string | null;
 }
 
 // Catmull-Rom spline interpolation with tension
@@ -104,11 +105,13 @@ function generateTrackPath(palette: Palette, size: number): string {
   return points.join(' ') + ' Z';
 }
 
-export function PaletteTrack({ palette, size, lightPositions, isEditing, onLightClick }: Props) {
+export function PaletteTrack({ palette, size, lightPositions, isEditing, onLightClick, selectedLightId }: Props) {
   const [draggingNode, setDraggingNode] = useState<number | null>(null);
   const updateNodePosition = usePalettesStore((s) => s.updateNodePosition);
   const saveNodePositions = usePalettesStore((s) => s.saveNodePositions);
   const activePaletteId = usePalettesStore((s) => s.activePaletteId);
+  const setLightTrackPosition = usePalettesStore((s) => s.setLightTrackPosition);
+  const removeNodeFromActive = usePalettesStore((s) => s.removeNodeFromActive);
   const setLightState = useLightsStore((s) => s.setLightState);
 
   const nodeRadius = 14;
@@ -119,12 +122,32 @@ export function PaletteTrack({ palette, size, lightPositions, isEditing, onLight
   // Can drag nodes if this is the active palette (not in editing mode for new palettes)
   const canDragNodes = palette.id === activePaletteId && !isEditing;
 
+  // Double-click on a node to delete it (if more than 2 nodes)
+  const handleNodeDoubleClick = useCallback((e: React.MouseEvent, index: number) => {
+    if (!canDragNodes) return;
+    if (palette.nodes.length <= 2) return; // Keep at least 2 nodes
+    e.preventDefault();
+    e.stopPropagation();
+    removeNodeFromActive(index);
+  }, [canDragNodes, palette.nodes.length, removeNodeFromActive]);
+
   const handleMouseDown = useCallback((e: React.MouseEvent, index: number) => {
     if (!canDragNodes) return;
     e.preventDefault();
     e.stopPropagation();
     setDraggingNode(index);
-  }, [canDragNodes]);
+
+    // If a light is selected, snap it to this node
+    if (selectedLightId) {
+      const nodePosition = index / palette.nodes.length;
+      setLightTrackPosition(selectedLightId, nodePosition);
+
+      // Also update the light's color immediately
+      const point = getPointOnPalette(palette, nodePosition);
+      const { h, s } = normalizedToHs(point.x, point.y);
+      setLightState(selectedLightId, { color: { h, s } }, 50);
+    }
+  }, [canDragNodes, selectedLightId, palette, setLightTrackPosition, setLightState]);
 
   const handleMouseMove = useCallback((e: MouseEvent) => {
     if (draggingNode === null) return;
@@ -145,12 +168,18 @@ export function PaletteTrack({ palette, size, lightPositions, isEditing, onLight
     updatedNodes[draggingNode] = { x, y };
     const updatedPalette = { ...palette, nodes: updatedNodes };
 
-    for (const [lightId, position] of Object.entries(lightPositions)) {
+    // Build updated light positions (keep selected light snapped to this node)
+    const updatedLightPositions = { ...lightPositions };
+    if (selectedLightId) {
+      updatedLightPositions[selectedLightId] = draggingNode / palette.nodes.length;
+    }
+
+    for (const [lightId, position] of Object.entries(updatedLightPositions)) {
       const point = getPointOnPalette(updatedPalette, position);
       const { h, s } = normalizedToHs(point.x, point.y);
       setLightState(lightId, { color: { h, s } }, 50);
     }
-  }, [draggingNode, size, updateNodePosition, palette, lightPositions, setLightState]);
+  }, [draggingNode, size, updateNodePosition, palette, lightPositions, selectedLightId, setLightState]);
 
   const handleMouseUp = useCallback(() => {
     if (draggingNode !== null) {
@@ -200,6 +229,7 @@ export function PaletteTrack({ palette, size, lightPositions, isEditing, onLight
               key={i}
               style={{ cursor: canDragNodes ? 'grab' : 'default' }}
               onMouseDown={(e) => handleMouseDown(e, i)}
+              onDoubleClick={(e) => handleNodeDoubleClick(e, i)}
             >
               <circle
                 cx={x}

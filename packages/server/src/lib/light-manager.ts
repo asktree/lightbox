@@ -35,17 +35,30 @@ export class LightManager extends EventEmitter {
           this.lights.set(light.id, light);
         }
         console.log(`${driver.brand}: discovered ${discovered.length} lights`);
+
+        // Set up real-time update callback if driver supports it
+        if (driver.startListening) {
+          driver.onUpdate = (deviceId: string, state: LightState) => {
+            const lightId = `${driver.brand}:${deviceId}`;
+            const light = this.lights.get(lightId);
+            if (light && this.hasStateChanged(light.state, state)) {
+              light.state = state;
+              this.emit('update', light);
+            }
+          };
+          await driver.startListening();
+        }
       } catch (err) {
         console.error(`Failed to initialize ${driver.brand} driver:`, err);
       }
     }
 
-    // Start polling for state updates
+    // Start polling for state updates (fallback for drivers without EventStream)
     this.startPolling();
   }
 
   private startPolling(): void {
-    // Poll every 5 seconds for state changes
+    // Poll every second for state changes
     setInterval(async () => {
       for (const [id, light] of this.lights) {
         const driver = this.getDriverForLight(light);
@@ -65,7 +78,7 @@ export class LightManager extends EventEmitter {
           }
         }
       }
-    }, 5000);
+    }, 1000);
   }
 
   private hasStateChanged(a: LightState, b: LightState): boolean {

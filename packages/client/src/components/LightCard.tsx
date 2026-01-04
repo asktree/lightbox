@@ -135,14 +135,22 @@ export function LightCard({ light }: Props) {
       {/* Quick color buttons */}
       {hasColor && state.on && (
         <div className="mt-3 flex gap-1">
+          {/* White button - uses color temperature mode for true white */}
+          {hasTemperature && (
+            <button
+              onClick={() => setLightState(light.id, { temperature: 4000 })}
+              className="w-6 h-6 rounded-full border-2 border-zinc-600 hover:border-white transition-all bg-white"
+              title="White"
+            />
+          )}
           {[
             { h: 0, s: 100, label: 'Red' },
             { h: 30, s: 100, label: 'Orange' },
             { h: 60, s: 100, label: 'Yellow' },
             { h: 120, s: 100, label: 'Green' },
-            { h: 200, s: 100, label: 'Blue' },
-            { h: 280, s: 100, label: 'Purple' },
-            { h: 320, s: 100, label: 'Pink' },
+            { h: 180, s: 100, label: 'Cyan' },
+            { h: 240, s: 100, label: 'Blue' },
+            { h: 300, s: 100, label: 'Magenta' },
           ].map(({ h, s, label }) => (
             <button
               key={label}

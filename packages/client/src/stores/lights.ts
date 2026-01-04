@@ -9,8 +9,17 @@ const THROTTLE_MS = 50;
 function sendThrottled(id: string, state: Partial<LightState>, transition?: number) {
   // Merge with any pending update (latest transition wins)
   const pending = pendingUpdates.get(id);
+  let mergedState = { ...(pending?.state || {}), ...state };
+
+  // Color and temperature are mutually exclusive - if one is set, clear the other
+  if (state.temperature !== undefined) {
+    delete mergedState.color;
+  } else if (state.color !== undefined) {
+    delete mergedState.temperature;
+  }
+
   pendingUpdates.set(id, {
-    state: { ...(pending?.state || {}), ...state },
+    state: mergedState,
     transition,
   });
 
@@ -129,9 +138,17 @@ export const useLightsStore = create<LightsStore>((set, get) => ({
     // Optimistic update - apply immediately
     const currentLight = get().lights.get(id);
     if (currentLight) {
+      // Color and temperature are mutually exclusive
+      let newState = { ...currentLight.state, ...state };
+      if (state.temperature !== undefined) {
+        delete newState.color;
+      } else if (state.color !== undefined) {
+        delete newState.temperature;
+      }
+
       const optimisticLight: Light = {
         ...currentLight,
-        state: { ...currentLight.state, ...state },
+        state: newState,
       };
       const lights = new Map(get().lights);
       lights.set(id, optimisticLight);

@@ -52,6 +52,7 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect 
   const isEditing = usePalettesStore((s) => s.isEditing);
   const editingNodes = usePalettesStore((s) => s.editingNodes);
   const addNode = usePalettesStore((s) => s.addNode);
+  const addNodeToActive = usePalettesStore((s) => s.addNodeToActive);
 
   const activePalette = palettes.find((p) => p.id === activePaletteId);
 
@@ -137,7 +138,7 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect 
   // Convert H/S to x/y position
   const hsToPosition = useCallback((h: number, s: number) => {
     const angle = (h - 90) * Math.PI / 180;
-    const distance = (s / 100) * (radius - pinRadius);
+    const distance = (s / 100) * radius;
     return {
       x: radius + distance * Math.cos(angle),
       y: radius + distance * Math.sin(angle),
@@ -153,7 +154,7 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect 
 
     return {
       h: ((angle % 360) + 360) % 360,
-      s: Math.min(100, (distance / (radius - pinRadius)) * 100),
+      s: Math.min(100, (distance / radius) * 100),
     };
   }, [radius]);
 
@@ -168,6 +169,18 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect 
 
     addNode(x, y);
   }, [isEditing, size, addNode]);
+
+  // Handle double-click on wheel to add node to active palette
+  const handleWheelDoubleClick = useCallback((e: React.MouseEvent) => {
+    if (!activePalette || isEditing) return;
+    if (!containerRef.current) return;
+
+    const rect = containerRef.current.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / size;
+    const y = (e.clientY - rect.top) / size;
+
+    addNodeToActive(x, y);
+  }, [activePalette, isEditing, size, addNodeToActive]);
 
   // Handle drag (only used when no palette is active)
   const handleMouseMove = useCallback((e: React.MouseEvent | MouseEvent) => {
@@ -227,6 +240,7 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect 
       className={`relative select-none ${isEditing ? 'cursor-crosshair' : ''}`}
       style={{ width: size, height: size }}
       onClick={handleWheelClick}
+      onDoubleClick={handleWheelDoubleClick}
     >
       {/* Color wheel canvas */}
       <canvas
@@ -243,6 +257,7 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect 
           size={size}
           lightPositions={lightPositions}
           onLightClick={handleLightClick}
+          selectedLightId={selectedLightId}
         />
       )}
 
