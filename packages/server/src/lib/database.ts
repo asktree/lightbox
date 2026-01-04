@@ -1,6 +1,6 @@
 import BetterSqlite3 from 'better-sqlite3';
 import type { Database as BetterSqlite3Database } from 'better-sqlite3';
-import type { Group, Scene, LightState } from '@lightbox/shared';
+import type { Group, Palette, PaletteNode } from '@lightbox/shared';
 import { randomUUID } from 'crypto';
 import { existsSync, mkdirSync } from 'fs';
 import { dirname, join } from 'path';
@@ -27,10 +27,12 @@ export class Database {
         light_ids TEXT NOT NULL
       );
 
-      CREATE TABLE IF NOT EXISTS scenes (
+      CREATE TABLE IF NOT EXISTS palettes (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
-        states TEXT NOT NULL
+        nodes TEXT NOT NULL,
+        tension REAL DEFAULT 0.5,
+        seconds_per_node REAL DEFAULT 2
       );
     `);
   }
@@ -85,46 +87,83 @@ export class Database {
     this.db.prepare('DELETE FROM groups WHERE id = ?').run(id);
   }
 
-  // Scenes
-  getScenes(): Scene[] {
-    const rows = this.db.prepare('SELECT * FROM scenes').all() as Array<{
-      id: string;
-      name: string;
-      states: string;
-    }>;
-    return rows.map(row => ({
-      id: row.id,
-      name: row.name,
-      states: JSON.parse(row.states),
-    }));
-  }
-
-  getScene(id: string): Scene | undefined {
-    const row = this.db.prepare('SELECT * FROM scenes WHERE id = ?').get(id) as {
-      id: string;
-      name: string;
-      states: string;
-    } | undefined;
-    if (!row) return undefined;
+  // Palettes
+  private parsePaletteRow(row: {
+    id: string;
+    name: string;
+    nodes: string;
+    tension: number;
+    seconds_per_node: number;
+  }): Palette {
     return {
       id: row.id,
       name: row.name,
-      states: JSON.parse(row.states),
+      nodes: JSON.parse(row.nodes),
+      tension: row.tension,
+      secondsPerNode: row.seconds_per_node,
     };
   }
 
-  createScene(name: string, states: Record<string, LightState>): Scene {
-    const id = randomUUID();
-    this.db.prepare('INSERT INTO scenes (id, name, states) VALUES (?, ?, ?)').run(
-      id,
-      name,
-      JSON.stringify(states)
-    );
-    return { id, name, states };
+  getPalettes(): Palette[] {
+    const rows = this.db.prepare('SELECT * FROM palettes').all() as Array<{
+      id: string;
+      name: string;
+      nodes: string;
+      tension: number;
+      seconds_per_node: number;
+    }>;
+    return rows.map(row => this.parsePaletteRow(row));
   }
 
-  deleteScene(id: string): void {
-    this.db.prepare('DELETE FROM scenes WHERE id = ?').run(id);
+  getPalette(id: string): Palette | undefined {
+    const row = this.db.prepare('SELECT * FROM palettes WHERE id = ?').get(id) as {
+      id: string;
+      name: string;
+      nodes: string;
+      tension: number;
+      seconds_per_node: number;
+    } | undefined;
+    if (!row) return undefined;
+    return this.parsePaletteRow(row);
+  }
+
+  createPalette(
+    name: string,
+    nodes: PaletteNode[],
+    tension = 0.5,
+    secondsPerNode = 2
+  ): Palette {
+    const id = randomUUID();
+    this.db.prepare(
+      'INSERT INTO palettes (id, name, nodes, tension, seconds_per_node) VALUES (?, ?, ?, ?, ?)'
+    ).run(id, name, JSON.stringify(nodes), tension, secondsPerNode);
+    return { id, name, nodes, tension, secondsPerNode };
+  }
+
+  updatePalette(
+    id: string,
+    updates: {
+      name?: string;
+      nodes?: PaletteNode[];
+      tension?: number;
+      secondsPerNode?: number;
+    }
+  ): void {
+    const palette = this.getPalette(id);
+    if (!palette) return;
+
+    const newName = updates.name ?? palette.name;
+    const newNodes = updates.nodes ?? palette.nodes;
+    const newTension = updates.tension ?? palette.tension;
+    const newSpeed = updates.secondsPerNode ?? palette.secondsPerNode;
+
+    this.db.prepare(
+      'UPDATE palettes SET name = ?, nodes = ?, tension = ?, seconds_per_node = ? WHERE id = ?'
+    ).run(newName, JSON.stringify(newNodes), newTension, newSpeed, id);
+  }
+
+  deletePalette(id: string): void {
+    this.db.prepare('DELETE FROM palettes WHERE id = ?').run(id);
   }
 
   close(): void {

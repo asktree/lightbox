@@ -39,10 +39,13 @@ packages/
 - Must enable "LAN Control" in Govee app for each device
 - `packages/server/src/drivers/govee.ts`
 
-### Tuya (Deferred)
-- Requires local key extraction
-- Use tinytuya wizard: `python -m tinytuya wizard`
-- Keys stored in `tuya_devices.json`
+### Tuya (Local Control)
+- Requires local key extraction via tinytuya wizard
+- Run: `cd packages/server/data && python3 -m tinytuya wizard`
+- Keys stored in `packages/server/data/tuya-devices.json`
+- Some devices may need "LAN Control" enabled in SmartLife app
+- Devices must be on same network as server (check 2.4GHz vs 5GHz)
+- `packages/server/src/drivers/tuya.ts`
 
 ## API
 
@@ -79,15 +82,26 @@ SQLite database at `packages/server/data/lightbox.db`
 
 ## Future Work
 
-- [ ] **Tuya integration** - Need to extract local keys first
+- [x] **Tuya integration** - Local control via tinytuya
+- [ ] **Scene light selection** - In grid view, ability to include/exclude lights from scene. Excluded lights go to bottom of grid, faded out, ignored in wheel/animation views
 - [ ] **Audio reactive** - Sync to Sonos playback
 - [ ] **Schedules** - Timer & automation
-- [ ] **Scene builder UI** - Color wheel with rotation, gradients, generative patterns
+- [ ] **Agent chat** - Claude-powered assistant for natural language light control
+
+## Scene System
+
+Scenes save light states + optional animation tracks:
+- **SceneTrack**: Bezier path on color wheel, lights animate along it
+- **Tension slider**: 0 = straight lines, 1 = smooth Catmull-Rom curves
+- **Speed slider**: Log scale, seconds per track node
+- Stores: `packages/server/data/lightbox.db` (scenes table)
+- Client: `packages/client/src/stores/scenes.ts`
 
 ## Scene Builder Concept
 
 The scene builder will have:
 1. Color wheel with draggable light pins (like Hue)
-2. Wheel rotation - spin the wheel to shift all colors while keeping relative positions
-3. Gradient mode - set start/end colors, lights distribute automatically
-4. Generative patterns - "warm sunset", "ocean", "forest" presets
+2. Bezier track drawing - click to add nodes, drag to move, double-click to delete
+3. Wheel rotation - spin the wheel to shift all colors while keeping relative positions
+4. Gradient mode - set start/end colors, lights distribute automatically
+5. Generative patterns - "warm sunset", "ocean", "forest" presets

@@ -1,21 +1,54 @@
 import { useState } from 'react';
 import { useLightsStore } from './stores/lights';
+import { usePalettesStore } from './stores/palettes';
 import { useWebSocket } from './hooks/useWebSocket';
+import { usePaletteAnimation } from './hooks/usePaletteAnimation';
 import { LightCard } from './components/LightCard';
 import { ColorWheel } from './components/ColorWheel';
+import { PaletteControls } from './components/PaletteControls';
+import { AgentChat } from './components/AgentChat';
 
 type View = 'grid' | 'wheel';
 
+// Room definitions - lights grouped by location
+const ROOMS: Record<string, { name: string; lightIds: string[] }> = {
+  bedroom: {
+    name: 'Bedroom',
+    lightIds: ['hue:3', 'hue:4'], // spaceship floor, cockpit
+  },
+  living: {
+    name: 'Living Room',
+    lightIds: ['hue:2', 'hue:7', 'hue:6', 'hue:8'], // couch lights, iris, floor lamp
+  },
+  all: {
+    name: 'All Lights',
+    lightIds: [], // empty = show all
+  },
+};
+
 export default function App() {
   useWebSocket();
+  usePaletteAnimation();
 
   const lights = useLightsStore((s) => s.lights);
   const connected = useLightsStore((s) => s.connected);
+  const activePaletteId = usePalettesStore((s) => s.activePaletteId);
+  const palettes = usePalettesStore((s) => s.palettes);
+  const isEditing = usePalettesStore((s) => s.isEditing);
+
+  const activePalette = palettes.find((p) => p.id === activePaletteId);
 
   const [view, setView] = useState<View>('grid');
   const [selectedLightIds, setSelectedLightIds] = useState<Set<string>>(new Set());
+  const [currentRoom, setCurrentRoom] = useState<string>('bedroom');
 
-  const lightsList = Array.from(lights.values());
+  const allLights = Array.from(lights.values());
+
+  // Filter lights by current room
+  const roomConfig = ROOMS[currentRoom];
+  const lightsList = roomConfig.lightIds.length > 0
+    ? allLights.filter((l) => roomConfig.lightIds.includes(l.id))
+    : allLights;
   const reachableLights = lightsList.filter((l) => l.reachable);
   const unreachableLights = lightsList.filter((l) => !l.reachable);
   const colorLights = reachableLights.filter((l) => l.capabilities.includes('color'));
@@ -35,12 +68,50 @@ export default function App() {
     setSelectedLightIds(next);
   };
 
+  // Get light IDs for current room (for passing to palette)
+  const roomLightIds = roomConfig.lightIds.length > 0
+    ? roomConfig.lightIds
+    : allLights.map(l => l.id);
+
   return (
-    <div className="min-h-screen p-6">
+    <div
+      className={`min-h-screen p-6 transition-all ${
+        activePalette
+          ? 'ring-2 ring-purple-500/50 ring-inset bg-gradient-to-b from-purple-950/20 to-transparent'
+          : ''
+      }`}
+    >
       {/* Header */}
       <header className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold">Lightbox</h1>
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-bold">Lightbox</h1>
+          {activePalette && (
+            <span className="px-2 py-0.5 bg-purple-600/30 text-purple-300 text-sm rounded animate-pulse">
+              {activePalette.name}
+            </span>
+          )}
+          {isEditing && (
+            <span className="px-2 py-0.5 bg-amber-600/30 text-amber-300 text-sm rounded">
+              Creating palette...
+            </span>
+          )}
+        </div>
         <div className="flex items-center gap-4">
+          {/* Room selector */}
+          <div className="flex bg-zinc-800 rounded-lg p-1">
+            {Object.entries(ROOMS).map(([key, room]) => (
+              <button
+                key={key}
+                onClick={() => setCurrentRoom(key)}
+                className={`px-3 py-1 text-sm rounded-md transition-all ${
+                  currentRoom === key ? 'bg-purple-600 text-white' : 'text-zinc-400'
+                }`}
+              >
+                {room.name}
+              </button>
+            ))}
+          </div>
+
           {/* View toggle */}
           <div className="flex bg-zinc-800 rounded-lg p-1">
             <button
@@ -187,6 +258,12 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Palette Controls */}
+      <PaletteControls lightIds={roomLightIds} />
+
+      {/* Agent Chat */}
+      <AgentChat />
     </div>
   );
 }

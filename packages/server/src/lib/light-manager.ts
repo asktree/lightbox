@@ -1,7 +1,8 @@
 import { EventEmitter } from 'events';
-import type { Light, LightState, LightDriver, Group, Scene } from '@lightbox/shared';
+import type { Light, LightState, LightDriver, Group, Palette, PaletteNode } from '@lightbox/shared';
 import { HueDriver } from '../drivers/hue.js';
 import { GoveeDriver } from '../drivers/govee.js';
+import { TuyaDriver } from '../drivers/tuya.js';
 import { Database } from './database.js';
 
 export class LightManager extends EventEmitter {
@@ -22,6 +23,7 @@ export class LightManager extends EventEmitter {
     this.drivers = [
       new HueDriver(),
       new GoveeDriver(),
+      new TuyaDriver(),
     ];
 
     // Initialize each driver and discover lights
@@ -131,32 +133,38 @@ export class LightManager extends EventEmitter {
     );
   }
 
-  // Scenes
-  getScenes(): Scene[] {
-    return this.db.getScenes();
+  // Palettes
+  getPalettes(): Palette[] {
+    return this.db.getPalettes();
   }
 
-  getScene(id: string): Scene | undefined {
-    return this.db.getScene(id);
+  getPalette(id: string): Palette | undefined {
+    return this.db.getPalette(id);
   }
 
-  createScene(name: string, states: Record<string, LightState>): Scene {
-    return this.db.createScene(name, states);
+  createPalette(
+    name: string,
+    nodes: PaletteNode[],
+    tension?: number,
+    secondsPerNode?: number
+  ): Palette {
+    return this.db.createPalette(name, nodes, tension, secondsPerNode);
   }
 
-  deleteScene(id: string): void {
-    this.db.deleteScene(id);
+  updatePalette(
+    id: string,
+    updates: {
+      name?: string;
+      nodes?: PaletteNode[];
+      tension?: number;
+      secondsPerNode?: number;
+    }
+  ): void {
+    this.db.updatePalette(id, updates);
   }
 
-  async activateScene(id: string, transition?: number): Promise<void> {
-    const scene = this.getScene(id);
-    if (!scene) throw new Error(`Scene not found: ${id}`);
-
-    await Promise.all(
-      Object.entries(scene.states).map(([lightId, state]) =>
-        this.setLightState(lightId, state, transition)
-      )
-    );
+  deletePalette(id: string): void {
+    this.db.deletePalette(id);
   }
 
   async dispose(): Promise<void> {

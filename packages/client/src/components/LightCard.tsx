@@ -31,7 +31,6 @@ function hsvToHex(h: number, s: number, v: number = 100): string {
 }
 
 function kelvinToHex(kelvin: number): string {
-  // Approximate color temperature to RGB
   const temp = kelvin / 100;
   let r: number, g: number, b: number;
 
@@ -52,6 +51,11 @@ function kelvinToHex(kelvin: number): string {
 
 export function LightCard({ light }: Props) {
   const setLightState = useLightsStore((s) => s.setLightState);
+  const startControlling = useLightsStore((s) => s.startControlling);
+  const stopControlling = useLightsStore((s) => s.stopControlling);
+  const bridgeState = useLightsStore((s) => s.bridgeStates.get(light.id));
+  const isControlled = useLightsStore((s) => s.controlledLights.has(light.id));
+
   const { state, capabilities } = light;
 
   const hasColor = capabilities.includes('color');
@@ -59,7 +63,7 @@ export function LightCard({ light }: Props) {
   const hasTemperature = capabilities.includes('temperature');
 
   // Determine the display color
-  let displayColor = '#fbbf24'; // default warm
+  let displayColor = '#fbbf24';
   if (state.color && hasColor) {
     displayColor = hsvToHex(state.color.h, state.color.s);
   } else if (state.temperature && hasTemperature) {
@@ -70,13 +74,13 @@ export function LightCard({ light }: Props) {
 
   return (
     <div
-      className={`relative rounded-2xl p-4 transition-all ${
+      className={`relative rounded-2xl p-4 ${isControlled ? '' : 'transition-all'} ${
         state.on ? 'bg-zinc-800' : 'bg-zinc-900'
       } ${!light.reachable ? 'opacity-50' : ''}`}
     >
       {/* Color indicator */}
       <div
-        className="absolute top-3 right-3 w-4 h-4 rounded-full transition-all"
+        className={`absolute top-3 right-3 w-4 h-4 rounded-full ${isControlled ? '' : 'transition-all'}`}
         style={{
           backgroundColor: displayColor,
           opacity: state.on ? opacity : 0.3,
@@ -100,18 +104,30 @@ export function LightCard({ light }: Props) {
         {state.on ? 'On' : 'Off'}
       </button>
 
-      {/* Brightness slider */}
+      {/* Brightness slider with phantom */}
       {hasBrightness && state.on && (
-        <div className="mt-3">
+        <div className="mt-3 relative">
+          {/* Phantom slider (bridge state) */}
+          {bridgeState && bridgeState.brightness !== undefined && (
+            <div
+              className="absolute top-0 left-0 h-2 bg-zinc-500 rounded-lg pointer-events-none opacity-50"
+              style={{ width: `${bridgeState.brightness}%` }}
+            />
+          )}
           <input
             type="range"
             min="1"
             max="100"
             value={state.brightness ?? 100}
+            onMouseDown={() => startControlling(light.id)}
+            onMouseUp={() => stopControlling(light.id)}
+            onMouseLeave={() => isControlled && stopControlling(light.id)}
+            onTouchStart={() => startControlling(light.id)}
+            onTouchEnd={() => stopControlling(light.id)}
             onChange={(e) =>
               setLightState(light.id, { brightness: parseInt(e.target.value) })
             }
-            className="w-full h-2 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-white"
+            className="relative w-full h-2 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-white"
           />
         </div>
       )}

@@ -151,7 +151,7 @@ export class HueDriver implements LightDriver {
     const lightState = new v3.lightStates.LightState();
 
     if (state.on !== undefined) {
-      state.on ? lightState.on() : lightState.off();
+      lightState.on(state.on);
     }
     if (state.brightness !== undefined) {
       lightState.brightness(state.brightness);
@@ -166,10 +166,9 @@ export class HueDriver implements LightDriver {
       const mired = Math.round(1000000 / state.temperature);
       lightState.ct(Math.max(153, Math.min(500, mired)));
     }
-    if (transition !== undefined) {
-      // Hue uses 100ms units
-      lightState.transitiontime(Math.round(transition / 100));
-    }
+    // Hue uses 100ms units. Default is 4 (400ms) which feels laggy.
+    // Use 0 for instant response unless explicitly specified.
+    lightState.transitiontime(transition !== undefined ? Math.round(transition / 100) : 0);
 
     await this.api.lights.setLightState(hueId, lightState);
   }

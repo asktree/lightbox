@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from 'express';
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -5,7 +6,8 @@ import type { Light, WSMessage } from '@lightbox/shared';
 import { LightManager } from './lib/light-manager.js';
 import { createLightsRouter } from './routes/lights.js';
 import { createGroupsRouter } from './routes/groups.js';
-import { createScenesRouter } from './routes/scenes.js';
+import { createPalettesRouter } from './routes/palettes.js';
+import { createChatRouter } from './routes/chat.js';
 
 const PORT = process.env.PORT || 3001;
 
@@ -61,7 +63,8 @@ wss.on('connection', async (ws) => {
 // Mount routes
 app.use('/api/lights', createLightsRouter(lightManager));
 app.use('/api/groups', createGroupsRouter(lightManager));
-app.use('/api/scenes', createScenesRouter(lightManager));
+app.use('/api/palettes', createPalettesRouter(lightManager));
+app.use('/api/chat', createChatRouter(lightManager));
 
 // Health check
 app.get('/api/health', (req, res) => {

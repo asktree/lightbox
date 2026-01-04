@@ -29,10 +29,24 @@ export interface Group {
   lightIds: string[];
 }
 
-export interface Scene {
+// Palette: a color path on the wheel that lights animate along
+export interface PaletteNode {
+  x: number;  // 0-1 relative to wheel center
+  y: number;
+}
+
+// For API input: can specify as x/y OR as hex color
+export type PaletteNodeInput =
+  | { x: number; y: number }
+  | { hex: string }
+  | { h: number; s: number };
+
+export interface Palette {
   id: string;
   name: string;
-  states: Record<string, LightState>; // lightId -> state
+  nodes: PaletteNode[];
+  tension: number;        // 0 = straight lines, 1 = max smoothness
+  secondsPerNode: number; // Speed: time to travel between nodes
 }
 
 // API request/response types
@@ -49,9 +63,18 @@ export interface CreateGroupRequest {
   lightIds: string[];
 }
 
-export interface CreateSceneRequest {
+export interface CreatePaletteRequest {
   name: string;
-  states: Record<string, LightState>;
+  nodes: PaletteNodeInput[];
+  tension?: number;
+  secondsPerNode?: number;
+}
+
+export interface UpdatePaletteRequest {
+  name?: string;
+  nodes?: PaletteNodeInput[];
+  tension?: number;
+  secondsPerNode?: number;
 }
 
 // WebSocket message types

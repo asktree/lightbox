@@ -1,6 +1,8 @@
 import { useRef, useEffect, useState, useCallback } from 'react';
 import type { Light } from '@lightbox/shared';
 import { useLightsStore } from '../stores/lights';
+import { usePalettesStore } from '../stores/palettes';
+import { PaletteTrack } from './PaletteTrack';
 
 interface Props {
   lights: Light[];
@@ -36,7 +38,20 @@ export function ColorWheel({ lights, size = 300 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [dragging, setDragging] = useState<string | null>(null);
+
   const setLightState = useLightsStore((s) => s.setLightState);
+  const startControlling = useLightsStore((s) => s.startControlling);
+  const stopControlling = useLightsStore((s) => s.stopControlling);
+  const bridgeStates = useLightsStore((s) => s.bridgeStates);
+
+  const activePaletteId = usePalettesStore((s) => s.activePaletteId);
+  const palettes = usePalettesStore((s) => s.palettes);
+  const lightPositions = usePalettesStore((s) => s.lightPositions);
+  const isEditing = usePalettesStore((s) => s.isEditing);
+  const editingNodes = usePalettesStore((s) => s.editingNodes);
+  const addNode = usePalettesStore((s) => s.addNode);
+
+  const activePalette = palettes.find((p) => p.id === activePaletteId);
 
   const radius = size / 2;
   const pinRadius = 16;
@@ -50,10 +65,8 @@ export function ColorWheel({ lights, size = 300 }: Props) {
     const centerX = radius;
     const centerY = radius;
 
-    // Clear
     ctx.clearRect(0, 0, size, size);
 
-    // Draw color wheel using conic gradient simulation
     for (let angle = 0; angle < 360; angle++) {
       for (let r = 0; r < radius; r++) {
         const saturation = (r / radius) * 100;
@@ -72,7 +85,6 @@ export function ColorWheel({ lights, size = 300 }: Props) {
       }
     }
 
-    // Add white center fade
     const gradient = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, radius * 0.15);
     gradient.addColorStop(0, 'rgba(255,255,255,0.8)');
     gradient.addColorStop(1, 'rgba(255,255,255,0)');
@@ -84,7 +96,7 @@ export function ColorWheel({ lights, size = 300 }: Props) {
 
   // Convert H/S to x/y position
   const hsToPosition = useCallback((h: number, s: number) => {
-    const angle = (h - 90) * Math.PI / 180; // -90 to start at top
+    const angle = (h - 90) * Math.PI / 180;
     const distance = (s / 100) * (radius - pinRadius);
     return {
       x: radius + distance * Math.cos(angle),
@@ -105,6 +117,18 @@ export function ColorWheel({ lights, size = 300 }: Props) {
     };
   }, [radius]);
 
+  // Handle wheel click for adding nodes in edit mode
+  const handleWheelClick = useCallback((e: React.MouseEvent) => {
+    if (!isEditing) return;
+    if (!containerRef.current) return;
+
+    const rect = containerRef.current.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / size;
+    const y = (e.clientY - rect.top) / size;
+
+    addNode(x, y);
+  }, [isEditing, size, addNode]);
+
   // Handle drag
   const handleMouseMove = useCallback((e: React.MouseEvent | MouseEvent) => {
     if (!dragging || !containerRef.current) return;
@@ -118,8 +142,16 @@ export function ColorWheel({ lights, size = 300 }: Props) {
   }, [dragging, positionToHs, setLightState]);
 
   const handleMouseUp = useCallback(() => {
-    setDragging(null);
-  }, []);
+    if (dragging) {
+      stopControlling(dragging);
+      setDragging(null);
+    }
+  }, [dragging, stopControlling]);
+
+  const handleMouseDown = useCallback((lightId: string) => {
+    startControlling(lightId);
+    setDragging(lightId);
+  }, [startControlling]);
 
   // Global mouse events for dragging
   useEffect(() => {
@@ -141,8 +173,9 @@ export function ColorWheel({ lights, size = 300 }: Props) {
   return (
     <div
       ref={containerRef}
-      className="relative select-none"
+      className={`relative select-none ${isEditing ? 'cursor-crosshair' : ''}`}
       style={{ width: size, height: size }}
+      onClick={handleWheelClick}
     >
       {/* Color wheel canvas */}
       <canvas
@@ -152,50 +185,107 @@ export function ColorWheel({ lights, size = 300 }: Props) {
         className="rounded-full"
       />
 
+      {/* Active palette track */}
+      {activePalette && activePalette.nodes.length >= 2 && (
+        <PaletteTrack
+          palette={activePalette}
+          size={size}
+          lightPositions={lightPositions}
+        />
+      )}
+
+      {/* Editing track preview */}
+      {isEditing && editingNodes.length >= 1 && (
+        <PaletteTrack
+          palette={{
+            id: 'editing',
+            name: 'New',
+            nodes: editingNodes,
+            tension: 0.5,
+            secondsPerNode: 2,
+          }}
+          size={size}
+          lightPositions={{}}
+          isEditing
+        />
+      )}
+
       {/* Light pins */}
       {colorLights.map((light) => {
         const color = light.state.color ?? { h: 0, s: 0 };
         const pos = hsToPosition(color.h, color.s);
         const pinColor = hsvToHex(color.h, color.s);
+        const isDragging = dragging === light.id;
+
+        // Phantom pin showing bridge state
+        const bridgeState = bridgeStates.get(light.id);
+        const bridgeColor = bridgeState?.color;
 
         return (
-          <div
-            key={light.id}
-            onMouseDown={(e) => {
-              e.preventDefault();
-              setDragging(light.id);
-            }}
-            className={`absolute flex items-center justify-center cursor-grab active:cursor-grabbing transition-shadow ${
-              dragging === light.id ? 'z-20' : 'z-10'
-            }`}
-            style={{
-              left: pos.x - pinRadius,
-              top: pos.y - pinRadius,
-              width: pinRadius * 2,
-              height: pinRadius * 2,
-            }}
-          >
-            {/* Pin */}
+          <div key={light.id}>
+            {/* Phantom pin (bridge state) - shows where the bridge thinks the light is */}
+            {isDragging && bridgeColor && (
+              <div
+                className="absolute flex items-center justify-center pointer-events-none z-5"
+                style={{
+                  left: hsToPosition(bridgeColor.h, bridgeColor.s).x - pinRadius,
+                  top: hsToPosition(bridgeColor.h, bridgeColor.s).y - pinRadius,
+                  width: pinRadius * 2,
+                  height: pinRadius * 2,
+                }}
+              >
+                <div
+                  className="w-full h-full rounded-full border-2 border-white/30 opacity-40"
+                  style={{ backgroundColor: hsvToHex(bridgeColor.h, bridgeColor.s) }}
+                />
+              </div>
+            )}
+
+            {/* Main pin (user-controlled position) */}
             <div
-              className="w-full h-full rounded-full border-4 border-white shadow-lg"
-              style={{
-                backgroundColor: pinColor,
-                boxShadow: dragging === light.id
-                  ? `0 0 20px ${pinColor}, 0 4px 12px rgba(0,0,0,0.4)`
-                  : `0 2px 8px rgba(0,0,0,0.3)`,
+              onMouseDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                handleMouseDown(light.id);
               }}
-            />
-            {/* Label on hover */}
-            <div className="absolute -bottom-6 left-1/2 -translate-x-1/2 text-xs text-white bg-black/70 px-2 py-0.5 rounded opacity-0 hover:opacity-100 whitespace-nowrap pointer-events-none">
-              {light.name}
+              className={`absolute flex items-center justify-center cursor-grab active:cursor-grabbing ${
+                isDragging ? 'z-20' : 'z-10'
+              }`}
+              style={{
+                left: pos.x - pinRadius,
+                top: pos.y - pinRadius,
+                width: pinRadius * 2,
+                height: pinRadius * 2,
+                transition: isDragging ? 'none' : 'left 0.15s, top 0.15s',
+              }}
+            >
+              <div
+                className="w-full h-full rounded-full border-4 border-white shadow-lg"
+                style={{
+                  backgroundColor: pinColor,
+                  boxShadow: isDragging
+                    ? `0 0 20px ${pinColor}, 0 4px 12px rgba(0,0,0,0.4)`
+                    : `0 2px 8px rgba(0,0,0,0.3)`,
+                }}
+              />
+              {/* Label */}
+              <div className="absolute -bottom-6 left-1/2 -translate-x-1/2 text-xs text-white bg-black/70 px-2 py-0.5 rounded opacity-0 hover:opacity-100 whitespace-nowrap pointer-events-none">
+                {light.name}
+              </div>
             </div>
           </div>
         );
       })}
 
-      {colorLights.length === 0 && (
-        <div className="absolute inset-0 flex items-center justify-center text-zinc-500 text-sm">
+      {colorLights.length === 0 && !isEditing && (
+        <div className="absolute inset-0 flex items-center justify-center text-zinc-500 text-sm pointer-events-none">
           No color lights on
+        </div>
+      )}
+
+      {isEditing && (
+        <div className="absolute inset-0 flex items-center justify-center text-amber-400 text-sm pointer-events-none">
+          Click to add points
         </div>
       )}
     </div>
