@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { ROOMS, HIDDEN_LIGHT_IDS } from '@lightbox/shared';
 import { useLightsStore } from './stores/lights';
 import { usePalettesStore } from './stores/palettes';
@@ -25,9 +25,24 @@ export default function App() {
   const debugOpen = useDebugStore((s) => s.isOpen);
   const setDebugOpen = useDebugStore((s) => s.setOpen);
 
-  const [view, setView] = useState<View>('wheel');
+  const [view, setView] = useState<View>(() => {
+    const saved = localStorage.getItem('lightbox:viewMode');
+    return saved === 'grid' || saved === 'wheel' ? saved : 'wheel';
+  });
   const [selectedLightIds, setSelectedLightIds] = useState<Set<string>>(new Set());
-  const [currentRoom, setCurrentRoom] = useState<string>('bedroom');
+  const [currentRoom, setCurrentRoom] = useState<string>(() => {
+    const saved = localStorage.getItem('lightbox:currentRoom');
+    return saved && saved in ROOMS ? saved : 'bedroom';
+  });
+
+  // Persist view mode and current room to localStorage
+  useEffect(() => {
+    localStorage.setItem('lightbox:viewMode', view);
+  }, [view]);
+
+  useEffect(() => {
+    localStorage.setItem('lightbox:currentRoom', currentRoom);
+  }, [currentRoom]);
   const [selectedTrackLight, setSelectedTrackLight] = useState<string | null>(null);
 
   // Get current room's palette state

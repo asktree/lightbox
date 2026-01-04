@@ -24,8 +24,7 @@ export function PaletteControls({ roomId }: PaletteControlsProps) {
   const savePalette = usePalettesStore((s) => s.savePalette);
 
   // Palette modification
-  const setTension = usePalettesStore((s) => s.setTension);
-  const setSpeed = usePalettesStore((s) => s.setSpeed);
+  const setRoomSpeed = usePalettesStore((s) => s.setRoomSpeed);
   const deletePalette = usePalettesStore((s) => s.deletePalette);
   const renamePalette = usePalettesStore((s) => s.renamePalette);
 
@@ -259,34 +258,18 @@ export function PaletteControls({ roomId }: PaletteControlsProps) {
                 </button>
               </div>
 
-              {/* Tension slider */}
+              {/* Speed slider (room-level) */}
               <div>
                 <label className="text-xs text-zinc-400 mb-1 block">
-                  Curve: {(activePalette.tension * 100).toFixed(0)}%
-                </label>
-                <input
-                  type="range"
-                  min="0"
-                  max="1"
-                  step="0.05"
-                  value={activePalette.tension}
-                  onChange={(e) => setTension(activePalette.id, parseFloat(e.target.value))}
-                  className="w-full h-1 bg-zinc-700 rounded-full appearance-none cursor-pointer"
-                />
-              </div>
-
-              {/* Speed slider */}
-              <div>
-                <label className="text-xs text-zinc-400 mb-1 block">
-                  Speed: {formatSpeed(activePalette.secondsPerNode)}/node
+                  Speed: {formatSpeed(roomState.secondsPerNode)}/node
                 </label>
                 <input
                   type="range"
                   min="0"
                   max="1"
                   step="0.02"
-                  value={speedToSlider(activePalette.secondsPerNode)}
-                  onChange={(e) => setSpeed(activePalette.id, sliderToSpeed(parseFloat(e.target.value)))}
+                  value={speedToSlider(roomState.secondsPerNode)}
+                  onChange={(e) => setRoomSpeed(roomId, sliderToSpeed(parseFloat(e.target.value)))}
                   className="w-full h-1 bg-zinc-700 rounded-full appearance-none cursor-pointer"
                 />
               </div>

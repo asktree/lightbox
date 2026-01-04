@@ -11,12 +11,15 @@ export interface Room {
 export const ROOMS: Record<string, Room> = {
   bedroom: {
     name: 'Bedroom',
-    lightIds: ['hue:3', 'hue:4'], // spaceship floor, cockpit
+    lightIds: [
+      'hue:3', 'hue:4', // spaceship floor, cockpit
+      'tuya:ebc64ec87a6c462e20hmjo', // Galaxy Projector (LASER!)
+    ],
   },
   living: {
     name: 'Living Room',
     lightIds: [
-      'hue:2', 'hue:7', 'hue:6', // couch lights, iris
+      'hue:7', 'hue:6', // couch lights (hue:2 is couch go?), iris
       'tuya:eb58e8db101aa08a03txnf', 'tuya:ebbacf4e20fe4b56366pik', // SUNVIE GU10s
       'tuya-ble:eb9f3b3flegezedk', 'tuya-ble:eba738os6ajviwqc', // BLE: Sunset Lamp, Smart Bulb
     ],

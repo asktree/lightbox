@@ -63,7 +63,8 @@ export function getPointOnPalette(palette: Palette, t: number): PaletteNode {
   const p2 = nodes[(segment + 1) % n];
   const p3 = nodes[(segment + 2) % n];
 
-  return catmullRom(p0, p1, p2, p3, localT, palette.tension);
+  // Always use full Catmull-Rom smoothness (tension=1)
+  return catmullRom(p0, p1, p2, p3, localT, 1);
 }
 
 /**

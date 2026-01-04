@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useState, useRef } from 'react';
 import type { Light } from '@lightbox/shared';
 import { getPointOnPalette } from '@lightbox/shared';
 import { usePalettesStore } from '../stores/palettes';
@@ -17,6 +17,18 @@ function normalizedToHs(x: number, y: number): { h: number; s: number } {
     h: Math.round(((angle % 360) + 360) % 360),
     s: Math.round(Math.min(100, distance * 2 * 100)),
   };
+}
+
+// Galaxy Projector device ID
+const GALAXY_PROJECTOR_ID = 'tuya:ebc64ec87a6c462e20hmjo';
+
+// Send raw DPS to Tuya device
+async function setTuyaDps(id: string, dps: Record<string, any>) {
+  await fetch(`/api/lights/${id}/dps`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ dps }),
+  });
 }
 
 interface LightPaneProps {
@@ -42,6 +54,34 @@ export function LightPane({ light, roomId, onClose }: LightPaneProps) {
 
   const activePalette = palettes.find((p) => p.id === activePaletteId);
   const lightPosition = lightPositions[light.id] ?? 0;
+
+  // Galaxy Projector custom controls
+  const isGalaxyProjector = light.id === GALAXY_PROJECTOR_ID;
+  const [laserSpeed, setLaserSpeed] = useState(500);
+  const [laserOn, setLaserOn] = useState(true);
+  const [nebulaOn, setNebulaOn] = useState(true);
+  const laserSpeedThrottle = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleLaserSpeedChange = useCallback((speed: number) => {
+    setLaserSpeed(speed);
+    // Throttle API calls for slider
+    if (laserSpeedThrottle.current) {
+      clearTimeout(laserSpeedThrottle.current);
+    }
+    laserSpeedThrottle.current = setTimeout(() => {
+      setTuyaDps(light.id, { '101': speed });
+    }, 100);
+  }, [light.id]);
+
+  const handleLaserToggle = useCallback((on: boolean) => {
+    setLaserOn(on);
+    setTuyaDps(light.id, { '102': on });
+  }, [light.id]);
+
+  const handleNebulaToggle = useCallback((on: boolean) => {
+    setNebulaOn(on);
+    setTuyaDps(light.id, { '103': on });
+  }, [light.id]);
 
   // Handle light position change on palette - update store AND send color to light
   const handlePositionChange = useCallback((pos: number) => {
@@ -159,6 +199,66 @@ export function LightPane({ light, roomId, onClose }: LightPaneProps) {
           />
         )}
       </div>
+
+      {/* Galaxy Projector custom controls */}
+      {isGalaxyProjector && (
+        <div className="mt-4 pt-3 border-t border-zinc-700/50">
+          <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-2">Projector Controls</div>
+
+          {/* Laser toggle */}
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs text-zinc-400">Laser</span>
+            <button
+              onClick={() => handleLaserToggle(!laserOn)}
+              className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                laserOn ? 'bg-red-600' : 'bg-zinc-700'
+              }`}
+            >
+              <span
+                className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${
+                  laserOn ? 'translate-x-4' : 'translate-x-0.5'
+                }`}
+              />
+            </button>
+          </div>
+
+          {/* Laser speed slider */}
+          <div className="mb-3">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs text-zinc-400">Laser Speed</span>
+              <span className="text-[10px] text-zinc-500">{Math.round(laserSpeed / 10)}%</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={1000}
+              value={laserSpeed}
+              onChange={(e) => handleLaserSpeedChange(Number(e.target.value))}
+              className="w-full h-1.5 bg-zinc-700 rounded-full appearance-none cursor-pointer accent-red-500"
+              style={{
+                background: `linear-gradient(to right, #dc2626 0%, #dc2626 ${laserSpeed / 10}%, #3f3f46 ${laserSpeed / 10}%, #3f3f46 100%)`,
+              }}
+            />
+          </div>
+
+          {/* Nebula toggle */}
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-zinc-400">Nebula</span>
+            <button
+              onClick={() => handleNebulaToggle(!nebulaOn)}
+              className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                nebulaOn ? 'bg-purple-600' : 'bg-zinc-700'
+              }`}
+            >
+              <span
+                className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${
+                  nebulaOn ? 'translate-x-4' : 'translate-x-0.5'
+                }`}
+              />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Debug log for this light (Tuya only for now) */}
       {light.brand === 'tuya' && (

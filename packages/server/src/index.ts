@@ -117,6 +117,13 @@ app.get('/api/health', (req, res) => {
 
 // Start server
 async function start() {
+  // Start HTTP server early so clients can connect while drivers initialize
+  server.listen(PORT, () => {
+    console.log(`Lightbox server running on http://localhost:${PORT}`);
+    console.log(`WebSocket available at ws://localhost:${PORT}/ws`);
+  });
+
+  // Initialize drivers and palette animator in background
   try {
     await lightManager.initialize();
     console.log(`Discovered ${lightManager.getAllLights().length} lights`);
@@ -124,13 +131,20 @@ async function start() {
     await paletteAnimator.initialize();
     console.log('Palette animator initialized');
 
-    server.listen(PORT, () => {
-      console.log(`Lightbox server running on http://localhost:${PORT}`);
-      console.log(`WebSocket available at ws://localhost:${PORT}/ws`);
+    // Broadcast updated state to all connected clients now that initialization is complete
+    wss.clients.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN) {
+        const lights = lightManager.getAllLights();
+        client.send(JSON.stringify({ type: 'lights_sync', lights } satisfies WSMessage));
+        const diagnostics = lightManager.getDiagnostics();
+        client.send(JSON.stringify({ type: 'diagnostics_sync', diagnostics } satisfies WSMessage));
+        const roomStates = paletteAnimator.getAllRoomStates();
+        client.send(JSON.stringify({ type: 'room_states_sync', roomStates }));
+      }
     });
   } catch (err) {
-    console.error('Failed to start server:', err);
-    process.exit(1);
+    console.error('Failed to initialize:', err);
+    // Don't exit - server is running, just drivers failed
   }
 }
 

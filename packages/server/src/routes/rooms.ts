@@ -70,6 +70,23 @@ export function createRoomsRouter(animator: PaletteAnimator): Router {
     }
   });
 
+  // Set animation speed
+  router.put('/:roomId/speed', async (req, res) => {
+    try {
+      const { secondsPerNode } = req.body as { secondsPerNode: number };
+      if (typeof secondsPerNode !== 'number' || secondsPerNode < 0.1 || secondsPerNode > 60) {
+        return res.status(400).json({ error: 'Speed must be between 0.1 and 60 seconds per node' });
+      }
+
+      await animator.setSpeed(req.params.roomId, secondsPerNode);
+      const state = animator.getRoomState(req.params.roomId);
+      res.json(state);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ error: message });
+    }
+  });
+
   // Set light position on track
   router.put('/:roomId/lights/:lightId/position', async (req, res) => {
     try {

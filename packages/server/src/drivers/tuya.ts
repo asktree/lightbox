@@ -376,6 +376,47 @@ export class TuyaDriver implements LightDriver {
     this.devices.clear();
   }
 
+  /**
+   * Set raw DPS values directly (for custom device controls)
+   */
+  async setRawDps(deviceId: string, dps: Record<string, any>): Promise<void> {
+    const fullId = deviceId.startsWith('tuya:') ? deviceId : `tuya:${deviceId}`;
+    const device = this.devices.get(fullId);
+    if (!device) {
+      throw new Error('Tuya device not found');
+    }
+
+    // If not connected, try to reconnect first
+    if (!device.connected) {
+      try {
+        await this.connectDevice(device, fullId);
+      } catch (err: any) {
+        throw new Error(`Tuya device ${device.config.name} not reachable: ${err.message}`);
+      }
+    }
+
+    // Build a short summary of what we're setting
+    const summary = Object.entries(dps)
+      .map(([k, v]) => `${k}=${typeof v === 'string' ? v.slice(0, 12) : v}`)
+      .join(' ');
+
+    const logId = this.emitDebug(device.config.name, `raw: ${summary} (...)`, 'out');
+    const startTime = Date.now();
+
+    try {
+      await device.api.set({ multiple: true, data: dps });
+      const elapsed = Date.now() - startTime;
+      this.updateDebug(logId, `raw: ${summary} (✓ ${elapsed}ms)`);
+    } catch (err: any) {
+      const elapsed = Date.now() - startTime;
+      this.updateDebug(logId, `raw: ${summary} (✗ ${elapsed}ms)`);
+      device.connected = false;
+      if (this.onDiagnosticsChange) this.onDiagnosticsChange();
+      this.scheduleReconnect(device, fullId);
+      throw err;
+    }
+  }
+
   private getCapabilities(config: TuyaDeviceConfig): Capability[] {
     const caps: Capability[] = ['on_off'];
     const mapping = config.mapping || {};

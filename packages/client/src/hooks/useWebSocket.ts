@@ -63,7 +63,7 @@ export function useWebSocket() {
             syncRoomStates(msg.roomStates);
             break;
           case 'room_state':
-            updateRoomState(msg.roomId, msg.activePaletteId, msg.isPlaying);
+            updateRoomState(msg.roomId, msg.activePaletteId, msg.isPlaying, msg.secondsPerNode);
             break;
           case 'palette_positions':
             updatePalettePositions(msg.roomId, msg.paletteId, msg.positions);

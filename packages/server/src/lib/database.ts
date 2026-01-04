@@ -45,9 +45,17 @@ export class Database {
       CREATE TABLE IF NOT EXISTS room_state (
         room_id TEXT PRIMARY KEY,
         active_palette_id TEXT,
-        is_playing INTEGER DEFAULT 0
+        is_playing INTEGER DEFAULT 0,
+        seconds_per_node REAL DEFAULT 2
       );
     `);
+
+    // Migration: add seconds_per_node column if missing
+    try {
+      this.db.exec(`ALTER TABLE room_state ADD COLUMN seconds_per_node REAL DEFAULT 2`);
+    } catch {
+      // Column already exists
+    }
   }
 
   // Groups
@@ -222,29 +230,32 @@ export class Database {
   // Room State
   getRoomState(roomId: string): RoomState {
     const row = this.db.prepare(
-      'SELECT room_id, active_palette_id, is_playing FROM room_state WHERE room_id = ?'
-    ).get(roomId) as { room_id: string; active_palette_id: string | null; is_playing: number } | undefined;
+      'SELECT room_id, active_palette_id, is_playing, seconds_per_node FROM room_state WHERE room_id = ?'
+    ).get(roomId) as { room_id: string; active_palette_id: string | null; is_playing: number; seconds_per_node: number } | undefined;
 
     if (!row) {
-      return { roomId, activePaletteId: null, isPlaying: false };
+      return { roomId, activePaletteId: null, isPlaying: false, secondsPerNode: 2 };
     }
     return {
       roomId: row.room_id,
       activePaletteId: row.active_palette_id,
       isPlaying: row.is_playing === 1,
+      secondsPerNode: row.seconds_per_node ?? 2,
     };
   }
 
   getAllRoomStates(): RoomState[] {
-    const rows = this.db.prepare('SELECT room_id, active_palette_id, is_playing FROM room_state').all() as Array<{
+    const rows = this.db.prepare('SELECT room_id, active_palette_id, is_playing, seconds_per_node FROM room_state').all() as Array<{
       room_id: string;
       active_palette_id: string | null;
       is_playing: number;
+      seconds_per_node: number;
     }>;
     return rows.map(row => ({
       roomId: row.room_id,
       activePaletteId: row.active_palette_id,
       isPlaying: row.is_playing === 1,
+      secondsPerNode: row.seconds_per_node ?? 2,
     }));
   }
 
@@ -256,6 +267,15 @@ export class Database {
         active_palette_id = excluded.active_palette_id,
         is_playing = excluded.is_playing
     `).run(roomId, activePaletteId, isPlaying ? 1 : 0);
+  }
+
+  setRoomSpeed(roomId: string, secondsPerNode: number): void {
+    this.db.prepare(`
+      INSERT INTO room_state (room_id, seconds_per_node)
+      VALUES (?, ?)
+      ON CONFLICT (room_id) DO UPDATE SET
+        seconds_per_node = excluded.seconds_per_node
+    `).run(roomId, secondsPerNode);
   }
 
   close(): void {

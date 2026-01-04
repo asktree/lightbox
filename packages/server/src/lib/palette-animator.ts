@@ -22,6 +22,7 @@ interface RoomAnimationState {
   roomId: string;
   activePaletteId: string | null;
   isPlaying: boolean;
+  secondsPerNode: number;
   positions: PalettePositions;
   tickCount: number;
 }
@@ -45,14 +46,30 @@ export class PaletteAnimator extends EventEmitter {
     // Initialize state for all known rooms
     for (const roomId of Object.keys(ROOMS)) {
       const dbState = this.db.getRoomState(roomId);
-      const positions = dbState.activePaletteId
-        ? this.db.getPalettePositions(dbState.activePaletteId)
-        : {};
+      const room = ROOMS[roomId];
+
+      // Get lights for this room
+      const lightIds = room && room.lightIds.length > 0
+        ? room.lightIds
+        : Array.from(this.lightManager.getAllLights()).map(l => l.id);
+      const roomLightSet = new Set(lightIds);
+
+      // Load and filter positions to only include lights in this room
+      let positions: Record<string, number> = {};
+      if (dbState.activePaletteId) {
+        const allPositions = this.db.getPalettePositions(dbState.activePaletteId);
+        for (const [lightId, pos] of Object.entries(allPositions)) {
+          if (roomLightSet.has(lightId)) {
+            positions[lightId] = pos;
+          }
+        }
+      }
 
       const state: RoomAnimationState = {
         roomId,
         activePaletteId: dbState.activePaletteId,
         isPlaying: dbState.isPlaying,
+        secondsPerNode: dbState.secondsPerNode,
         positions,
         tickCount: 0,
       };
@@ -84,22 +101,30 @@ export class PaletteAnimator extends EventEmitter {
 
     // Load saved positions for this palette, or initialize
     if (paletteId) {
-      state.positions = this.db.getPalettePositions(paletteId);
+      const allPositions = this.db.getPalettePositions(paletteId);
+
+      // Get the lights for this room
+      const room = ROOMS[roomId];
+      const lightIds = room && room.lightIds.length > 0
+        ? room.lightIds
+        : Array.from(this.lightManager.getAllLights()).map(l => l.id);
+      const roomLightSet = new Set(lightIds);
+
+      // Filter positions to only include lights in this room
+      state.positions = {};
+      for (const [lightId, pos] of Object.entries(allPositions)) {
+        if (roomLightSet.has(lightId)) {
+          state.positions[lightId] = pos;
+        }
+      }
 
       // Initialize positions for lights that don't have saved positions
-      const room = ROOMS[roomId];
-      if (room) {
-        const lightIds = room.lightIds.length > 0
-          ? room.lightIds
-          : Array.from(this.lightManager.getAllLights()).map(l => l.id);
-
-        let offset = 0;
-        for (const lightId of lightIds) {
-          if (!(lightId in state.positions)) {
-            // Spread lights evenly along the track
-            state.positions[lightId] = offset / lightIds.length;
-            offset++;
-          }
+      let offset = Object.keys(state.positions).length;
+      for (const lightId of lightIds) {
+        if (!(lightId in state.positions)) {
+          // Spread lights evenly along the track
+          state.positions[lightId] = offset / lightIds.length;
+          offset++;
         }
       }
     } else {
@@ -163,6 +188,16 @@ export class PaletteAnimator extends EventEmitter {
   }
 
   /**
+   * Set animation speed for a room
+   */
+  async setSpeed(roomId: string, secondsPerNode: number): Promise<void> {
+    const state = this.getOrCreateState(roomId);
+    state.secondsPerNode = secondsPerNode;
+    this.db.setRoomSpeed(roomId, secondsPerNode);
+    this.emitRoomState(roomId);
+  }
+
+  /**
    * Set a light's position on the track (drag interaction)
    */
   async setLightPosition(roomId: string, lightId: string, position: number): Promise<void> {
@@ -197,12 +232,13 @@ export class PaletteAnimator extends EventEmitter {
   getRoomState(roomId: string): RoomState {
     const state = this.roomStates.get(roomId);
     if (!state) {
-      return { roomId, activePaletteId: null, isPlaying: false };
+      return { roomId, activePaletteId: null, isPlaying: false, secondsPerNode: 2 };
     }
     return {
       roomId: state.roomId,
       activePaletteId: state.activePaletteId,
       isPlaying: state.isPlaying,
+      secondsPerNode: state.secondsPerNode,
     };
   }
 
@@ -222,6 +258,7 @@ export class PaletteAnimator extends EventEmitter {
       roomId: state.roomId,
       activePaletteId: state.activePaletteId,
       isPlaying: state.isPlaying,
+      secondsPerNode: state.secondsPerNode,
     }));
   }
 
@@ -234,6 +271,7 @@ export class PaletteAnimator extends EventEmitter {
         roomId,
         activePaletteId: null,
         isPlaying: false,
+        secondsPerNode: 2,
         positions: {},
         tickCount: 0,
       };
@@ -275,8 +313,8 @@ export class PaletteAnimator extends EventEmitter {
       return;
     }
 
-    // Calculate position delta
-    const totalTime = palette.secondsPerNode * palette.nodes.length;
+    // Calculate position delta using room speed
+    const totalTime = state.secondsPerNode * palette.nodes.length;
     const delta = (UPDATE_INTERVAL_MS / 1000) / totalTime;
 
     // Update each light

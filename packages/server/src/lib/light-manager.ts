@@ -41,50 +41,52 @@ export class LightManager extends EventEmitter {
       new TuyaBLEProxyDriver(),
     ];
 
-    // Initialize each driver and discover lights
+    // Set up callbacks for all drivers first
     for (const driver of this.drivers) {
+      // Set up real-time update callback BEFORE discover (Tuya connects during discover)
+      if ('onUpdate' in driver) {
+        driver.onUpdate = (deviceId: string, state: LightState) => {
+          const lightId = `${driver.brand}:${deviceId}`;
+          const light = this.lights.get(lightId);
+          if (light && this.hasStateChanged(light.state, state)) {
+            light.state = state;
+            this.emit('update', light);
+          }
+        };
+      }
+
+      // Set up debug callbacks for drivers that support it (Tuya)
+      if ('onDebug' in driver) {
+        (driver as any).onDebug = (id: string, deviceName: string, message: string, direction: 'in' | 'out') => {
+          const entry: DebugLogEntry = {
+            id,
+            timestamp: Date.now(),
+            brand: driver.brand,
+            device: deviceName,
+            message,
+            direction,
+          };
+          this.emit('debug', entry);
+        };
+      }
+      if ('onDebugUpdate' in driver) {
+        (driver as any).onDebugUpdate = (id: string, message: string) => {
+          this.emit('debug_update', { id, message });
+        };
+      }
+
+      // Set up diagnostics change callback (Tuya)
+      if ('onDiagnosticsChange' in driver) {
+        (driver as any).onDiagnosticsChange = () => {
+          this.emit('diagnostics', this.getDiagnostics());
+        };
+      }
+    }
+
+    // Initialize and discover from all drivers in parallel
+    await Promise.all(this.drivers.map(async (driver) => {
       try {
         await driver.initialize();
-
-        // Set up real-time update callback BEFORE discover (Tuya connects during discover)
-        if ('onUpdate' in driver) {
-          driver.onUpdate = (deviceId: string, state: LightState) => {
-            const lightId = `${driver.brand}:${deviceId}`;
-            const light = this.lights.get(lightId);
-            if (light && this.hasStateChanged(light.state, state)) {
-              light.state = state;
-              this.emit('update', light);
-            }
-          };
-        }
-
-        // Set up debug callbacks for drivers that support it (Tuya)
-        if ('onDebug' in driver) {
-          (driver as any).onDebug = (id: string, deviceName: string, message: string, direction: 'in' | 'out') => {
-            const entry: DebugLogEntry = {
-              id,
-              timestamp: Date.now(),
-              brand: driver.brand,
-              device: deviceName,
-              message,
-              direction,
-            };
-            this.emit('debug', entry);
-          };
-        }
-        if ('onDebugUpdate' in driver) {
-          (driver as any).onDebugUpdate = (id: string, message: string) => {
-            this.emit('debug_update', { id, message });
-          };
-        }
-
-        // Set up diagnostics change callback (Tuya)
-        if ('onDiagnosticsChange' in driver) {
-          (driver as any).onDiagnosticsChange = () => {
-            this.emit('diagnostics', this.getDiagnostics());
-          };
-        }
-
         const discovered = await driver.discover();
         for (const light of discovered) {
           this.lights.set(light.id, light);
@@ -98,7 +100,7 @@ export class LightManager extends EventEmitter {
       } catch (err) {
         console.error(`Failed to initialize ${driver.brand} driver:`, err);
       }
-    }
+    }))
 
     // Start polling for state updates (fallback for drivers without EventStream)
     this.startPolling();
@@ -237,6 +239,20 @@ export class LightManager extends EventEmitter {
     await Promise.all(
       group.lightIds.map(lightId => this.setLightState(lightId, state, transition))
     );
+  }
+
+  /**
+   * Set raw DPS values for a Tuya device (for custom device controls)
+   */
+  async setTuyaRawDps(id: string, dps: Record<string, any>): Promise<void> {
+    const light = this.lights.get(id);
+    if (!light) throw new Error(`Light not found: ${id}`);
+    if (light.brand !== 'tuya') throw new Error('Raw DPS only supported for Tuya devices');
+
+    const tuyaDriver = this.drivers.find(d => d.brand === 'tuya') as TuyaDriver | undefined;
+    if (!tuyaDriver) throw new Error('Tuya driver not found');
+
+    await tuyaDriver.setRawDps(this.getDeviceId(id), dps);
   }
 
   // Palettes

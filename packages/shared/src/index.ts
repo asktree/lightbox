@@ -105,7 +105,7 @@ export type WSMessage =
   | { type: 'diagnostics_sync'; diagnostics: DeviceDiagnostics[] }
   // Room/palette animation messages
   | { type: 'room_states_sync'; roomStates: RoomState[] }
-  | { type: 'room_state'; roomId: string; activePaletteId: string | null; isPlaying: boolean }
+  | { type: 'room_state'; roomId: string; activePaletteId: string | null; isPlaying: boolean; secondsPerNode: number }
   | { type: 'palette_positions'; roomId: string; paletteId: string; positions: PalettePositions }
   | { type: 'position_update'; roomId: string; paletteId: string; lightId: string; position: number };
 
@@ -130,6 +130,7 @@ export interface RoomState {
   roomId: string;
   activePaletteId: string | null;
   isPlaying: boolean;
+  secondsPerNode: number; // Animation speed (global per room)
 }
 
 // Light positions on a palette track

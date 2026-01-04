@@ -1,6 +1,6 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import type { Palette, PaletteNode, Light } from '@lightbox/shared';
-import { getPointOnPalette, findClosestPointOnTrack } from '@lightbox/shared';
+import { getPointOnPalette, findClosestPointOnTrack, ROOMS } from '@lightbox/shared';
 import { usePalettesStore } from '../stores/palettes';
 import { useLightsStore } from '../stores/lights';
 import { useDebugStore } from '../stores/debug';
@@ -109,6 +109,20 @@ export function PaletteTrack({ palette, size, lightPositions, roomId, isEditing,
   // Can drag nodes if this is a real palette (not editing preview) and roomId is provided
   const canDragNodes = !isEditing && !!roomId;
 
+  // Filter light positions to only include lights in this room
+  const filteredLightPositions = useMemo(() => {
+    if (!roomId) return lightPositions;
+    const room = ROOMS[roomId];
+    if (!room) return lightPositions;
+    // If room has no specific lights (e.g. "all"), show all positions
+    if (room.lightIds.length === 0) return lightPositions;
+    // Filter to only lights in this room
+    const roomLightSet = new Set(room.lightIds);
+    return Object.fromEntries(
+      Object.entries(lightPositions).filter(([lightId]) => roomLightSet.has(lightId))
+    );
+  }, [roomId, lightPositions]);
+
   // Double-click on a node to delete it (if more than 2 nodes)
   const handleNodeDoubleClick = useCallback((e: React.MouseEvent, index: number) => {
     if (!canDragNodes) return;
@@ -144,12 +158,12 @@ export function PaletteTrack({ palette, size, lightPositions, roomId, isEditing,
     updatedNodes[draggingNode] = { x, y };
     const updatedPalette = { ...palette, nodes: updatedNodes };
 
-    for (const [lightId, position] of Object.entries(lightPositions)) {
+    for (const [lightId, position] of Object.entries(filteredLightPositions)) {
       const point = getPointOnPalette(updatedPalette, position);
       const { h, s } = normalizedToHs(point.x, point.y);
       setLightState(lightId, { color: { h, s } }, 50);
     }
-  }, [draggingNode, size, updateNodePosition, palette, lightPositions, setLightState]);
+  }, [draggingNode, size, updateNodePosition, palette, filteredLightPositions, setLightState]);
 
   const handleMouseUp = useCallback(() => {
     if (draggingNode !== null) {
@@ -295,7 +309,7 @@ export function PaletteTrack({ palette, size, lightPositions, roomId, isEditing,
         })}
 
         {/* Light positions on track - styled pins with colors and labels */}
-        {Object.entries(lightPositions).map(([lightId, position]) => {
+        {Object.entries(filteredLightPositions).map(([lightId, position]) => {
           const light = lights.get(lightId);
           if (!light) return null;
 

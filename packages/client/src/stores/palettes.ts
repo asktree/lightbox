@@ -18,7 +18,7 @@ interface PalettesStore {
 
   // Server state sync (called from WebSocket handler)
   syncRoomStates: (states: RoomState[]) => void;
-  updateRoomState: (roomId: string, activePaletteId: string | null, isPlaying: boolean) => void;
+  updateRoomState: (roomId: string, activePaletteId: string | null, isPlaying: boolean, secondsPerNode?: number) => void;
   updatePalettePositions: (roomId: string, paletteId: string, positions: PalettePositions) => void;
   updateLightPosition: (roomId: string, paletteId: string, lightId: string, position: number) => void;
 
@@ -27,6 +27,7 @@ interface PalettesStore {
   deselectPalette: (roomId: string) => Promise<void>;
   playPalette: (roomId: string) => Promise<void>;
   pausePalette: (roomId: string) => Promise<void>;
+  setRoomSpeed: (roomId: string, secondsPerNode: number) => Promise<void>;
   setLightTrackPosition: (roomId: string, lightId: string, position: number) => Promise<void>;
 
   // Editing (for creating new palettes - client-side)
@@ -48,7 +49,7 @@ interface PalettesStore {
   renamePalette: (id: string, name: string) => Promise<void>;
 
   // Helper to get room state
-  getRoomState: (roomId: string) => { activePaletteId: string | null; isPlaying: boolean; positions: PalettePositions };
+  getRoomState: (roomId: string) => { activePaletteId: string | null; isPlaying: boolean; secondsPerNode: number; positions: PalettePositions };
 }
 
 export const usePalettesStore = create<PalettesStore>((set, get) => ({
@@ -73,13 +74,21 @@ export const usePalettesStore = create<PalettesStore>((set, get) => ({
     set({ roomStates });
   },
 
-  updateRoomState: (roomId: string, activePaletteId: string | null, isPlaying: boolean) => {
-    set((s) => ({
-      roomStates: {
-        ...s.roomStates,
-        [roomId]: { roomId, activePaletteId, isPlaying },
-      },
-    }));
+  updateRoomState: (roomId: string, activePaletteId: string | null, isPlaying: boolean, secondsPerNode?: number) => {
+    set((s) => {
+      const existing = s.roomStates[roomId];
+      return {
+        roomStates: {
+          ...s.roomStates,
+          [roomId]: {
+            roomId,
+            activePaletteId,
+            isPlaying,
+            secondsPerNode: secondsPerNode ?? existing?.secondsPerNode ?? 2,
+          },
+        },
+      };
+    });
   },
 
   updatePalettePositions: (roomId: string, paletteId: string, positions: PalettePositions) => {
@@ -122,6 +131,7 @@ export const usePalettesStore = create<PalettesStore>((set, get) => ({
     return {
       activePaletteId: state?.activePaletteId ?? null,
       isPlaying: state?.isPlaying ?? false,
+      secondsPerNode: state?.secondsPerNode ?? 2,
       positions: posData?.positions ?? {},
     };
   },
@@ -144,6 +154,15 @@ export const usePalettesStore = create<PalettesStore>((set, get) => ({
 
   pausePalette: async (roomId: string) => {
     await fetch(`/api/rooms/${roomId}/pause`, { method: 'POST' });
+    // State will be updated via WebSocket
+  },
+
+  setRoomSpeed: async (roomId: string, secondsPerNode: number) => {
+    await fetch(`/api/rooms/${roomId}/speed`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ secondsPerNode }),
+    });
     // State will be updated via WebSocket
   },
 

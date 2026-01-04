@@ -40,5 +40,21 @@ export function createLightsRouter(lightManager: LightManager): Router {
     }
   });
 
+  // Set raw Tuya DPS values (for custom device controls)
+  router.put('/:id/dps', async (req, res) => {
+    try {
+      const { dps } = req.body as { dps: Record<string, any> };
+      if (!dps || typeof dps !== 'object') {
+        res.status(400).json({ error: 'dps object required' });
+        return;
+      }
+
+      await lightManager.setTuyaRawDps(req.params.id, dps);
+      res.json({ success: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
   return router;
 }

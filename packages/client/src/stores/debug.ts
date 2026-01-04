@@ -18,7 +18,7 @@ const MAX_LOGS = 200;
 export const useDebugStore = create<DebugState>((set) => ({
   logs: [],
   diagnostics: new Map(),
-  isOpen: true,
+  isOpen: localStorage.getItem('lightbox:debugOpen') !== 'false',
 
   addLog: (entry) =>
     set((state) => {
@@ -47,7 +47,10 @@ export const useDebugStore = create<DebugState>((set) => ({
       return { diagnostics };
     }),
 
-  setOpen: (open) => set({ isOpen: open }),
+  setOpen: (open) => {
+    localStorage.setItem('lightbox:debugOpen', String(open));
+    return set({ isOpen: open });
+  },
 
   clearLogs: () => set({ logs: [] }),
 }));
