@@ -2,7 +2,9 @@ import { useCallback } from 'react';
 import type { Light, Palette, PaletteNode } from '@lightbox/shared';
 import { usePalettesStore } from '../stores/palettes';
 import { useLightsStore } from '../stores/lights';
+import { useDebugStore } from '../stores/debug';
 import { PaletteWheel } from './PaletteWheel';
+import { DebugPanel } from './DebugPanel';
 
 // Catmull-Rom spline interpolation
 function catmullRom(
@@ -76,6 +78,10 @@ export function LightPane({ light, onClose }: LightPaneProps) {
   const lightPositions = usePalettesStore((s) => s.lightPositions);
   const setLightTrackPosition = usePalettesStore((s) => s.setLightTrackPosition);
   const setLightState = useLightsStore((s) => s.setLightState);
+  const diagnostics = useDebugStore((s) => s.diagnostics);
+
+  // Get diagnostic for this light
+  const diag = diagnostics.get(light.id);
 
   const activePalette = palettes.find((p) => p.id === activePaletteId);
   const lightPosition = lightPositions[light.id] ?? 0;
@@ -101,10 +107,21 @@ export function LightPane({ light, onClose }: LightPaneProps) {
   const brightness = light.state.brightness ?? 100;
 
   return (
-    <div className="fixed top-20 right-4 bg-zinc-900/95 backdrop-blur border border-zinc-700 rounded-lg shadow-xl p-4 min-w-[200px]">
+    <div className="fixed top-20 right-4 bg-zinc-900/95 backdrop-blur border border-zinc-700 rounded-lg shadow-xl p-4 min-w-[240px] max-w-[320px]">
       {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-sm font-medium text-zinc-300">{light.name}</h3>
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <h3 className="text-sm font-medium text-zinc-300">{light.name}</h3>
+          {/* Connection status indicator */}
+          {diag && (
+            <span
+              className={`w-2 h-2 rounded-full ${
+                diag.connected ? 'bg-green-500' : 'bg-red-500'
+              }`}
+              title={diag.connected ? 'Connected' : 'Disconnected'}
+            />
+          )}
+        </div>
         <button
           onClick={onClose}
           className="text-zinc-500 hover:text-white transition-colors"
@@ -113,6 +130,22 @@ export function LightPane({ light, onClose }: LightPaneProps) {
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
           </svg>
         </button>
+      </div>
+
+      {/* Status line */}
+      <div className="flex items-center gap-2 mb-3 text-[10px] text-zinc-500">
+        <span className={`px-1.5 py-0.5 rounded ${
+          light.brand === 'tuya' ? 'bg-purple-900/50 text-purple-300' :
+          light.brand === 'hue' ? 'bg-amber-900/50 text-amber-300' :
+          'bg-zinc-800 text-zinc-400'
+        }`}>
+          {light.brand}
+        </span>
+        {diag && (
+          <span className={diag.connected ? 'text-green-500' : 'text-red-400'}>
+            {diag.connected ? 'connected' : 'disconnected'}
+          </span>
+        )}
       </div>
 
       <div className="flex gap-4 items-start">
@@ -169,6 +202,11 @@ export function LightPane({ light, onClose }: LightPaneProps) {
           />
         )}
       </div>
+
+      {/* Debug log for this light (Tuya only for now) */}
+      {light.brand === 'tuya' && (
+        <DebugPanel filterDevice={light.name} compact />
+      )}
     </div>
   );
 }

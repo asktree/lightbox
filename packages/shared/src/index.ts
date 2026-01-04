@@ -77,11 +77,32 @@ export interface UpdatePaletteRequest {
   secondsPerNode?: number;
 }
 
+// Debug log entry
+export interface DebugLogEntry {
+  id: string;
+  timestamp: number;
+  brand: Brand;
+  device: string;
+  message: string;
+  direction: 'in' | 'out';
+}
+
+// Device diagnostics
+export interface DeviceDiagnostics {
+  id: string;
+  brand: Brand;
+  connected: boolean;
+  reachable: boolean;
+}
+
 // WebSocket message types
 export type WSMessage =
   | { type: 'light_update'; light: Light }
   | { type: 'lights_sync'; lights: Light[] }
-  | { type: 'connection'; status: 'connected' | 'disconnected' };
+  | { type: 'connection'; status: 'connected' | 'disconnected' }
+  | { type: 'debug_log'; entry: DebugLogEntry }
+  | { type: 'debug_log_update'; id: string; message: string }
+  | { type: 'diagnostics_sync'; diagnostics: DeviceDiagnostics[] };
 
 // Driver interface (for server-side implementation)
 export interface LightDriver {

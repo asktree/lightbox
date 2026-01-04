@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useLightsStore } from './stores/lights';
 import { usePalettesStore } from './stores/palettes';
+import { useDebugStore } from './stores/debug';
 import { useWebSocket } from './hooks/useWebSocket';
 import { usePaletteAnimation } from './hooks/usePaletteAnimation';
 import { LightCard } from './components/LightCard';
@@ -8,6 +9,7 @@ import { ColorWheel } from './components/ColorWheel';
 import { PaletteControls } from './components/PaletteControls';
 import { LightPane } from './components/LightPane';
 import { AgentChat } from './components/AgentChat';
+import { DebugPanel } from './components/DebugPanel';
 
 type View = 'grid' | 'wheel';
 
@@ -38,6 +40,9 @@ export default function App() {
   const isEditing = usePalettesStore((s) => s.isEditing);
 
   const activePalette = palettes.find((p) => p.id === activePaletteId);
+
+  const debugOpen = useDebugStore((s) => s.isOpen);
+  const setDebugOpen = useDebugStore((s) => s.setOpen);
 
   const [view, setView] = useState<View>('wheel');
   const [selectedLightIds, setSelectedLightIds] = useState<Set<string>>(new Set());
@@ -136,6 +141,16 @@ export default function App() {
               Wheel
             </button>
           </div>
+
+          {/* Debug toggle */}
+          <button
+            onClick={() => setDebugOpen(!debugOpen)}
+            className={`px-3 py-1 text-sm rounded-md transition-all ${
+              debugOpen ? 'bg-purple-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:text-white'
+            }`}
+          >
+            Debug
+          </button>
 
           {/* Connection status */}
           <div className="flex items-center gap-2">
@@ -292,6 +307,9 @@ export default function App() {
 
       {/* Agent Chat */}
       <AgentChat />
+
+      {/* Debug Panel */}
+      {debugOpen && <DebugPanel />}
     </div>
   );
 }

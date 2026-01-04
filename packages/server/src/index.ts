@@ -2,7 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
-import type { Light, WSMessage } from '@lightbox/shared';
+import type { Light, WSMessage, DebugLogEntry } from '@lightbox/shared';
 import { LightManager } from './lib/light-manager.js';
 import { createLightsRouter } from './routes/lights.js';
 import { createGroupsRouter } from './routes/groups.js';
@@ -47,6 +47,15 @@ lightManager.on('update', (light: Light) => {
   broadcast({ type: 'light_update', light });
 });
 
+// Subscribe to debug logs
+lightManager.on('debug', (entry: DebugLogEntry) => {
+  broadcast({ type: 'debug_log', entry });
+});
+
+lightManager.on('debug_update', ({ id, message }: { id: string; message: string }) => {
+  broadcast({ type: 'debug_log_update', id, message });
+});
+
 // WebSocket connection handling
 wss.on('connection', async (ws) => {
   console.log('Client connected');
@@ -54,6 +63,10 @@ wss.on('connection', async (ws) => {
   // Send current state on connect
   const lights = lightManager.getAllLights();
   ws.send(JSON.stringify({ type: 'lights_sync', lights } satisfies WSMessage));
+
+  // Send diagnostics on connect
+  const diagnostics = lightManager.getDiagnostics();
+  ws.send(JSON.stringify({ type: 'diagnostics_sync', diagnostics } satisfies WSMessage));
 
   ws.on('close', () => {
     console.log('Client disconnected');

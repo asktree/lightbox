@@ -1,10 +1,12 @@
 import { useEffect, useRef } from 'react';
 import type { WSMessage } from '@lightbox/shared';
 import { useLightsStore } from '../stores/lights';
+import { useDebugStore } from '../stores/debug';
 
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const { setConnected, syncLights, updateLight } = useLightsStore();
+  const { addLog, updateLog, syncDiagnostics } = useDebugStore();
 
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -40,6 +42,15 @@ export function useWebSocket() {
           case 'light_update':
             updateLight(msg.light);
             break;
+          case 'debug_log':
+            addLog(msg.entry);
+            break;
+          case 'debug_log_update':
+            updateLog(msg.id, msg.message);
+            break;
+          case 'diagnostics_sync':
+            syncDiagnostics(msg.diagnostics);
+            break;
         }
       };
     }
@@ -49,5 +60,5 @@ export function useWebSocket() {
     return () => {
       wsRef.current?.close();
     };
-  }, [setConnected, syncLights, updateLight]);
+  }, [setConnected, syncLights, updateLight, addLog, updateLog, syncDiagnostics]);
 }

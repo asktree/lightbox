@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events';
-import type { Light, LightState, LightDriver, Group, Palette, PaletteNode } from '@lightbox/shared';
+import type { Light, LightState, LightDriver, Group, Palette, PaletteNode, DebugLogEntry, DeviceDiagnostics } from '@lightbox/shared';
 import { HueDriver } from '../drivers/hue.js';
 import { GoveeDriver } from '../drivers/govee.js';
 import { TuyaDriver } from '../drivers/tuya.js';
@@ -9,6 +9,10 @@ export class LightManager extends EventEmitter {
   private drivers: LightDriver[] = [];
   private lights: Map<string, Light> = new Map();
   private db: Database;
+
+  // Track recently controlled lights to skip polling (prevents race conditions)
+  private recentlyControlled: Map<string, number> = new Map();
+  private readonly CONTROL_COOLDOWN_MS = 3000;
 
   constructor() {
     super();
@@ -30,14 +34,9 @@ export class LightManager extends EventEmitter {
     for (const driver of this.drivers) {
       try {
         await driver.initialize();
-        const discovered = await driver.discover();
-        for (const light of discovered) {
-          this.lights.set(light.id, light);
-        }
-        console.log(`${driver.brand}: discovered ${discovered.length} lights`);
 
-        // Set up real-time update callback if driver supports it
-        if (driver.startListening) {
+        // Set up real-time update callback BEFORE discover (Tuya connects during discover)
+        if ('onUpdate' in driver) {
           driver.onUpdate = (deviceId: string, state: LightState) => {
             const lightId = `${driver.brand}:${deviceId}`;
             const light = this.lights.get(lightId);
@@ -46,6 +45,36 @@ export class LightManager extends EventEmitter {
               this.emit('update', light);
             }
           };
+        }
+
+        // Set up debug callbacks for drivers that support it (Tuya)
+        if ('onDebug' in driver) {
+          (driver as any).onDebug = (id: string, deviceName: string, message: string, direction: 'in' | 'out') => {
+            const entry: DebugLogEntry = {
+              id,
+              timestamp: Date.now(),
+              brand: driver.brand,
+              device: deviceName,
+              message,
+              direction,
+            };
+            this.emit('debug', entry);
+          };
+        }
+        if ('onDebugUpdate' in driver) {
+          (driver as any).onDebugUpdate = (id: string, message: string) => {
+            this.emit('debug_update', { id, message });
+          };
+        }
+
+        const discovered = await driver.discover();
+        for (const light of discovered) {
+          this.lights.set(light.id, light);
+        }
+        console.log(`${driver.brand}: discovered ${discovered.length} lights`);
+
+        // Start listening for drivers that need explicit listener setup (Hue EventStream)
+        if (driver.startListening) {
           await driver.startListening();
         }
       } catch (err) {
@@ -58,11 +87,21 @@ export class LightManager extends EventEmitter {
   }
 
   private startPolling(): void {
-    // Poll every second for state changes
+    // Poll every 2 seconds for state changes (backup for drivers with real-time updates)
     setInterval(async () => {
+      const now = Date.now();
+
       for (const [id, light] of this.lights) {
+        // Skip recently controlled lights to prevent race conditions
+        const lastControlled = this.recentlyControlled.get(id);
+        if (lastControlled && now - lastControlled < this.CONTROL_COOLDOWN_MS) {
+          continue;
+        }
+
+        // Skip drivers with real-time updates (Hue has EventStream, Tuya has persistent connections)
         const driver = this.getDriverForLight(light);
         if (!driver) continue;
+        if ('onUpdate' in driver && driver.onUpdate) continue;
 
         try {
           const state = await driver.getState(this.getDeviceId(id));
@@ -78,7 +117,7 @@ export class LightManager extends EventEmitter {
           }
         }
       }
-    }, 1000);
+    }, 2000);
   }
 
   private hasStateChanged(a: LightState, b: LightState): boolean {
@@ -102,12 +141,48 @@ export class LightManager extends EventEmitter {
     return this.lights.get(id);
   }
 
+  getDiagnostics(): DeviceDiagnostics[] {
+    const diagnostics: DeviceDiagnostics[] = [];
+
+    for (const driver of this.drivers) {
+      // Tuya driver has getDiagnostics
+      if ('getDiagnostics' in driver && typeof (driver as any).getDiagnostics === 'function') {
+        const driverDiags = (driver as any).getDiagnostics();
+        for (const [id, diag] of Object.entries(driverDiags)) {
+          diagnostics.push({
+            id,
+            brand: driver.brand,
+            connected: (diag as any).connected,
+            reachable: (diag as any).reachable,
+          });
+        }
+      } else {
+        // For other drivers, derive from light state
+        for (const [id, light] of this.lights) {
+          if (light.brand === driver.brand) {
+            diagnostics.push({
+              id,
+              brand: driver.brand,
+              connected: light.reachable,
+              reachable: light.reachable,
+            });
+          }
+        }
+      }
+    }
+
+    return diagnostics;
+  }
+
   async setLightState(id: string, state: Partial<LightState>, transition?: number): Promise<void> {
     const light = this.lights.get(id);
     if (!light) throw new Error(`Light not found: ${id}`);
 
     const driver = this.getDriverForLight(light);
     if (!driver) throw new Error(`No driver for light: ${id}`);
+
+    // Mark as recently controlled to skip polling (prevents race conditions)
+    this.recentlyControlled.set(id, Date.now());
 
     await driver.setState(this.getDeviceId(id), state, transition);
 
