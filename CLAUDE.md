@@ -91,25 +91,46 @@ SQLite database at `packages/server/data/lightbox.db`
 ## Future Work
 
 - [x] **Tuya integration** - Local control via tinytuya
-- [ ] **Scene light selection** - In grid view, ability to include/exclude lights from scene. Excluded lights go to bottom of grid, faded out, ignored in wheel/animation views
+- [ ] **Snapshots** - Quick save of current light positions from wheel view (next priority)
+- [ ] **Automations** - Time-based triggers with snapshot/palette actions
+- [ ] **Color accuracy** - Switch to xy color space with gamut handling per bulb type
 - [ ] **Audio reactive** - Sync to Sonos playback
-- [ ] **Schedules** - Timer & automation
 - [ ] **Agent chat** - Claude-powered assistant for natural language light control
 
-## Scene System
+## Snapshots
 
-Scenes save light states + optional animation tracks:
-- **SceneTrack**: Bezier path on color wheel, lights animate along it
-- **Tension slider**: 0 = straight lines, 1 = smooth Catmull-Rom curves
-- **Speed slider**: Log scale, seconds per track node
-- Stores: `packages/server/data/lightbox.db` (scenes table)
-- Client: `packages/client/src/stores/scenes.ts`
+Quick mood-boarding feature for saving light states:
+- One-click save from wheel view
+- Shows as list on left side with color swatches (no names required, but optional)
+- Easy delete
+- Cannot be edited - just delete and remake
+- Clicking a snapshot applies it instantly
 
-## Scene Builder Concept
+## Automations
 
-The scene builder will have:
-1. Color wheel with draggable light pins (like Hue)
-2. Bezier track drawing - click to add nodes, drag to move, double-click to delete
-3. Wheel rotation - spin the wheel to shift all colors while keeping relative positions
-4. Gradient mode - set start/end colors, lights distribute automatically
-5. Generative patterns - "warm sunset", "ocean", "forest" presets
+Time/event-based light control:
+- Each automation step can reference a **snapshot** or **palette**
+- **Snapshots are COPIED** into the automation - deleting the snapshot won't break it
+- **Palettes are REFERENCED** - deleting palette breaks the automation
+- Triggers: time of day, sunrise/sunset, manual
+
+## Palettes
+
+Animated color paths on the wheel:
+- Catmull-Rom spline through nodes on color wheel
+- **Tension slider**: 0 = straight lines, 1 = smooth curves
+- **Speed slider**: seconds per node
+- Lights animate along the path
+- Double-click wheel to add node, double-click node to delete
+- Stored in SQLite: `packages/server/data/lightbox.db`
+
+## Color Accuracy Notes
+
+Current: Using Hue's proprietary hs scale (Red=0, Green=25500, Blue=46920)
+- Not standard HSV - requires piecewise conversion
+- Color/temperature are mutually exclusive modes
+
+Future improvement: Use CIE xy color space with per-bulb gamut handling
+- Different Hue bulbs have Gamut A, B, or C (different color triangles)
+- Colors outside gamut get clipped to nearest point
+- More accurate but more complex
