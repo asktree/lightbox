@@ -42,27 +42,14 @@ function sendThrottled(id: string, state: Partial<LightState>, transition?: numb
   }
 }
 
-// Check if two states are close enough (bridge caught up)
-function statesMatch(a: LightState, b: LightState, tolerance = 5): boolean {
-  if (a.on !== b.on) return false;
-  if (a.brightness !== undefined && b.brightness !== undefined) {
-    if (Math.abs(a.brightness - b.brightness) > tolerance) return false;
-  }
-  if (a.color && b.color) {
-    if (Math.abs(a.color.h - b.color.h) > tolerance) return false;
-    if (Math.abs(a.color.s - b.color.s) > tolerance) return false;
-  }
-  return true;
-}
-
 interface LightsStore {
   lights: Map<string, Light>;
   connected: boolean;
 
   // Track lights being actively controlled (don't update from WS while dragging)
   controlledLights: Set<string>;
-  // Track lights that were just released (waiting for bridge to catch up)
-  releasedLights: Map<string, LightState>; // id -> target state when released
+  // Track when lights were released (ignore bridge updates for 1s after release)
+  releasedAt: Map<string, number>; // id -> timestamp
   // Bridge-reported state (for phantom UI) - shows real state while user drags
   bridgeStates: Map<string, LightState>;
 
@@ -81,7 +68,7 @@ export const useLightsStore = create<LightsStore>((set, get) => ({
   lights: new Map(),
   connected: false,
   controlledLights: new Set(),
-  releasedLights: new Map(),
+  releasedAt: new Map(),
   bridgeStates: new Map(),
 
   setConnected: (connected) => set({ connected }),
@@ -95,43 +82,33 @@ export const useLightsStore = create<LightsStore>((set, get) => ({
   },
 
   updateLight: (light) => {
-    const { controlledLights, releasedLights, bridgeStates } = get();
+    const { controlledLights, releasedAt, bridgeStates } = get();
 
-    // If actively being dragged, just update bridge state for phantom
+    // Always update bridge state (for phantom pin during drag)
+    const newBridgeStates = new Map(bridgeStates);
+    newBridgeStates.set(light.id, light.state);
+
+    // If actively being dragged, only update bridge state
     if (controlledLights.has(light.id)) {
-      const newBridgeStates = new Map(bridgeStates);
-      newBridgeStates.set(light.id, light.state);
       set({ bridgeStates: newBridgeStates });
       return;
     }
 
-    // If recently released, check if bridge caught up to our target
-    const targetState = releasedLights.get(light.id);
-    if (targetState) {
-      // Update phantom to show progress
-      const newBridgeStates = new Map(bridgeStates);
-      newBridgeStates.set(light.id, light.state);
-
-      if (statesMatch(light.state, targetState)) {
-        // Bridge caught up! Clear released state and update normally
-        const newReleasedLights = new Map(releasedLights);
-        newReleasedLights.delete(light.id);
-        newBridgeStates.delete(light.id);
-
-        const lights = new Map(get().lights);
-        lights.set(light.id, light);
-        set({ lights, releasedLights: newReleasedLights, bridgeStates: newBridgeStates });
-      } else {
-        // Still waiting for bridge to catch up
-        set({ bridgeStates: newBridgeStates });
-      }
+    // If recently released (within 1s), keep optimistic position
+    const releaseTime = releasedAt.get(light.id);
+    if (releaseTime && Date.now() - releaseTime < 1000) {
+      set({ bridgeStates: newBridgeStates });
       return;
     }
 
-    // Normal update
+    // Otherwise, update to bridge state
+    const newReleasedAt = new Map(releasedAt);
+    newReleasedAt.delete(light.id);
+    newBridgeStates.delete(light.id);
+
     const lights = new Map(get().lights);
     lights.set(light.id, light);
-    set({ lights });
+    set({ lights, releasedAt: newReleasedAt, bridgeStates: newBridgeStates });
   },
 
   setLightState: (id, state, transition) => {
@@ -163,36 +140,21 @@ export const useLightsStore = create<LightsStore>((set, get) => ({
     const controlledLights = new Set(get().controlledLights);
     controlledLights.add(id);
 
-    // Clear any pending released state
-    const releasedLights = new Map(get().releasedLights);
-    releasedLights.delete(id);
+    // Clear any pending release timer
+    const releasedAt = new Map(get().releasedAt);
+    releasedAt.delete(id);
 
-    set({ controlledLights, releasedLights });
+    set({ controlledLights, releasedAt });
   },
 
   stopControlling: (id) => {
     const controlledLights = new Set(get().controlledLights);
     controlledLights.delete(id);
 
-    // Remember the target state so we can wait for bridge to catch up
-    const currentLight = get().lights.get(id);
-    const releasedLights = new Map(get().releasedLights);
-    if (currentLight) {
-      releasedLights.set(id, currentLight.state);
-    }
+    // Record release time - updates will be ignored for 1s
+    const releasedAt = new Map(get().releasedAt);
+    releasedAt.set(id, Date.now());
 
-    set({ controlledLights, releasedLights });
-
-    // Safety timeout: if bridge hasn't caught up in 2s, give up waiting
-    setTimeout(() => {
-      const { releasedLights, bridgeStates } = get();
-      if (releasedLights.has(id)) {
-        const newReleasedLights = new Map(releasedLights);
-        newReleasedLights.delete(id);
-        const newBridgeStates = new Map(bridgeStates);
-        newBridgeStates.delete(id);
-        set({ releasedLights: newReleasedLights, bridgeStates: newBridgeStates });
-      }
-    }, 2000);
+    set({ controlledLights, releasedAt });
   },
 }));

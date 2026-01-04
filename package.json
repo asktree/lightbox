@@ -7,7 +7,9 @@
     "build": "pnpm -r build",
     "server": "pnpm --filter @lightbox/server dev",
     "client": "pnpm --filter @lightbox/client dev",
-    "mcp": "pnpm --filter @lightbox/mcp dev"
+    "mcp": "pnpm --filter @lightbox/mcp dev",
+    "kill": "pkill -f 'tsx watch src/index' || pkill -f 'vite' || true",
+    "restart": "pnpm kill && sleep 1 && pnpm dev"
   },
   "devDependencies": {
     "typescript": "^5.3.3"

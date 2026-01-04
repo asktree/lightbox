@@ -309,7 +309,11 @@ export default function App() {
       <AgentChat />
 
       {/* Debug Panel */}
-      {debugOpen && <DebugPanel />}
+      {debugOpen && (
+        <DebugPanel
+          filterDevices={roomConfig.lightIds.length > 0 ? lightsList.map((l) => l.name) : undefined}
+        />
+      )}
     </div>
   );
 }

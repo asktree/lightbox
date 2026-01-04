@@ -3,3 +3,14 @@ dist/
 *.log
 .DS_Store
 packages/server/data/
+
+# Secrets and credentials
+.env
+*.env
+packages/server/.env
+
+# Tuya device keys (contain local keys)
+tinytuya.json
+tuya-raw.json
+snapshot.json
+tuya_devices.json

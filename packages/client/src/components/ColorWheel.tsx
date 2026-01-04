@@ -1,4 +1,5 @@
 import { useRef, useEffect, useState, useCallback } from 'react';
+import { motion } from 'framer-motion';
 import type { Light } from '@lightbox/shared';
 import { useLightsStore } from '../stores/lights';
 import { usePalettesStore } from '../stores/palettes';
@@ -330,19 +331,24 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect 
                 transition: isDragging ? 'none' : 'left 0.15s, top 0.15s',
               }}
             >
-              <div
-                className="w-full h-full rounded-full border-4 border-white shadow-lg"
+              <motion.div
+                className="w-full h-full rounded-full border-white"
+                animate={{ borderWidth: selectedLightId === light.id ? 5 : 3 }}
+                transition={{ type: 'spring', stiffness: 300, damping: 20 }}
                 style={{
                   backgroundColor: pinColor,
-                  boxShadow: isDragging
-                    ? `0 0 20px ${pinColor}, 0 4px 12px rgba(0,0,0,0.4)`
-                    : `0 2px 8px rgba(0,0,0,0.3)`,
+                  boxShadow: `0 2px 8px rgba(0,0,0,0.3)`,
                 }}
               />
-              {/* Label */}
-              <div className="absolute -bottom-6 left-1/2 -translate-x-1/2 text-xs text-white bg-black/70 px-2 py-0.5 rounded opacity-0 hover:opacity-100 whitespace-nowrap pointer-events-none">
-                {light.name}
-              </div>
+              {/* Label - hidden while dragging, higher z-index */}
+              {!isDragging && (
+                <div
+                  className="absolute -top-5 left-1/2 -translate-x-1/2 text-[10px] text-white whitespace-nowrap pointer-events-none z-30"
+                  style={{ textShadow: '0 1px 2px rgba(0,0,0,0.5), 0 0 6px rgba(0,0,0,0.3)' }}
+                >
+                  {light.name}
+                </div>
+              )}
             </div>
           </div>
         );

@@ -6,22 +6,41 @@ Unified smart light control with React UI, Node.js backend, and MCP server.
 
 ```bash
 pnpm install
-pnpm dev        # Run all packages in dev mode
+pnpm dev        # Run all packages in dev mode (user runs this in terminal)
 pnpm server     # Run server only
 pnpm client     # Run client only
 pnpm build      # Build all packages
-```
-
-To build a single package:
-```bash
-cd packages/client && pnpm build
-cd packages/server && pnpm build
-# Or use filter: pnpm --filter @lightbox/client build
+pnpm kill       # Kill all dev processes
+pnpm restart    # Kill and restart dev
 ```
 
 Server: http://localhost:3001
-Client: http://localhost:5173 (when implemented)
+Client: http://localhost:5173
 WebSocket: ws://localhost:3001/ws
+
+## Dev Server Management (for Claude)
+
+Claude runs `pnpm dev` in a background task. This starts 3 watch processes:
+- `tsx watch` for server (auto-restarts on .ts changes)
+- `vite` for client (HMR on file changes)
+- `tsc --watch` for shared types
+
+**Code changes**: Automatic - just edit files, watch mode handles restart.
+
+**Config/data changes** (e.g., `tuya-devices.json`): Need server restart.
+
+**To restart the server**, ALWAYS kill first to avoid port conflicts:
+```bash
+pnpm kill && sleep 1 && pnpm dev
+```
+
+The dev server output is written to a task output file - read it to monitor logs.
+
+To build a single package:
+```bash
+pnpm --filter @lightbox/client build
+pnpm --filter @lightbox/server build
+```
 
 ## Architecture
 
