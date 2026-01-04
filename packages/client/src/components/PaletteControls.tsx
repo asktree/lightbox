@@ -31,9 +31,16 @@ export function PaletteControls({ lightIds }: PaletteControlsProps) {
     fetchPalettes();
   }, [fetchPalettes]);
 
-  // Log scale for speed: 0.5s to 30s
-  const speedToSlider = (s: number) => Math.log(s / 0.5) / Math.log(60);
-  const sliderToSpeed = (v: number) => 0.5 * Math.pow(60, v);
+  // Log scale for speed: 0.5s to 1800s (30 minutes)
+  const speedToSlider = (s: number) => Math.log(s / 0.5) / Math.log(3600);
+  const sliderToSpeed = (v: number) => 0.5 * Math.pow(3600, v);
+
+  // Format speed for display
+  const formatSpeed = (seconds: number) => {
+    if (seconds < 60) return `${seconds.toFixed(1)}s`;
+    if (seconds < 3600) return `${(seconds / 60).toFixed(1)}m`;
+    return `${(seconds / 3600).toFixed(1)}h`;
+  };
 
   const handlePaletteClick = (id: string) => {
     if (id === activePaletteId) {
@@ -44,12 +51,15 @@ export function PaletteControls({ lightIds }: PaletteControlsProps) {
         playPalette(lightIds);
       }
     } else {
-      // Select and auto-play
+      // Switching to different palette
+      const wasAnimating = isAnimating;
       selectPalette(id);
-      // Need to wait for state to update before playing
-      setTimeout(() => {
-        usePalettesStore.getState().playPalette(lightIds);
-      }, 0);
+      // Only auto-play if we were already playing
+      if (wasAnimating) {
+        setTimeout(() => {
+          usePalettesStore.getState().playPalette(lightIds);
+        }, 0);
+      }
     }
   };
 
@@ -61,7 +71,8 @@ export function PaletteControls({ lightIds }: PaletteControlsProps) {
   };
 
   return (
-    <div className="fixed bottom-4 right-4 bg-zinc-900/95 backdrop-blur border border-zinc-700 rounded-lg shadow-xl p-4 min-w-[280px]">
+    <div className="fixed bottom-4 right-4 bg-zinc-900/95 backdrop-blur border border-zinc-700 rounded-lg shadow-xl p-4 min-w-[280px] max-w-[320px]">
+
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-medium text-zinc-300">Palettes</h3>
         {isAnimating && (
@@ -180,7 +191,7 @@ export function PaletteControls({ lightIds }: PaletteControlsProps) {
               {/* Speed slider */}
               <div>
                 <label className="text-xs text-zinc-400 mb-1 block">
-                  Speed: {activePalette.secondsPerNode.toFixed(1)}s/node
+                  Speed: {formatSpeed(activePalette.secondsPerNode)}/node
                 </label>
                 <input
                   type="range"

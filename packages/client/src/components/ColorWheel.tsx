@@ -7,6 +7,8 @@ import { PaletteTrack } from './PaletteTrack';
 interface Props {
   lights: Light[];
   size?: number;
+  selectedLightId?: string | null;
+  onLightSelect?: (lightId: string | null) => void;
 }
 
 function hsvToHex(h: number, s: number, v: number = 100): string {
@@ -34,7 +36,7 @@ function hsvToHex(h: number, s: number, v: number = 100): string {
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 }
 
-export function ColorWheel({ lights, size = 300 }: Props) {
+export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [dragging, setDragging] = useState<string | null>(null);
@@ -56,41 +58,79 @@ export function ColorWheel({ lights, size = 300 }: Props) {
   const radius = size / 2;
   const pinRadius = 16;
 
-  // Draw the color wheel
+  // Draw color wheel pixel-by-pixel for perfectly smooth gradients
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
     const ctx = canvas.getContext('2d')!;
+    const imageData = ctx.createImageData(size, size);
+    const data = imageData.data;
     const centerX = radius;
     const centerY = radius;
 
-    ctx.clearRect(0, 0, size, size);
+    // HSV to RGB conversion (inline for performance)
+    const hsvToRgb = (h: number, s: number, v: number): [number, number, number] => {
+      h = h / 360;
+      s = s / 100;
+      v = v / 100;
 
-    for (let angle = 0; angle < 360; angle++) {
-      for (let r = 0; r < radius; r++) {
-        const saturation = (r / radius) * 100;
-        const color = hsvToHex(angle, saturation);
+      const i = Math.floor(h * 6);
+      const f = h * 6 - i;
+      const p = v * (1 - s);
+      const q = v * (1 - f * s);
+      const t = v * (1 - (1 - f) * s);
 
-        ctx.fillStyle = color;
-        ctx.beginPath();
-        ctx.arc(
-          centerX + r * Math.cos((angle - 90) * Math.PI / 180),
-          centerY + r * Math.sin((angle - 90) * Math.PI / 180),
-          2,
-          0,
-          Math.PI * 2
-        );
-        ctx.fill();
+      let r = 0, g = 0, b = 0;
+      switch (i % 6) {
+        case 0: r = v; g = t; b = p; break;
+        case 1: r = q; g = v; b = p; break;
+        case 2: r = p; g = v; b = t; break;
+        case 3: r = p; g = q; b = v; break;
+        case 4: r = t; g = p; b = v; break;
+        case 5: r = v; g = p; b = q; break;
+      }
+      return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+    };
+
+    // Iterate over every pixel
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const dx = x - centerX;
+        const dy = y - centerY;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+
+        const idx = (y * size + x) * 4;
+
+        if (distance <= radius) {
+          // Calculate hue from angle (0° at top, clockwise)
+          let angle = Math.atan2(dy, dx) * 180 / Math.PI + 90;
+          if (angle < 0) angle += 360;
+
+          // Saturation from distance (0 at center, 100 at edge)
+          const saturation = (distance / radius) * 100;
+
+          const [r, g, b] = hsvToRgb(angle, saturation, 100);
+          data[idx] = r;
+          data[idx + 1] = g;
+          data[idx + 2] = b;
+          data[idx + 3] = 255;
+        } else {
+          // Outside circle - transparent
+          data[idx + 3] = 0;
+        }
       }
     }
 
-    const gradient = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, radius * 0.15);
-    gradient.addColorStop(0, 'rgba(255,255,255,0.8)');
+    ctx.putImageData(imageData, 0, 0);
+
+    // Soft white center overlay
+    const gradient = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, radius * 0.12);
+    gradient.addColorStop(0, 'rgba(255,255,255,0.7)');
     gradient.addColorStop(1, 'rgba(255,255,255,0)');
     ctx.fillStyle = gradient;
     ctx.beginPath();
-    ctx.arc(centerX, centerY, radius * 0.15, 0, Math.PI * 2);
+    ctx.arc(centerX, centerY, radius * 0.12, 0, Math.PI * 2);
     ctx.fill();
   }, [size, radius]);
 
@@ -129,7 +169,7 @@ export function ColorWheel({ lights, size = 300 }: Props) {
     addNode(x, y);
   }, [isEditing, size, addNode]);
 
-  // Handle drag
+  // Handle drag (only used when no palette is active)
   const handleMouseMove = useCallback((e: React.MouseEvent | MouseEvent) => {
     if (!dragging || !containerRef.current) return;
 
@@ -138,7 +178,7 @@ export function ColorWheel({ lights, size = 300 }: Props) {
     const y = e.clientY - rect.top;
 
     const { h, s } = positionToHs(x, y);
-    setLightState(dragging, { color: { h: Math.round(h), s: Math.round(s) } });
+    setLightState(dragging, { color: { h: Math.round(h), s: Math.round(s) } }, 50);
   }, [dragging, positionToHs, setLightState]);
 
   const handleMouseUp = useCallback(() => {
@@ -165,10 +205,21 @@ export function ColorWheel({ lights, size = 300 }: Props) {
     }
   }, [dragging, handleMouseMove, handleMouseUp]);
 
+  // Handle clicking on a light on the palette track
+  const handleLightClick = useCallback((lightId: string) => {
+    if (onLightSelect) {
+      // Toggle: if already selected, deselect
+      onLightSelect(selectedLightId === lightId ? null : lightId);
+    }
+  }, [onLightSelect, selectedLightId]);
+
   // Filter to only color-capable, on lights
   const colorLights = lights.filter(
     (l) => l.capabilities.includes('color') && l.state.on && l.reachable
   );
+
+  // When palette is active, don't show individual light pins (they're on the track)
+  const showLightPins = !activePalette;
 
   return (
     <div
@@ -191,6 +242,7 @@ export function ColorWheel({ lights, size = 300 }: Props) {
           palette={activePalette}
           size={size}
           lightPositions={lightPositions}
+          onLightClick={handleLightClick}
         />
       )}
 
@@ -210,8 +262,8 @@ export function ColorWheel({ lights, size = 300 }: Props) {
         />
       )}
 
-      {/* Light pins */}
-      {colorLights.map((light) => {
+      {/* Light pins - only when no palette is active */}
+      {showLightPins && colorLights.map((light) => {
         const color = light.state.color ?? { h: 0, s: 0 };
         const pos = hsToPosition(color.h, color.s);
         const pinColor = hsvToHex(color.h, color.s);
@@ -247,6 +299,10 @@ export function ColorWheel({ lights, size = 300 }: Props) {
                 e.preventDefault();
                 e.stopPropagation();
                 handleMouseDown(light.id);
+                // Also select the light to open the pane
+                if (onLightSelect) {
+                  onLightSelect(light.id);
+                }
               }}
               className={`absolute flex items-center justify-center cursor-grab active:cursor-grabbing ${
                 isDragging ? 'z-20' : 'z-10'
@@ -277,7 +333,7 @@ export function ColorWheel({ lights, size = 300 }: Props) {
         );
       })}
 
-      {colorLights.length === 0 && !isEditing && (
+      {colorLights.length === 0 && !isEditing && !activePalette && (
         <div className="absolute inset-0 flex items-center justify-center text-zinc-500 text-sm pointer-events-none">
           No color lights on
         </div>

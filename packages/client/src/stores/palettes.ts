@@ -40,6 +40,9 @@ interface PalettesStore {
 
   // Sync positions from animation ref to store (for UI display)
   syncPositions: (positions: Record<string, number>) => void;
+
+  // Edit a single light's position on the track
+  setLightTrackPosition: (lightId: string, position: number) => void;
 }
 
 export const usePalettesStore = create<PalettesStore>((set, get) => ({
@@ -211,6 +214,12 @@ export const usePalettesStore = create<PalettesStore>((set, get) => ({
 
   syncPositions: (positions: Record<string, number>) => {
     set({ lightPositions: { ...positions } });
+  },
+
+  setLightTrackPosition: (lightId: string, position: number) => {
+    set((s) => ({
+      lightPositions: { ...s.lightPositions, [lightId]: position },
+    }));
   },
 
   updateNodePosition: (nodeIndex: number, x: number, y: number) => {

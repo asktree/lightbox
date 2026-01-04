@@ -1,12 +1,14 @@
 import { useState, useCallback, useEffect } from 'react';
 import type { Palette, PaletteNode } from '@lightbox/shared';
 import { usePalettesStore } from '../stores/palettes';
+import { useLightsStore } from '../stores/lights';
 
 interface Props {
   palette: Palette;
   size: number;
   lightPositions: Record<string, number>;
   isEditing?: boolean;
+  onLightClick?: (lightId: string) => void;
 }
 
 // Catmull-Rom spline interpolation with tension
@@ -65,6 +67,18 @@ function getPointOnPalette(palette: Palette, t: number): PaletteNode {
   return catmullRom(p0, p1, p2, p3, localT, palette.tension);
 }
 
+// Convert normalized x,y (0-1, center at 0.5) to H/S
+function normalizedToHs(x: number, y: number): { h: number; s: number } {
+  const dx = x - 0.5;
+  const dy = y - 0.5;
+  const distance = Math.sqrt(dx * dx + dy * dy);
+  const angle = Math.atan2(dy, dx) * 180 / Math.PI + 90;
+  return {
+    h: Math.round(((angle % 360) + 360) % 360),
+    s: Math.round(Math.min(100, distance * 2 * 100)),
+  };
+}
+
 // Convert normalized (0-1) coords to canvas coords
 function toCanvasCoords(node: PaletteNode, size: number): { x: number; y: number } {
   return {
@@ -90,13 +104,14 @@ function generateTrackPath(palette: Palette, size: number): string {
   return points.join(' ') + ' Z';
 }
 
-export function PaletteTrack({ palette, size, lightPositions, isEditing }: Props) {
+export function PaletteTrack({ palette, size, lightPositions, isEditing, onLightClick }: Props) {
   const [draggingNode, setDraggingNode] = useState<number | null>(null);
   const updateNodePosition = usePalettesStore((s) => s.updateNodePosition);
   const saveNodePositions = usePalettesStore((s) => s.saveNodePositions);
   const activePaletteId = usePalettesStore((s) => s.activePaletteId);
+  const setLightState = useLightsStore((s) => s.setLightState);
 
-  const nodeRadius = 8;
+  const nodeRadius = 14;
   const pathD = generateTrackPath(palette, size);
   const strokeColor = isEditing ? 'rgba(251, 191, 36, 0.7)' : 'rgba(168, 85, 247, 0.7)';
   const nodeColor = isEditing ? '#fbbf24' : '#a855f7';
@@ -123,7 +138,19 @@ export function PaletteTrack({ palette, size, lightPositions, isEditing }: Props
     const y = Math.max(0, Math.min(1, (e.clientY - rect.top) / size));
 
     updateNodePosition(draggingNode, x, y);
-  }, [draggingNode, size, updateNodePosition]);
+
+    // Update all lights to reflect new track shape
+    // Create a temporary palette with the updated node position
+    const updatedNodes = [...palette.nodes];
+    updatedNodes[draggingNode] = { x, y };
+    const updatedPalette = { ...palette, nodes: updatedNodes };
+
+    for (const [lightId, position] of Object.entries(lightPositions)) {
+      const point = getPointOnPalette(updatedPalette, position);
+      const { h, s } = normalizedToHs(point.x, point.y);
+      setLightState(lightId, { color: { h, s } }, 50);
+    }
+  }, [draggingNode, size, updateNodePosition, palette, lightPositions, setLightState]);
 
   const handleMouseUp = useCallback(() => {
     if (draggingNode !== null) {
@@ -219,16 +246,35 @@ export function PaletteTrack({ palette, size, lightPositions, isEditing }: Props
           const point = getPointOnPalette(palette, position);
           const { x, y } = toCanvasCoords(point, size);
           return (
-            <circle
+            <g
               key={lightId}
-              cx={x}
-              cy={y}
-              r={6}
-              fill="rgba(255, 255, 255, 0.9)"
-              stroke="rgba(255, 255, 255, 0.5)"
-              strokeWidth="2"
-              style={{ pointerEvents: 'none' }}
-            />
+              style={{ cursor: onLightClick ? 'pointer' : 'default' }}
+              onClick={(e) => {
+                if (onLightClick) {
+                  e.stopPropagation();
+                  onLightClick(lightId);
+                }
+              }}
+            >
+              {/* Larger hit area */}
+              <circle
+                cx={x}
+                cy={y}
+                r={12}
+                fill="transparent"
+                style={{ pointerEvents: onLightClick ? 'auto' : 'none' }}
+              />
+              {/* Visible circle */}
+              <circle
+                cx={x}
+                cy={y}
+                r={6}
+                fill="rgba(255, 255, 255, 0.9)"
+                stroke="rgba(255, 255, 255, 0.5)"
+                strokeWidth="2"
+                style={{ pointerEvents: 'none' }}
+              />
+            </g>
           );
         })}
       </svg>

@@ -6,6 +6,7 @@ import { usePaletteAnimation } from './hooks/usePaletteAnimation';
 import { LightCard } from './components/LightCard';
 import { ColorWheel } from './components/ColorWheel';
 import { PaletteControls } from './components/PaletteControls';
+import { LightPane } from './components/LightPane';
 import { AgentChat } from './components/AgentChat';
 
 type View = 'grid' | 'wheel';
@@ -38,9 +39,10 @@ export default function App() {
 
   const activePalette = palettes.find((p) => p.id === activePaletteId);
 
-  const [view, setView] = useState<View>('grid');
+  const [view, setView] = useState<View>('wheel');
   const [selectedLightIds, setSelectedLightIds] = useState<Set<string>>(new Set());
   const [currentRoom, setCurrentRoom] = useState<string>('bedroom');
+  const [selectedTrackLight, setSelectedTrackLight] = useState<string | null>(null);
 
   const allLights = Array.from(lights.values());
 
@@ -72,6 +74,9 @@ export default function App() {
   const roomLightIds = roomConfig.lightIds.length > 0
     ? roomConfig.lightIds
     : allLights.map(l => l.id);
+
+  // Get selected light for LightPane
+  const selectedLight = selectedTrackLight ? lights.get(selectedTrackLight) : null;
 
   return (
     <div
@@ -202,61 +207,84 @@ export default function App() {
 
       {/* Color Wheel View */}
       {view === 'wheel' && (
-        <div className="flex flex-col lg:flex-row gap-8">
-          {/* Wheel */}
-          <div className="flex-shrink-0 flex justify-center">
-            <ColorWheel lights={wheelLights} size={350} />
+        <div className="flex flex-col items-center gap-6">
+          {/* Wheel - up to 2/3 viewport width */}
+          <div className="flex-shrink-0">
+            <ColorWheel
+              lights={wheelLights}
+              size={Math.min(600, Math.floor(window.innerWidth * 0.65))}
+              selectedLightId={selectedTrackLight}
+              onLightSelect={setSelectedTrackLight}
+            />
           </div>
 
-          {/* Light filter */}
-          <div className="flex-1">
-            <h2 className="text-sm text-zinc-400 mb-3">
-              {selectedLightIds.size === 0
-                ? 'Showing all color lights (click to filter)'
-                : `Showing ${selectedLightIds.size} selected`}
-            </h2>
-            <div className="flex flex-wrap gap-2">
-              {colorLights.map((light) => {
-                const isSelected = selectedLightIds.has(light.id);
-                const color = light.state.color;
-                const bgColor = color
-                  ? `hsl(${color.h}, ${color.s}%, 50%)`
-                  : '#888';
 
-                return (
-                  <button
-                    key={light.id}
-                    onClick={() => toggleLightSelection(light.id)}
-                    className={`px-3 py-1.5 rounded-full text-sm font-medium transition-all flex items-center gap-2 ${
-                      isSelected || selectedLightIds.size === 0
-                        ? 'bg-zinc-700 text-white'
-                        : 'bg-zinc-800 text-zinc-500'
-                    }`}
-                  >
-                    <div
-                      className="w-3 h-3 rounded-full"
-                      style={{ backgroundColor: light.state.on ? bgColor : '#444' }}
-                    />
-                    {light.name}
-                  </button>
-                );
-              })}
+          {/* Light filter - only when no palette active */}
+          {!activePalette && (
+            <div className="w-full max-w-lg">
+              <h2 className="text-sm text-zinc-400 mb-3 text-center">
+                {selectedLightIds.size === 0
+                  ? 'Showing all color lights (click to filter)'
+                  : `Showing ${selectedLightIds.size} selected`}
+              </h2>
+              <div className="flex flex-wrap justify-center gap-2">
+                {colorLights.map((light) => {
+                  const isSelected = selectedLightIds.has(light.id);
+                  const color = light.state.color;
+                  const bgColor = color
+                    ? `hsl(${color.h}, ${color.s}%, 50%)`
+                    : '#888';
+
+                  return (
+                    <button
+                      key={light.id}
+                      onClick={() => toggleLightSelection(light.id)}
+                      className={`px-3 py-1.5 rounded-full text-sm font-medium transition-all flex items-center gap-2 ${
+                        isSelected || selectedLightIds.size === 0
+                          ? 'bg-zinc-700 text-white'
+                          : 'bg-zinc-800 text-zinc-500'
+                      }`}
+                    >
+                      <div
+                        className="w-3 h-3 rounded-full"
+                        style={{ backgroundColor: light.state.on ? bgColor : '#444' }}
+                      />
+                      {light.name}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {selectedLightIds.size > 0 && (
+                <button
+                  onClick={() => setSelectedLightIds(new Set())}
+                  className="mt-4 text-sm text-zinc-500 hover:text-white transition-all block mx-auto"
+                >
+                  Clear selection
+                </button>
+              )}
+
+              {colorLights.length === 0 && (
+                <p className="text-zinc-500 text-center">No color-capable lights available</p>
+              )}
             </div>
+          )}
 
-            {selectedLightIds.size > 0 && (
-              <button
-                onClick={() => setSelectedLightIds(new Set())}
-                className="mt-4 text-sm text-zinc-500 hover:text-white transition-all"
-              >
-                Clear selection
-              </button>
-            )}
-
-            {colorLights.length === 0 && (
-              <p className="text-zinc-500">No color-capable lights available</p>
-            )}
-          </div>
+          {/* Hint when palette is active */}
+          {activePalette && !selectedTrackLight && (
+            <p className="text-zinc-500 text-sm">
+              Click on a light dot to adjust its position on the palette
+            </p>
+          )}
         </div>
+      )}
+
+      {/* Light Pane - shown when a light is selected */}
+      {selectedLight && (
+        <LightPane
+          light={selectedLight}
+          onClose={() => setSelectedTrackLight(null)}
+        />
       )}
 
       {/* Palette Controls */}
