@@ -1,0 +1,168 @@
+import { EventEmitter } from 'events';
+import type { Light, LightState, LightDriver, Group, Scene } from '@lightbox/shared';
+import { HueDriver } from '../drivers/hue.js';
+import { GoveeDriver } from '../drivers/govee.js';
+import { Database } from './database.js';
+
+export class LightManager extends EventEmitter {
+  private drivers: LightDriver[] = [];
+  private lights: Map<string, Light> = new Map();
+  private db: Database;
+
+  constructor() {
+    super();
+    this.db = new Database();
+  }
+
+  async initialize(): Promise<void> {
+    // Initialize database
+    this.db.initialize();
+
+    // Initialize drivers
+    this.drivers = [
+      new HueDriver(),
+      new GoveeDriver(),
+    ];
+
+    // Initialize each driver and discover lights
+    for (const driver of this.drivers) {
+      try {
+        await driver.initialize();
+        const discovered = await driver.discover();
+        for (const light of discovered) {
+          this.lights.set(light.id, light);
+        }
+        console.log(`${driver.brand}: discovered ${discovered.length} lights`);
+      } catch (err) {
+        console.error(`Failed to initialize ${driver.brand} driver:`, err);
+      }
+    }
+
+    // Start polling for state updates
+    this.startPolling();
+  }
+
+  private startPolling(): void {
+    // Poll every 5 seconds for state changes
+    setInterval(async () => {
+      for (const [id, light] of this.lights) {
+        const driver = this.getDriverForLight(light);
+        if (!driver) continue;
+
+        try {
+          const state = await driver.getState(this.getDeviceId(id));
+          if (this.hasStateChanged(light.state, state)) {
+            light.state = state;
+            this.emit('update', light);
+          }
+        } catch {
+          // Light may be unreachable
+          if (light.reachable) {
+            light.reachable = false;
+            this.emit('update', light);
+          }
+        }
+      }
+    }, 5000);
+  }
+
+  private hasStateChanged(a: LightState, b: LightState): boolean {
+    return JSON.stringify(a) !== JSON.stringify(b);
+  }
+
+  private getDriverForLight(light: Light): LightDriver | undefined {
+    return this.drivers.find(d => d.brand === light.brand);
+  }
+
+  private getDeviceId(lightId: string): string {
+    // Format: brand:deviceId
+    return lightId.split(':')[1] || lightId;
+  }
+
+  getAllLights(): Light[] {
+    return Array.from(this.lights.values());
+  }
+
+  getLight(id: string): Light | undefined {
+    return this.lights.get(id);
+  }
+
+  async setLightState(id: string, state: Partial<LightState>, transition?: number): Promise<void> {
+    const light = this.lights.get(id);
+    if (!light) throw new Error(`Light not found: ${id}`);
+
+    const driver = this.getDriverForLight(light);
+    if (!driver) throw new Error(`No driver for light: ${id}`);
+
+    await driver.setState(this.getDeviceId(id), state, transition);
+
+    // Update local state
+    Object.assign(light.state, state);
+    this.emit('update', light);
+  }
+
+  // Groups
+  getGroups(): Group[] {
+    return this.db.getGroups();
+  }
+
+  getGroup(id: string): Group | undefined {
+    return this.db.getGroup(id);
+  }
+
+  createGroup(name: string, lightIds: string[]): Group {
+    return this.db.createGroup(name, lightIds);
+  }
+
+  updateGroup(id: string, name: string, lightIds: string[]): void {
+    this.db.updateGroup(id, name, lightIds);
+  }
+
+  deleteGroup(id: string): void {
+    this.db.deleteGroup(id);
+  }
+
+  async setGroupState(id: string, state: Partial<LightState>, transition?: number): Promise<void> {
+    const group = this.getGroup(id);
+    if (!group) throw new Error(`Group not found: ${id}`);
+
+    await Promise.all(
+      group.lightIds.map(lightId => this.setLightState(lightId, state, transition))
+    );
+  }
+
+  // Scenes
+  getScenes(): Scene[] {
+    return this.db.getScenes();
+  }
+
+  getScene(id: string): Scene | undefined {
+    return this.db.getScene(id);
+  }
+
+  createScene(name: string, states: Record<string, LightState>): Scene {
+    return this.db.createScene(name, states);
+  }
+
+  deleteScene(id: string): void {
+    this.db.deleteScene(id);
+  }
+
+  async activateScene(id: string, transition?: number): Promise<void> {
+    const scene = this.getScene(id);
+    if (!scene) throw new Error(`Scene not found: ${id}`);
+
+    await Promise.all(
+      Object.entries(scene.states).map(([lightId, state]) =>
+        this.setLightState(lightId, state, transition)
+      )
+    );
+  }
+
+  async dispose(): Promise<void> {
+    for (const driver of this.drivers) {
+      await driver.dispose();
+    }
+    this.db.close();
+  }
+}

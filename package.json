@@ -1,0 +1,15 @@
+{
+  "name": "lightbox",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm -r --parallel dev",
+    "build": "pnpm -r build",
+    "server": "pnpm --filter @lightbox/server dev",
+    "client": "pnpm --filter @lightbox/client dev",
+    "mcp": "pnpm --filter @lightbox/mcp dev"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  }
+}
