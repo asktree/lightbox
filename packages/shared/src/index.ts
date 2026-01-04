@@ -5,7 +5,7 @@ export type Capability =
   | 'color'
   | 'temperature';
 
-export type Brand = 'hue' | 'govee' | 'tuya';
+export type Brand = 'hue' | 'govee' | 'tuya' | 'tuya-ble';
 
 export interface LightState {
   on: boolean;
