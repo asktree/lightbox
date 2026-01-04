@@ -39,12 +39,16 @@ interface PalettesStore {
   saveNodePositions: () => Promise<void>;
   addNodeToActive: (x: number, y: number) => Promise<void>;
   removeNodeFromActive: (index: number) => Promise<void>;
+  renamePalette: (id: string, name: string) => Promise<void>;
 
   // Sync positions from animation ref to store (for UI display)
   syncPositions: (positions: Record<string, number>) => void;
 
   // Edit a single light's position on the track
   setLightTrackPosition: (lightId: string, position: number) => void;
+
+  // Initialize light positions without starting animation
+  initializeLightPositions: (lightIds: string[]) => void;
 }
 
 export const usePalettesStore = create<PalettesStore>((set, get) => ({
@@ -298,5 +302,34 @@ export const usePalettesStore = create<PalettesStore>((set, get) => ({
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ nodes: newNodes }),
     });
+  },
+
+  renamePalette: async (id: string, name: string) => {
+    const { palettes } = get();
+
+    await fetch(`/api/palettes/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+
+    set({
+      palettes: palettes.map((p) =>
+        p.id === id ? { ...p, name } : p
+      ),
+    });
+  },
+
+  initializeLightPositions: (lightIds: string[]) => {
+    const { lightPositions } = get();
+    // Only initialize if positions are empty (don't overwrite existing positions)
+    if (Object.keys(lightPositions).length > 0) return;
+
+    const positions: Record<string, number> = {};
+    lightIds.forEach((lightId, index) => {
+      positions[lightId] = index / Math.max(lightIds.length, 1);
+    });
+
+    set({ lightPositions: positions });
   },
 }));

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { usePalettesStore } from '../stores/palettes';
 
 interface PaletteControlsProps {
@@ -22,14 +22,53 @@ export function PaletteControls({ lightIds }: PaletteControlsProps) {
   const setTension = usePalettesStore((s) => s.setTension);
   const setSpeed = usePalettesStore((s) => s.setSpeed);
   const deletePalette = usePalettesStore((s) => s.deletePalette);
+  const renamePalette = usePalettesStore((s) => s.renamePalette);
+  const initializeLightPositions = usePalettesStore((s) => s.initializeLightPositions);
 
   const [newName, setNewName] = useState('');
+  const [isRenaming, setIsRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState('');
+  const renameInputRef = useRef<HTMLInputElement>(null);
 
   const activePalette = palettes.find((p) => p.id === activePaletteId);
 
   useEffect(() => {
     fetchPalettes();
   }, [fetchPalettes]);
+
+  // Focus input when starting to rename
+  useEffect(() => {
+    if (isRenaming && renameInputRef.current) {
+      renameInputRef.current.focus();
+      renameInputRef.current.select();
+    }
+  }, [isRenaming]);
+
+  const startRenaming = () => {
+    if (activePalette) {
+      setRenameValue(activePalette.name);
+      setIsRenaming(true);
+    }
+  };
+
+  const handleRenameSubmit = async () => {
+    if (!activePalette || !renameValue.trim()) {
+      setIsRenaming(false);
+      return;
+    }
+    if (renameValue.trim() !== activePalette.name) {
+      await renamePalette(activePalette.id, renameValue.trim());
+    }
+    setIsRenaming(false);
+  };
+
+  const handleRenameKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      handleRenameSubmit();
+    } else if (e.key === 'Escape') {
+      setIsRenaming(false);
+    }
+  };
 
   // Log scale for speed: 0.5s to 1800s (30 minutes)
   const speedToSlider = (s: number) => Math.log(s / 0.5) / Math.log(3600);
@@ -54,6 +93,8 @@ export function PaletteControls({ lightIds }: PaletteControlsProps) {
       // Switching to different palette
       const wasAnimating = isAnimating;
       selectPalette(id);
+      // Initialize light positions so they show on the track immediately
+      initializeLightPositions(lightIds);
       // Only auto-play if we were already playing
       if (wasAnimating) {
         setTimeout(() => {
@@ -152,6 +193,29 @@ export function PaletteControls({ lightIds }: PaletteControlsProps) {
           {/* Active palette controls */}
           {activePalette && (
             <div className="space-y-3 pt-3 border-t border-zinc-700">
+              {/* Palette name (editable) */}
+              <div>
+                {isRenaming ? (
+                  <input
+                    ref={renameInputRef}
+                    type="text"
+                    value={renameValue}
+                    onChange={(e) => setRenameValue(e.target.value)}
+                    onBlur={handleRenameSubmit}
+                    onKeyDown={handleRenameKeyDown}
+                    className="w-full px-2 py-1 text-sm bg-zinc-800 border border-zinc-600 rounded text-white focus:outline-none focus:border-purple-500"
+                  />
+                ) : (
+                  <button
+                    onClick={startRenaming}
+                    className="text-sm text-zinc-300 hover:text-white cursor-pointer"
+                    title="click to rename"
+                  >
+                    {activePalette.name}
+                  </button>
+                )}
+              </div>
+
               {/* Play/Pause button */}
               <div className="flex gap-2">
                 <button

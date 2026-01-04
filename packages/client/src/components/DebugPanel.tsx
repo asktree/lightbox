@@ -98,12 +98,12 @@ export function DebugPanel({ filterDevice, filterDevices, compact }: DebugPanelP
     return (
       <div className="mt-4 border-t border-zinc-700 pt-3">
         <div className="flex items-center justify-between mb-2">
-          <span className="text-xs text-zinc-500 uppercase tracking-wide">Debug Log</span>
+          <span className="text-xs text-zinc-500 uppercase tracking-wide">debug log</span>
           <button
             onClick={clearLogs}
             className="text-xs text-zinc-500 hover:text-zinc-300"
           >
-            Clear
+            clear
           </button>
         </div>
         <div
@@ -112,7 +112,7 @@ export function DebugPanel({ filterDevice, filterDevices, compact }: DebugPanelP
           className="h-24 overflow-y-auto font-mono text-[10px] space-y-1 bg-black/30 rounded p-1.5"
         >
           {displayLogs.length === 0 ? (
-            <div className="text-zinc-600 italic">No messages yet</div>
+            <div className="text-zinc-600 italic">no messages yet</div>
           ) : (
             displayLogs.map((log, i) => (
               <div key={`${log.id}-${i}`}>
@@ -138,7 +138,7 @@ export function DebugPanel({ filterDevice, filterDevices, compact }: DebugPanelP
     <div className="fixed left-4 top-20 bottom-4 w-[480px] bg-zinc-900/95 backdrop-blur border border-zinc-700 rounded-lg shadow-xl flex flex-col overflow-hidden">
       {/* Header */}
       <div className="flex items-center justify-between p-3 border-b border-zinc-700">
-        <h3 className="text-sm font-medium text-zinc-300">Debug Log</h3>
+        <h3 className="text-sm font-medium text-zinc-300">debug log</h3>
         <div className="flex items-center gap-2">
           {/* Brand filter toggles */}
           <button
@@ -149,7 +149,7 @@ export function DebugPanel({ filterDevice, filterDevices, compact }: DebugPanelP
                 : 'bg-zinc-800 text-zinc-500 hover:bg-zinc-700'
             }`}
           >
-            Hue
+            hue
           </button>
           <button
             onClick={() => toggleBrand('tuya')}
@@ -159,13 +159,13 @@ export function DebugPanel({ filterDevice, filterDevices, compact }: DebugPanelP
                 : 'bg-zinc-800 text-zinc-500 hover:bg-zinc-700'
             }`}
           >
-            Tuya
+            tuya
           </button>
           <button
             onClick={clearLogs}
             className="text-xs px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 rounded"
           >
-            Clear
+            clear
           </button>
         </div>
       </div>
@@ -177,7 +177,7 @@ export function DebugPanel({ filterDevice, filterDevices, compact }: DebugPanelP
         className="flex-1 overflow-y-auto p-2 font-mono text-xs space-y-2"
       >
         {filteredLogs.length === 0 ? (
-          <div className="text-zinc-600 italic text-center py-4">Waiting for messages...</div>
+          <div className="text-zinc-600 italic text-center py-4">waiting for messages...</div>
         ) : (
           filteredLogs.map((log, i) => (
             <div key={`${log.id}-${i}`}>

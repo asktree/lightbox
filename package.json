@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "pnpm -r --parallel dev",
+    "dev": "FORCE_COLOR=1 pnpm -r --parallel dev 2>&1 | tee /tmp/lightbox.log",
     "build": "pnpm -r build",
     "server": "pnpm --filter @lightbox/server dev",
     "client": "pnpm --filter @lightbox/client dev",

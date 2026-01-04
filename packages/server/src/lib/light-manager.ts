@@ -3,6 +3,7 @@ import type { Light, LightState, LightDriver, Group, Palette, PaletteNode, Debug
 import { HueDriver } from '../drivers/hue.js';
 import { GoveeDriver } from '../drivers/govee.js';
 import { TuyaDriver } from '../drivers/tuya.js';
+import { TuyaBLEDriver } from '../drivers/tuya-ble.js';
 import { Database } from './database.js';
 
 export class LightManager extends EventEmitter {
@@ -28,6 +29,7 @@ export class LightManager extends EventEmitter {
       new HueDriver(),
       new GoveeDriver(),
       new TuyaDriver(),
+      new TuyaBLEDriver(),
     ];
 
     // Initialize each driver and discover lights
@@ -64,6 +66,13 @@ export class LightManager extends EventEmitter {
         if ('onDebugUpdate' in driver) {
           (driver as any).onDebugUpdate = (id: string, message: string) => {
             this.emit('debug_update', { id, message });
+          };
+        }
+
+        // Set up diagnostics change callback (Tuya)
+        if ('onDiagnosticsChange' in driver) {
+          (driver as any).onDiagnosticsChange = () => {
+            this.emit('diagnostics', this.getDiagnostics());
           };
         }
 

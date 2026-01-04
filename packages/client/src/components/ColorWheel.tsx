@@ -3,6 +3,7 @@ import { motion } from 'framer-motion';
 import type { Light } from '@lightbox/shared';
 import { useLightsStore } from '../stores/lights';
 import { usePalettesStore } from '../stores/palettes';
+import { useDebugStore } from '../stores/debug';
 import { PaletteTrack } from './PaletteTrack';
 
 interface Props {
@@ -55,7 +56,19 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect 
   const addNode = usePalettesStore((s) => s.addNode);
   const addNodeToActive = usePalettesStore((s) => s.addNodeToActive);
 
+  const diagnostics = useDebugStore((s) => s.diagnostics);
+
   const activePalette = palettes.find((p) => p.id === activePaletteId);
+
+  // Helper to check if a light is connected (using diagnostics or reachable)
+  const isLightConnected = useCallback((light: Light) => {
+    const diag = diagnostics.get(light.id);
+    // Use diagnostics if available, otherwise fall back to light.reachable
+    if (diag) {
+      return diag.connected;
+    }
+    return light.reachable;
+  }, [diagnostics]);
 
   const radius = size / 2;
   const pinRadius = 16;
@@ -227,9 +240,9 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect 
     }
   }, [onLightSelect, selectedLightId]);
 
-  // Filter to only color-capable, on lights
+  // Filter to only color-capable, on lights (include disconnected to show faded)
   const colorLights = lights.filter(
-    (l) => l.capabilities.includes('color') && l.state.on && l.reachable
+    (l) => l.capabilities.includes('color') && l.state.on
   );
 
   // When palette is active, don't show individual light pins (they're on the track)
@@ -329,6 +342,7 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect 
                 width: pinRadius * 2,
                 height: pinRadius * 2,
                 transition: isDragging ? 'none' : 'left 0.15s, top 0.15s',
+                opacity: isLightConnected(light) ? 1 : 0.5,
               }}
             >
               <motion.div

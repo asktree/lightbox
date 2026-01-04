@@ -3,6 +3,7 @@ import { useLightsStore } from '../stores/lights';
 
 interface Props {
   light: Light;
+  onColorClick?: (lightId: string) => void;
 }
 
 function hsvToHex(h: number, s: number, v: number = 100): string {
@@ -49,7 +50,7 @@ function kelvinToHex(kelvin: number): string {
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 }
 
-export function LightCard({ light }: Props) {
+export function LightCard({ light, onColorClick }: Props) {
   const setLightState = useLightsStore((s) => s.setLightState);
   const startControlling = useLightsStore((s) => s.startControlling);
   const stopControlling = useLightsStore((s) => s.stopControlling);
@@ -79,13 +80,20 @@ export function LightCard({ light }: Props) {
       } ${!light.reachable ? 'opacity-50' : ''}`}
     >
       {/* Color indicator */}
-      <div
-        className={`absolute top-3 right-3 w-4 h-4 rounded-full ${isControlled ? '' : 'transition-all'}`}
+      <button
+        className={`absolute top-3 right-3 w-4 h-4 rounded-full ${isControlled ? '' : 'transition-all'} ${onColorClick ? 'cursor-pointer hover:ring-2 hover:ring-white/50' : ''}`}
         style={{
           backgroundColor: displayColor,
           opacity: state.on ? opacity : 0.3,
           boxShadow: state.on ? `0 0 12px ${displayColor}` : 'none',
         }}
+        onClick={(e) => {
+          if (onColorClick) {
+            e.stopPropagation();
+            onColorClick(light.id);
+          }
+        }}
+        aria-label={`Open ${light.name} in wheel view`}
       />
 
       {/* Light name */}

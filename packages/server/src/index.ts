@@ -56,6 +56,11 @@ lightManager.on('debug_update', ({ id, message }: { id: string; message: string 
   broadcast({ type: 'debug_log_update', id, message });
 });
 
+// Subscribe to diagnostics changes (connection state, etc.)
+lightManager.on('diagnostics', (diagnostics) => {
+  broadcast({ type: 'diagnostics_sync', diagnostics });
+});
+
 // WebSocket connection handling
 wss.on('connection', async (ws) => {
   console.log('Client connected');

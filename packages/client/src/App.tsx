@@ -21,13 +21,20 @@ const ROOMS: Record<string, { name: string; lightIds: string[] }> = {
   },
   living: {
     name: 'Living Room',
-    lightIds: ['hue:2', 'hue:7', 'hue:6', 'hue:8'], // couch lights, iris, floor lamp
+    lightIds: [
+      'hue:2', 'hue:7', 'hue:6', // couch lights, iris
+      'tuya:eb58e8db101aa08a03txnf', 'tuya:ebbacf4e20fe4b56366pik', // SUNVIE GU10s
+      'tuya-ble:eb9f3b3flegezedk', 'tuya-ble:eba738os6ajviwqc', // BLE: Sunset Lamp, Smart Bulb
+    ],
   },
   all: {
     name: 'All Lights',
     lightIds: [], // empty = show all
   },
 };
+
+// Lights to hide from all views (roommate's room, etc)
+const HIDDEN_LIGHTS = new Set(['hue:8']); // Floor Lamp
 
 export default function App() {
   useWebSocket();
@@ -49,7 +56,7 @@ export default function App() {
   const [currentRoom, setCurrentRoom] = useState<string>('bedroom');
   const [selectedTrackLight, setSelectedTrackLight] = useState<string | null>(null);
 
-  const allLights = Array.from(lights.values());
+  const allLights = Array.from(lights.values()).filter((l) => !HIDDEN_LIGHTS.has(l.id));
 
   // Filter lights by current room
   const roomConfig = ROOMS[currentRoom];
@@ -75,15 +82,26 @@ export default function App() {
     setSelectedLightIds(next);
   };
 
-  // Get light IDs for current room (for passing to palette)
+  // Get light IDs for current room (for passing to palette) - only reachable lights
   const roomLightIds = roomConfig.lightIds.length > 0
-    ? roomConfig.lightIds
-    : allLights.map(l => l.id);
+    ? reachableLights.filter(l => roomConfig.lightIds.includes(l.id)).map(l => l.id)
+    : reachableLights.map(l => l.id);
 
   // Get selected light for LightPane
   const selectedLight = selectedTrackLight ? lights.get(selectedTrackLight) : null;
 
+  // Handler for clicking a light's color indicator in grid view
+  const handleColorClick = (lightId: string) => {
+    setView('wheel');
+    setSelectedTrackLight(lightId);
+  };
+
   return (
+    <>
+      {/* Disconnect indicator - visual overlay only, doesn't affect layout */}
+      {!connected && (
+        <div className="fixed inset-0 pointer-events-none ring-4 ring-inset ring-red-400 z-50" />
+      )}
     <div
       className={`min-h-screen p-6 transition-all ${
         activePalette
@@ -153,7 +171,7 @@ export default function App() {
           </button>
 
           {/* Connection status */}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 min-w-[6.5rem]">
             <div
               className={`w-2 h-2 rounded-full ${
                 connected ? 'bg-green-500' : 'bg-red-500'
@@ -201,7 +219,7 @@ export default function App() {
             <>
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
                 {reachableLights.map((light) => (
-                  <LightCard key={light.id} light={light} />
+                  <LightCard key={light.id} light={light} onColorClick={handleColorClick} />
                 ))}
               </div>
 
@@ -210,7 +228,7 @@ export default function App() {
                   <h2 className="text-sm text-zinc-500 mt-8 mb-4">Unreachable</h2>
                   <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
                     {unreachableLights.map((light) => (
-                      <LightCard key={light.id} light={light} />
+                      <LightCard key={light.id} light={light} onColorClick={handleColorClick} />
                     ))}
                   </div>
                 </>
@@ -315,5 +333,6 @@ export default function App() {
         />
       )}
     </div>
+    </>
   );
 }

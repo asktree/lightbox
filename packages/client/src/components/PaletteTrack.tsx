@@ -1,7 +1,34 @@
-import { useState, useCallback, useEffect } from 'react';
-import type { Palette, PaletteNode } from '@lightbox/shared';
+import { useState, useCallback, useEffect, useRef } from 'react';
+import type { Palette, PaletteNode, Light } from '@lightbox/shared';
 import { usePalettesStore } from '../stores/palettes';
 import { useLightsStore } from '../stores/lights';
+import { useDebugStore } from '../stores/debug';
+
+// Convert HSV to hex color
+function hsvToHex(h: number, s: number, v: number = 100): string {
+  h = h / 360;
+  s = s / 100;
+  v = v / 100;
+
+  let r = 0, g = 0, b = 0;
+  const i = Math.floor(h * 6);
+  const f = h * 6 - i;
+  const p = v * (1 - s);
+  const q = v * (1 - f * s);
+  const t = v * (1 - (1 - f) * s);
+
+  switch (i % 6) {
+    case 0: r = v; g = t; b = p; break;
+    case 1: r = q; g = v; b = p; break;
+    case 2: r = p; g = v; b = t; break;
+    case 3: r = p; g = q; b = v; break;
+    case 4: r = t; g = p; b = v; break;
+    case 5: r = v; g = p; b = q; break;
+  }
+
+  const toHex = (n: number) => Math.round(n * 255).toString(16).padStart(2, '0');
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
 
 interface Props {
   palette: Palette;
@@ -105,14 +132,55 @@ function generateTrackPath(palette: Palette, size: number): string {
   return points.join(' ') + ' Z';
 }
 
+// Find closest point on track (sample many points, return t value)
+function findClosestPointOnTrack(
+  palette: Palette,
+  targetX: number,
+  targetY: number,
+  samples: number = 100
+): number {
+  let closestT = 0;
+  let closestDist = Infinity;
+
+  for (let i = 0; i <= samples; i++) {
+    const t = i / samples;
+    const point = getPointOnPalette(palette, t);
+    const dx = point.x - targetX;
+    const dy = point.y - targetY;
+    const dist = dx * dx + dy * dy;
+
+    if (dist < closestDist) {
+      closestDist = dist;
+      closestT = t;
+    }
+  }
+
+  return closestT;
+}
+
 export function PaletteTrack({ palette, size, lightPositions, isEditing, onLightClick, selectedLightId }: Props) {
   const [draggingNode, setDraggingNode] = useState<number | null>(null);
+  const [draggingLight, setDraggingLight] = useState<string | null>(null);
+  const didDragLightRef = useRef(false);
   const updateNodePosition = usePalettesStore((s) => s.updateNodePosition);
   const saveNodePositions = usePalettesStore((s) => s.saveNodePositions);
   const activePaletteId = usePalettesStore((s) => s.activePaletteId);
   const setLightTrackPosition = usePalettesStore((s) => s.setLightTrackPosition);
   const removeNodeFromActive = usePalettesStore((s) => s.removeNodeFromActive);
   const setLightState = useLightsStore((s) => s.setLightState);
+  const startControlling = useLightsStore((s) => s.startControlling);
+  const stopControlling = useLightsStore((s) => s.stopControlling);
+  const lights = useLightsStore((s) => s.lights);
+  const diagnostics = useDebugStore((s) => s.diagnostics);
+
+  // Helper to check if a light is connected
+  const isLightConnected = useCallback((light: Light) => {
+    const diag = diagnostics.get(light.id);
+    if (diag) {
+      return diag.connected;
+    }
+    return light.reachable;
+  }, [diagnostics]);
 
   const nodeRadius = 14;
   const pathD = generateTrackPath(palette, size);
@@ -136,18 +204,7 @@ export function PaletteTrack({ palette, size, lightPositions, isEditing, onLight
     e.preventDefault();
     e.stopPropagation();
     setDraggingNode(index);
-
-    // If a light is selected, snap it to this node
-    if (selectedLightId) {
-      const nodePosition = index / palette.nodes.length;
-      setLightTrackPosition(selectedLightId, nodePosition);
-
-      // Also update the light's color immediately
-      const point = getPointOnPalette(palette, nodePosition);
-      const { h, s } = normalizedToHs(point.x, point.y);
-      setLightState(selectedLightId, { color: { h, s } }, 50);
-    }
-  }, [canDragNodes, selectedLightId, palette, setLightTrackPosition, setLightState]);
+  }, [canDragNodes]);
 
   const handleMouseMove = useCallback((e: MouseEvent) => {
     if (draggingNode === null) return;
@@ -168,18 +225,12 @@ export function PaletteTrack({ palette, size, lightPositions, isEditing, onLight
     updatedNodes[draggingNode] = { x, y };
     const updatedPalette = { ...palette, nodes: updatedNodes };
 
-    // Build updated light positions (keep selected light snapped to this node)
-    const updatedLightPositions = { ...lightPositions };
-    if (selectedLightId) {
-      updatedLightPositions[selectedLightId] = draggingNode / palette.nodes.length;
-    }
-
-    for (const [lightId, position] of Object.entries(updatedLightPositions)) {
+    for (const [lightId, position] of Object.entries(lightPositions)) {
       const point = getPointOnPalette(updatedPalette, position);
       const { h, s } = normalizedToHs(point.x, point.y);
       setLightState(lightId, { color: { h, s } }, 50);
     }
-  }, [draggingNode, size, updateNodePosition, palette, lightPositions, selectedLightId, setLightState]);
+  }, [draggingNode, size, updateNodePosition, palette, lightPositions, setLightState]);
 
   const handleMouseUp = useCallback(() => {
     if (draggingNode !== null) {
@@ -188,7 +239,48 @@ export function PaletteTrack({ palette, size, lightPositions, isEditing, onLight
     }
   }, [draggingNode, saveNodePositions]);
 
-  // Global mouse events for dragging
+  // Light pin drag handlers
+  const handleLightMouseDown = useCallback((e: React.MouseEvent, lightId: string) => {
+    if (!canDragNodes) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setDraggingLight(lightId);
+    startControlling(lightId);
+    didDragLightRef.current = false;
+  }, [canDragNodes, startControlling]);
+
+  const handleLightMouseMove = useCallback((e: MouseEvent) => {
+    if (!draggingLight) return;
+
+    didDragLightRef.current = true;
+
+    const container = document.querySelector('[data-palette-track]');
+    if (!container) return;
+
+    const rect = container.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / size; // normalized 0-1
+    const y = (e.clientY - rect.top) / size;
+
+    // Find closest point on the track
+    const closestT = findClosestPointOnTrack(palette, x, y);
+
+    // Update light position on track
+    setLightTrackPosition(draggingLight, closestT);
+
+    // Update light color to match track position
+    const point = getPointOnPalette(palette, closestT);
+    const { h, s } = normalizedToHs(point.x, point.y);
+    setLightState(draggingLight, { color: { h, s } }, 50);
+  }, [draggingLight, size, palette, setLightTrackPosition, setLightState]);
+
+  const handleLightMouseUp = useCallback(() => {
+    if (draggingLight) {
+      stopControlling(draggingLight);
+      setDraggingLight(null);
+    }
+  }, [draggingLight, stopControlling]);
+
+  // Global mouse events for node dragging
   useEffect(() => {
     if (draggingNode !== null) {
       window.addEventListener('mousemove', handleMouseMove);
@@ -199,6 +291,18 @@ export function PaletteTrack({ palette, size, lightPositions, isEditing, onLight
       };
     }
   }, [draggingNode, handleMouseMove, handleMouseUp]);
+
+  // Global mouse events for light dragging
+  useEffect(() => {
+    if (draggingLight !== null) {
+      window.addEventListener('mousemove', handleLightMouseMove);
+      window.addEventListener('mouseup', handleLightMouseUp);
+      return () => {
+        window.removeEventListener('mousemove', handleLightMouseMove);
+        window.removeEventListener('mouseup', handleLightMouseUp);
+      };
+    }
+  }, [draggingLight, handleLightMouseMove, handleLightMouseUp]);
 
   return (
     <div
@@ -271,16 +375,32 @@ export function PaletteTrack({ palette, size, lightPositions, isEditing, onLight
           );
         })}
 
-        {/* Light positions on track */}
+        {/* Light positions on track - styled pins with colors and labels */}
         {Object.entries(lightPositions).map(([lightId, position]) => {
+          const light = lights.get(lightId);
+          if (!light) return null;
+
+          // Skip unreachable/offline lights
+          if (!isLightConnected(light)) return null;
+
           const point = getPointOnPalette(palette, position);
           const { x, y } = toCanvasCoords(point, size);
+          const color = light.state.color ?? { h: 0, s: 0 };
+          const pinColor = hsvToHex(color.h, color.s);
+          const isSelected = selectedLightId === lightId;
+          const isDragging = draggingLight === lightId;
+          const pinRadius = 16;
+
           return (
             <g
               key={lightId}
-              style={{ cursor: onLightClick ? 'pointer' : 'default' }}
+              style={{
+                cursor: canDragNodes ? 'grab' : (onLightClick ? 'pointer' : 'default'),
+              }}
+              onMouseDown={(e) => handleLightMouseDown(e, lightId)}
               onClick={(e) => {
-                if (onLightClick) {
+                // Only handle click if we didn't drag (prevents toggle on drag release)
+                if (onLightClick && !didDragLightRef.current) {
                   e.stopPropagation();
                   onLightClick(lightId);
                 }
@@ -290,20 +410,40 @@ export function PaletteTrack({ palette, size, lightPositions, isEditing, onLight
               <circle
                 cx={x}
                 cy={y}
-                r={12}
+                r={pinRadius + 4}
                 fill="transparent"
-                style={{ pointerEvents: onLightClick ? 'auto' : 'none' }}
+                style={{ pointerEvents: canDragNodes || onLightClick ? 'auto' : 'none' }}
               />
-              {/* Visible circle */}
+              {/* Colored pin circle */}
               <circle
                 cx={x}
                 cy={y}
-                r={6}
-                fill="rgba(255, 255, 255, 0.9)"
-                stroke="rgba(255, 255, 255, 0.5)"
-                strokeWidth="2"
-                style={{ pointerEvents: 'none' }}
+                r={pinRadius}
+                fill={pinColor}
+                stroke="white"
+                strokeWidth={isSelected ? 5 : 3}
+                style={{
+                  pointerEvents: 'none',
+                  filter: 'drop-shadow(0 2px 4px rgba(0,0,0,0.3))',
+                }}
               />
+              {/* Label - shown when not dragging */}
+              {!isDragging && (
+                <text
+                  x={x}
+                  y={y - pinRadius - 6}
+                  textAnchor="middle"
+                  fill="white"
+                  fontSize="10"
+                  className="select-none"
+                  style={{
+                    pointerEvents: 'none',
+                    textShadow: '0 1px 2px rgba(0,0,0,0.5), 0 0 6px rgba(0,0,0,0.3)',
+                  }}
+                >
+                  {light.name}
+                </text>
+              )}
             </g>
           );
         })}

@@ -43,6 +43,9 @@ export class TuyaDriver implements LightDriver {
   onDebug?: (id: string, deviceName: string, message: string, direction: 'in' | 'out') => void;
   onDebugUpdate?: (id: string, message: string) => void;
 
+  // Callback for connection state changes
+  onDiagnosticsChange?: () => void;
+
   private debugSeq = 0;
 
   // Command coalescing: max 1 in-flight + 1 pending per device
@@ -170,11 +173,13 @@ export class TuyaDriver implements LightDriver {
       device.connected = true;
       device.reachable = true;
       emitDebug(config.name, 'connected', 'in');
+      if (driver.onDiagnosticsChange) driver.onDiagnosticsChange();
     });
 
     api.on('disconnected', () => {
       device.connected = false;
       emitDebug(config.name, 'disconnected', 'in');
+      if (driver.onDiagnosticsChange) driver.onDiagnosticsChange();
       scheduleReconnect(device, id);
     });
 
@@ -240,6 +245,7 @@ export class TuyaDriver implements LightDriver {
         if (this.onUpdate) {
           this.onUpdate(device.config.id, device.state);
         }
+        if (this.onDiagnosticsChange) this.onDiagnosticsChange();
       } catch {
         // Will retry on next disconnect event or schedule again
         this.scheduleReconnect(device, id);
@@ -321,6 +327,7 @@ export class TuyaDriver implements LightDriver {
       const elapsed = Date.now() - startTime;
       this.updateDebug(logId, `${summary} (✗ ${elapsed}ms)`);
       device.connected = false;
+      if (this.onDiagnosticsChange) this.onDiagnosticsChange();
       this.scheduleReconnect(device, fullId);
       // Don't throw - we still want to process pending
     } finally {

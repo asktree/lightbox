@@ -107,6 +107,11 @@ SQLite database at `packages/server/data/lightbox.db`
 - `groups` - Light groups
 - `scenes` - Saved scenes
 
+## Feature Ideas
+
+- Disconnected lights on ColorWheel should be faded (50% opacity) - still selectable and draggable, just visually greyed out to indicate attempts to move them probably won't work
+- Palette view should display light pins the same way as ColorWheel (reuse component). When dragging in palette view, lights snap to nearest point on the track instead of free movement.
+
 ## Future Work
 
 - [x] **Tuya integration** - Local control via tinytuya
@@ -148,6 +153,11 @@ Animated color paths on the wheel:
 Current: Using Hue's proprietary hs scale (Red=0, Green=25500, Blue=46920)
 - Not standard HSV - requires piecewise conversion
 - Color/temperature are mutually exclusive modes
+
+**Known Issues:**
+- SUNVIE Tuya lights and Hue lights are on different color spaces
+- Hue colors don't map perfectly to our UI but close enough to be usable
+- Need to investigate proper color space conversion per-brand
 
 Future improvement: Use CIE xy color space with per-bulb gamut handling
 - Different Hue bulbs have Gamut A, B, or C (different color triangles)
