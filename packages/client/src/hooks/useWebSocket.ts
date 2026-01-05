@@ -6,32 +6,31 @@ import { usePalettesStore } from '../stores/palettes';
 
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
-  const { setConnected, syncLights, updateLight } = useLightsStore();
-  const { addLog, updateLog, syncDiagnostics } = useDebugStore();
-  const {
-    syncRoomStates,
-    updateRoomState,
-    updatePalettePositions,
-    updateLightPosition,
-  } = usePalettesStore();
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws`;
 
     function connect() {
+      // Clear any pending reconnect
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = () => {
         console.log('WebSocket connected');
-        setConnected(true);
+        useLightsStore.getState().setConnected(true);
       };
 
       ws.onclose = () => {
         console.log('WebSocket disconnected, reconnecting...');
-        setConnected(false);
-        setTimeout(connect, 2000);
+        useLightsStore.getState().setConnected(false);
+        reconnectTimeoutRef.current = setTimeout(connect, 2000);
       };
 
       ws.onerror = (err) => {
@@ -42,34 +41,39 @@ export function useWebSocket() {
       ws.onmessage = (event) => {
         const msg: WSMessage = JSON.parse(event.data);
 
+        // Access store actions directly to avoid stale closures
+        const lightsStore = useLightsStore.getState();
+        const debugStore = useDebugStore.getState();
+        const palettesStore = usePalettesStore.getState();
+
         switch (msg.type) {
           case 'lights_sync':
-            syncLights(msg.lights);
+            lightsStore.syncLights(msg.lights);
             break;
           case 'light_update':
-            updateLight(msg.light);
+            lightsStore.updateLight(msg.light);
             break;
           case 'debug_log':
-            addLog(msg.entry);
+            debugStore.addLog(msg.entry);
             break;
           case 'debug_log_update':
-            updateLog(msg.id, msg.message);
+            debugStore.updateLog(msg.id, msg.message);
             break;
           case 'diagnostics_sync':
-            syncDiagnostics(msg.diagnostics);
+            debugStore.syncDiagnostics(msg.diagnostics);
             break;
           // Room/palette state messages
           case 'room_states_sync':
-            syncRoomStates(msg.roomStates);
+            palettesStore.syncRoomStates(msg.roomStates);
             break;
           case 'room_state':
-            updateRoomState(msg.roomId, msg.activePaletteId, msg.isPlaying, msg.secondsPerNode);
+            palettesStore.updateRoomState(msg.roomId, msg.activePaletteId, msg.isPlaying, msg.secondsPerNode);
             break;
           case 'palette_positions':
-            updatePalettePositions(msg.roomId, msg.paletteId, msg.positions);
+            palettesStore.updatePalettePositions(msg.roomId, msg.paletteId, msg.positions);
             break;
           case 'position_update':
-            updateLightPosition(msg.roomId, msg.paletteId, msg.lightId, msg.position);
+            palettesStore.updateLightPosition(msg.roomId, msg.paletteId, msg.lightId, msg.position);
             break;
         }
       };
@@ -78,18 +82,10 @@ export function useWebSocket() {
     connect();
 
     return () => {
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
       wsRef.current?.close();
     };
-  }, [
-    setConnected,
-    syncLights,
-    updateLight,
-    addLog,
-    updateLog,
-    syncDiagnostics,
-    syncRoomStates,
-    updateRoomState,
-    updatePalettePositions,
-    updateLightPosition,
-  ]);
+  }, []); // Empty deps - only run once on mount
 }
