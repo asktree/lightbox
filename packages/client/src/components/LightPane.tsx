@@ -1,7 +1,7 @@
 import { useCallback, useState, useRef } from 'react';
 import type { Light } from '@lightbox/shared';
 import { getPointOnPalette } from '@lightbox/shared';
-import { usePalettesStore } from '../stores/palettes';
+import { usePalettesStore, useRoomPlayState, useRoomPositions } from '../stores/palettes';
 import { useLightsStore } from '../stores/lights';
 import { useDebugStore } from '../stores/debug';
 import { PaletteWheel } from './PaletteWheel';
@@ -48,15 +48,13 @@ interface LightPaneProps {
 
 export function LightPane({ light, roomId, onClose }: LightPaneProps) {
   const palettes = usePalettesStore((s) => s.palettes);
-  const getRoomState = usePalettesStore((s) => s.getRoomState);
   const setLightTrackPosition = usePalettesStore((s) => s.setLightTrackPosition);
   const setLightState = useLightsStore((s) => s.setLightState);
   const diagnostics = useDebugStore((s) => s.diagnostics);
 
-  // Get room-specific state
-  const roomState = getRoomState(roomId);
-  const activePaletteId = roomState.activePaletteId;
-  const lightPositions = roomState.positions;
+  // Get room-specific state - split for efficiency
+  const { activePaletteId } = useRoomPlayState(roomId);
+  const lightPositions = useRoomPositions(roomId);
 
   // Get diagnostic for this light
   const diag = diagnostics.get(light.id);

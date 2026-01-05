@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef } from 'react';
-import { usePalettesStore } from '../stores/palettes';
+import { usePalettesStore, useRoomPlayState } from '../stores/palettes';
 
 interface PaletteControlsProps {
   roomId: string; // Current room ID
@@ -10,7 +10,6 @@ export function PaletteControls({ roomId }: PaletteControlsProps) {
   const isEditing = usePalettesStore((s) => s.isEditing);
   const editingNodes = usePalettesStore((s) => s.editingNodes);
   const fetchPalettes = usePalettesStore((s) => s.fetchPalettes);
-  const getRoomState = usePalettesStore((s) => s.getRoomState);
 
   // Server-side actions
   const selectPalette = usePalettesStore((s) => s.selectPalette);
@@ -33,10 +32,8 @@ export function PaletteControls({ roomId }: PaletteControlsProps) {
   const [renameValue, setRenameValue] = useState('');
   const renameInputRef = useRef<HTMLInputElement>(null);
 
-  // Get current room's palette state from server
-  const roomState = getRoomState(roomId);
-  const activePaletteId = roomState.activePaletteId;
-  const isAnimating = roomState.isPlaying;
+  // Get current room's palette state - uses efficient selector (no positions)
+  const { activePaletteId, isPlaying: isAnimating, secondsPerNode } = useRoomPlayState(roomId);
 
   const activePalette = palettes.find((p) => p.id === activePaletteId);
 
@@ -261,14 +258,14 @@ export function PaletteControls({ roomId }: PaletteControlsProps) {
               {/* Speed slider (room-level) */}
               <div>
                 <label className="text-xs text-zinc-400 mb-1 block">
-                  Speed: {formatSpeed(roomState.secondsPerNode)}/node
+                  Speed: {formatSpeed(secondsPerNode)}/node
                 </label>
                 <input
                   type="range"
                   min="0"
                   max="1"
                   step="0.02"
-                  value={speedToSlider(roomState.secondsPerNode)}
+                  value={speedToSlider(secondsPerNode)}
                   onChange={(e) => setRoomSpeed(roomId, sliderToSpeed(parseFloat(e.target.value)))}
                   className="w-full h-1 bg-zinc-700 rounded-full appearance-none cursor-pointer"
                 />

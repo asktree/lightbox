@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { ROOMS, HIDDEN_LIGHT_IDS } from '@lightbox/shared';
 import { useLightsStore } from './stores/lights';
-import { usePalettesStore } from './stores/palettes';
+import { usePalettesStore, useRoomPlayState } from './stores/palettes';
 import { useDebugStore } from './stores/debug';
 import { useWebSocket } from './hooks/useWebSocket';
 import { LightCard } from './components/LightCard';
@@ -19,7 +19,6 @@ export default function App() {
   const lights = useLightsStore((s) => s.lights);
   const connected = useLightsStore((s) => s.connected);
   const palettes = usePalettesStore((s) => s.palettes);
-  const getRoomState = usePalettesStore((s) => s.getRoomState);
   const isEditing = usePalettesStore((s) => s.isEditing);
 
   const debugOpen = useDebugStore((s) => s.isOpen);
@@ -45,9 +44,8 @@ export default function App() {
   }, [currentRoom]);
   const [selectedTrackLight, setSelectedTrackLight] = useState<string | null>(null);
 
-  // Get current room's palette state
-  const roomState = getRoomState(currentRoom);
-  const activePaletteId = roomState.activePaletteId;
+  // Get current room's palette state - efficient selector (no positions)
+  const { activePaletteId } = useRoomPlayState(currentRoom);
   const activePalette = palettes.find((p) => p.id === activePaletteId);
 
   const allLights = Array.from(lights.values()).filter((l) => !HIDDEN_LIGHT_IDS.has(l.id));

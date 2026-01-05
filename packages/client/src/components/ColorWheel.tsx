@@ -2,7 +2,7 @@ import { useRef, useEffect, useState, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import type { Light } from '@lightbox/shared';
 import { useLightsStore } from '../stores/lights';
-import { usePalettesStore } from '../stores/palettes';
+import { usePalettesStore, useRoomPlayState, useRoomPositions } from '../stores/palettes';
 import { useDebugStore } from '../stores/debug';
 import { PaletteTrack } from './PaletteTrack';
 
@@ -50,7 +50,6 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect,
   const bridgeStates = useLightsStore((s) => s.bridgeStates);
 
   const palettes = usePalettesStore((s) => s.palettes);
-  const getRoomState = usePalettesStore((s) => s.getRoomState);
   const isEditing = usePalettesStore((s) => s.isEditing);
   const editingNodes = usePalettesStore((s) => s.editingNodes);
   const addNode = usePalettesStore((s) => s.addNode);
@@ -58,10 +57,9 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect,
 
   const diagnostics = useDebugStore((s) => s.diagnostics);
 
-  // Get room-specific palette state
-  const roomState = getRoomState(roomId);
-  const activePaletteId = roomState.activePaletteId;
-  const lightPositions = roomState.positions;
+  // Get room-specific palette state - split for efficiency
+  const { activePaletteId } = useRoomPlayState(roomId);
+  const lightPositions = useRoomPositions(roomId);
 
   const activePalette = palettes.find((p) => p.id === activePaletteId);
 

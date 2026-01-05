@@ -16,7 +16,6 @@ import type { Database } from './database.js';
 import type { LightManager } from './light-manager.js';
 
 const UPDATE_INTERVAL_MS = 300;
-const BROADCAST_INTERVAL_TICKS = 3; // Broadcast positions every 3 ticks (900ms) to reduce client load
 const PERSIST_INTERVAL_TICKS = 10; // Persist every 10 ticks (3 seconds)
 
 interface RoomAnimationState {
@@ -332,15 +331,11 @@ export class PaletteAnimator extends EventEmitter {
       });
     }
 
-    // Increment tick count
-    state.tickCount++;
-
-    // Broadcast positions to clients (throttled to reduce client CPU load)
-    if (state.tickCount % BROADCAST_INTERVAL_TICKS === 0) {
-      this.emitPositions(roomId);
-    }
+    // Broadcast positions to clients
+    this.emitPositions(roomId);
 
     // Persist periodically
+    state.tickCount++;
     if (state.tickCount % PERSIST_INTERVAL_TICKS === 0) {
       this.db.savePalettePositions(state.activePaletteId, state.positions);
     }
