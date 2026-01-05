@@ -255,6 +255,35 @@ export class LightManager extends EventEmitter {
     await tuyaDriver.setRawDps(this.getDeviceId(id), dps);
   }
 
+  /**
+   * Get muted RGB channels for a Tuya device
+   */
+  getTuyaMutedChannels(id: string): { r: boolean; g: boolean; b: boolean } {
+    const light = this.lights.get(id);
+    if (!light || light.brand !== 'tuya') {
+      return { r: false, g: false, b: false };
+    }
+
+    const tuyaDriver = this.drivers.find(d => d.brand === 'tuya') as TuyaDriver | undefined;
+    if (!tuyaDriver) return { r: false, g: false, b: false };
+
+    return tuyaDriver.getMutedChannels(id);
+  }
+
+  /**
+   * Set muted RGB channels for a Tuya device
+   */
+  setTuyaMutedChannels(id: string, channels: { r: boolean; g: boolean; b: boolean }): void {
+    const light = this.lights.get(id);
+    if (!light) throw new Error(`Light not found: ${id}`);
+    if (light.brand !== 'tuya') throw new Error('Muted channels only supported for Tuya devices');
+
+    const tuyaDriver = this.drivers.find(d => d.brand === 'tuya') as TuyaDriver | undefined;
+    if (!tuyaDriver) throw new Error('Tuya driver not found');
+
+    tuyaDriver.setMutedChannels(id, channels);
+  }
+
   // Palettes
   getPalettes(): Palette[] {
     return this.db.getPalettes();

@@ -26,6 +26,52 @@ interface TuyaDevice {
   reconnectTimer?: NodeJS.Timeout;
 }
 
+interface MutedChannels {
+  r: boolean;
+  g: boolean;
+  b: boolean;
+}
+
+// HSV to RGB (h: 0-360, s: 0-100, v: 0-100) -> (r, g, b: 0-255)
+function hsvToRgb(h: number, s: number, v: number): [number, number, number] {
+  s = s / 100;
+  v = v / 100;
+  const c = v * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = v - c;
+  let r = 0, g = 0, b = 0;
+  if (h < 60) { r = c; g = x; b = 0; }
+  else if (h < 120) { r = x; g = c; b = 0; }
+  else if (h < 180) { r = 0; g = c; b = x; }
+  else if (h < 240) { r = 0; g = x; b = c; }
+  else if (h < 300) { r = x; g = 0; b = c; }
+  else { r = c; g = 0; b = x; }
+  return [
+    Math.round((r + m) * 255),
+    Math.round((g + m) * 255),
+    Math.round((b + m) * 255),
+  ];
+}
+
+// RGB to HSV (r, g, b: 0-255) -> (h: 0-360, s: 0-100, v: 0-100)
+function rgbToHsv(r: number, g: number, b: number): [number, number, number] {
+  r = r / 255;
+  g = g / 255;
+  b = b / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const d = max - min;
+  let h = 0;
+  const s = max === 0 ? 0 : d / max;
+  const v = max;
+  if (d !== 0) {
+    if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) * 60;
+    else if (max === g) h = ((b - r) / d + 2) * 60;
+    else h = ((r - g) / d + 4) * 60;
+  }
+  return [Math.round(h), Math.round(s * 100), Math.round(v * 100)];
+}
+
 /**
  * Tuya local control driver using tuyapi.
  * Uses persistent connections with auto-reconnect for real-time state updates.
@@ -35,6 +81,9 @@ export class TuyaDriver implements LightDriver {
 
   private devices: Map<string, TuyaDevice> = new Map();
   private configs: TuyaDeviceConfig[] = [];
+
+  // Per-device muted RGB channels (for filtering out unwanted colors)
+  private mutedChannels: Map<string, MutedChannels> = new Map();
 
   // Callback for real-time updates (set by LightManager)
   onUpdate?: (deviceId: string, state: LightState) => void;
@@ -280,7 +329,7 @@ export class TuyaDriver implements LightDriver {
   }
 
   private async sendCommand(fullId: string, device: TuyaDevice, state: Partial<LightState>): Promise<void> {
-    const dps = this.buildDps(device.config, state, device.state);
+    const dps = this.buildDps(fullId, device.config, state, device.state);
     if (Object.keys(dps).length === 0) {
       // Nothing to send, check pending
       this.processPending(fullId, device);
@@ -417,6 +466,49 @@ export class TuyaDriver implements LightDriver {
     }
   }
 
+  /**
+   * Get muted RGB channels for a device
+   */
+  getMutedChannels(deviceId: string): MutedChannels {
+    const fullId = deviceId.startsWith('tuya:') ? deviceId : `tuya:${deviceId}`;
+    return this.mutedChannels.get(fullId) ?? { r: false, g: false, b: false };
+  }
+
+  /**
+   * Set muted RGB channels for a device
+   */
+  setMutedChannels(deviceId: string, channels: MutedChannels): void {
+    const fullId = deviceId.startsWith('tuya:') ? deviceId : `tuya:${deviceId}`;
+    this.mutedChannels.set(fullId, channels);
+  }
+
+  /**
+   * Apply channel muting to HSV color, returns modified H/S
+   */
+  private applyChannelMuting(deviceId: string, h: number, s: number, v: number): { h: number; s: number; v: number } {
+    const muted = this.mutedChannels.get(deviceId);
+    if (!muted || (!muted.r && !muted.g && !muted.b)) {
+      return { h, s, v }; // No muting
+    }
+
+    // Convert to RGB
+    let [r, g, b] = hsvToRgb(h, s, v);
+
+    // Apply muting
+    if (muted.r) r = 0;
+    if (muted.g) g = 0;
+    if (muted.b) b = 0;
+
+    // If all channels are muted/zero, return black (low saturation)
+    if (r === 0 && g === 0 && b === 0) {
+      return { h: 0, s: 0, v: 0 };
+    }
+
+    // Convert back to HSV
+    const [newH, newS, newV] = rgbToHsv(r, g, b);
+    return { h: newH, s: newS, v: newV };
+  }
+
   private getCapabilities(config: TuyaDeviceConfig): Capability[] {
     const caps: Capability[] = ['on_off'];
     const mapping = config.mapping || {};
@@ -495,6 +587,7 @@ export class TuyaDriver implements LightDriver {
   }
 
   private buildDps(
+    deviceId: string,
     config: TuyaDeviceConfig,
     state: Partial<LightState>,
     currentState: LightState
@@ -518,10 +611,12 @@ export class TuyaDriver implements LightDriver {
       const isColorMode = currentState.color !== undefined;
 
       if (isColorMode && colourDp && currentState.color) {
-        // Update brightness via colour_data HSV value
-        const h = currentState.color.h.toString(16).padStart(4, '0');
-        const s = Math.round(currentState.color.s * 10).toString(16).padStart(4, '0');
-        const v = Math.round(state.brightness * 10).toString(16).padStart(4, '0');
+        // Update brightness via colour_data HSV value - apply muting
+        const vPct = state.brightness;
+        const muted = this.applyChannelMuting(deviceId, currentState.color.h, currentState.color.s, vPct);
+        const h = muted.h.toString(16).padStart(4, '0');
+        const s = Math.round(muted.s * 10).toString(16).padStart(4, '0');
+        const v = Math.round(muted.v * 10).toString(16).padStart(4, '0');
         dps[colourDp] = h + s + v;
         // Stay in color mode
         if (workModeDp) dps[workModeDp] = 'colour';
@@ -533,10 +628,13 @@ export class TuyaDriver implements LightDriver {
     }
 
     if (state.color !== undefined && colourDp) {
+      // Apply channel muting before sending color
+      const vPct = currentState.brightness ?? 100;
+      const muted = this.applyChannelMuting(deviceId, state.color.h, state.color.s, vPct);
       // Use hex format: HHHHSSSSVVVV (4 hex chars each for h, s, v)
-      const h = state.color.h.toString(16).padStart(4, '0');
-      const s = Math.round(state.color.s * 10).toString(16).padStart(4, '0');
-      const v = (currentState.brightness ? Math.round(currentState.brightness * 10) : 1000).toString(16).padStart(4, '0');
+      const h = muted.h.toString(16).padStart(4, '0');
+      const s = Math.round(muted.s * 10).toString(16).padStart(4, '0');
+      const v = Math.round(muted.v * 10).toString(16).padStart(4, '0');
       dps[colourDp] = h + s + v;
       if (workModeDp) dps[workModeDp] = 'colour';
     }

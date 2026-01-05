@@ -31,6 +31,15 @@ async function setTuyaDps(id: string, dps: Record<string, any>) {
   });
 }
 
+// Set muted channels for a device
+async function setMutedChannels(id: string, channels: { r?: boolean; g?: boolean; b?: boolean }) {
+  await fetch(`/api/lights/${id}/muted-channels`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(channels),
+  });
+}
+
 interface LightPaneProps {
   light: Light;
   roomId: string;
@@ -62,6 +71,11 @@ export function LightPane({ light, roomId, onClose }: LightPaneProps) {
   const [nebulaOn, setNebulaOn] = useState(true);
   const laserSpeedThrottle = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // RGB channel muting (for filtering unwanted colors)
+  const [mutedR, setMutedR] = useState(false);
+  const [mutedG, setMutedG] = useState(false);
+  const [mutedB, setMutedB] = useState(false);
+
   const handleLaserSpeedChange = useCallback((speed: number) => {
     setLaserSpeed(speed);
     // Throttle API calls for slider
@@ -81,6 +95,13 @@ export function LightPane({ light, roomId, onClose }: LightPaneProps) {
   const handleNebulaToggle = useCallback((on: boolean) => {
     setNebulaOn(on);
     setTuyaDps(light.id, { '103': on });
+  }, [light.id]);
+
+  const handleMutedChannelToggle = useCallback((channel: 'r' | 'g' | 'b', muted: boolean) => {
+    if (channel === 'r') setMutedR(muted);
+    if (channel === 'g') setMutedG(muted);
+    if (channel === 'b') setMutedB(muted);
+    setMutedChannels(light.id, { [channel]: muted });
   }, [light.id]);
 
   // Handle light position change on palette - update store AND send color to light
@@ -256,6 +277,34 @@ export function LightPane({ light, roomId, onClose }: LightPaneProps) {
                 }`}
               />
             </button>
+          </div>
+
+          {/* RGB channel muting */}
+          <div className="flex items-center justify-between mt-3 pt-3 border-t border-zinc-700/50">
+            <span className="text-xs text-zinc-400">Mute</span>
+            <div className="flex gap-1.5">
+              {(['r', 'g', 'b'] as const).map((channel) => {
+                const isMuted = channel === 'r' ? mutedR : channel === 'g' ? mutedG : mutedB;
+                const colors = {
+                  r: { active: 'bg-red-500', muted: 'bg-red-900/50 text-red-400' },
+                  g: { active: 'bg-green-500', muted: 'bg-green-900/50 text-green-400' },
+                  b: { active: 'bg-blue-500', muted: 'bg-blue-900/50 text-blue-400' },
+                };
+                return (
+                  <button
+                    key={channel}
+                    onClick={() => handleMutedChannelToggle(channel, !isMuted)}
+                    className={`w-7 h-7 rounded text-xs font-bold transition-all ${
+                      isMuted
+                        ? `${colors[channel].muted} line-through opacity-50`
+                        : `${colors[channel].active} text-white`
+                    }`}
+                  >
+                    {channel.toUpperCase()}
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </div>
       )}

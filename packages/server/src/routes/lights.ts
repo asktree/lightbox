@@ -56,5 +56,32 @@ export function createLightsRouter(lightManager: LightManager): Router {
     }
   });
 
+  // Get muted RGB channels for a Tuya device
+  router.get('/:id/muted-channels', (req, res) => {
+    try {
+      const channels = lightManager.getTuyaMutedChannels(req.params.id);
+      res.json(channels);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Set muted RGB channels for a Tuya device
+  router.put('/:id/muted-channels', (req, res) => {
+    try {
+      const { r, g, b } = req.body as { r?: boolean; g?: boolean; b?: boolean };
+      const current = lightManager.getTuyaMutedChannels(req.params.id);
+      const channels = {
+        r: r ?? current.r,
+        g: g ?? current.g,
+        b: b ?? current.b,
+      };
+      lightManager.setTuyaMutedChannels(req.params.id, channels);
+      res.json(channels);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
   return router;
 }
