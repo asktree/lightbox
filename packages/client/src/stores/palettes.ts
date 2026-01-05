@@ -1,5 +1,4 @@
 import { create } from 'zustand';
-import { useShallow } from 'zustand/react/shallow';
 import type { Palette, PaletteNode, RoomState, PalettePositions } from '@lightbox/shared';
 
 interface PalettesStore {
@@ -350,12 +349,15 @@ export const usePalettesStore = create<PalettesStore>((set, get) => ({
 
 // Efficient selector hooks - use these instead of getRoomState for better performance
 
+// Stable empty object to avoid infinite re-render loops
+const EMPTY_POSITIONS: PalettePositions = {};
+
 /**
  * Subscribe to just the positions for a specific room.
  * Only re-renders when positions actually change.
  */
 export function useRoomPositions(roomId: string): PalettePositions {
-  return usePalettesStore((s) => s.roomPositions[roomId]?.positions ?? {});
+  return usePalettesStore((s) => s.roomPositions[roomId]?.positions ?? EMPTY_POSITIONS);
 }
 
 /**
@@ -363,14 +365,8 @@ export function useRoomPositions(roomId: string): PalettePositions {
  * Does NOT include positions - won't re-render on position updates.
  */
 export function useRoomPlayState(roomId: string) {
-  return usePalettesStore(
-    useShallow((s) => {
-      const state = s.roomStates[roomId];
-      return {
-        activePaletteId: state?.activePaletteId ?? null,
-        isPlaying: state?.isPlaying ?? false,
-        secondsPerNode: state?.secondsPerNode ?? 2,
-      };
-    })
-  );
+  const activePaletteId = usePalettesStore((s) => s.roomStates[roomId]?.activePaletteId ?? null);
+  const isPlaying = usePalettesStore((s) => s.roomStates[roomId]?.isPlaying ?? false);
+  const secondsPerNode = usePalettesStore((s) => s.roomStates[roomId]?.secondsPerNode ?? 2);
+  return { activePaletteId, isPlaying, secondsPerNode };
 }
