@@ -28,7 +28,6 @@ export default function App() {
     const saved = localStorage.getItem('lightbox:viewMode');
     return saved === 'grid' || saved === 'wheel' ? saved : 'wheel';
   });
-  const [selectedLightIds, setSelectedLightIds] = useState<Set<string>>(new Set());
   const [currentRoom, setCurrentRoom] = useState<string>(() => {
     const saved = localStorage.getItem('lightbox:currentRoom');
     return saved && saved in ROOMS ? saved : 'bedroom';
@@ -58,21 +57,6 @@ export default function App() {
   const reachableLights = lightsList.filter((l) => l.reachable);
   const unreachableLights = lightsList.filter((l) => !l.reachable);
   const colorLights = reachableLights.filter((l) => l.capabilities.includes('color'));
-
-  // For color wheel: use selected lights, or all color lights if none selected
-  const wheelLights = selectedLightIds.size > 0
-    ? colorLights.filter((l) => selectedLightIds.has(l.id))
-    : colorLights;
-
-  const toggleLightSelection = (id: string) => {
-    const next = new Set(selectedLightIds);
-    if (next.has(id)) {
-      next.delete(id);
-    } else {
-      next.add(id);
-    }
-    setSelectedLightIds(next);
-  };
 
   // Get selected light for LightPane
   const selectedLight = selectedTrackLight ? lights.get(selectedTrackLight) : null;
@@ -231,7 +215,7 @@ export default function App() {
           {/* Wheel - up to 2/3 viewport width */}
           <div className="flex-shrink-0">
             <ColorWheel
-              lights={wheelLights}
+              lights={colorLights}
               size={Math.min(600, Math.floor(window.innerWidth * 0.65))}
               selectedLightId={selectedTrackLight}
               onLightSelect={setSelectedTrackLight}
@@ -240,63 +224,34 @@ export default function App() {
           </div>
 
 
-          {/* Light filter - only when no palette active */}
-          {!activePalette && (
-            <div className="w-full max-w-lg">
-              <h2 className="text-sm text-zinc-400 mb-3 text-center">
-                {selectedLightIds.size === 0
-                  ? 'Showing all color lights (click to filter)'
-                  : `Showing ${selectedLightIds.size} selected`}
-              </h2>
-              <div className="flex flex-wrap justify-center gap-2">
-                {colorLights.map((light) => {
-                  const isSelected = selectedLightIds.has(light.id);
-                  const color = light.state.color;
-                  const bgColor = color
-                    ? `hsl(${color.h}, ${color.s}%, 50%)`
-                    : '#888';
+          {/* Light selection buttons */}
+          <div className="flex flex-wrap justify-center gap-2">
+            {colorLights.map((light) => {
+              const isSelected = selectedTrackLight === light.id;
+              const color = light.state.color;
+              const bgColor = color
+                ? `hsl(${color.h}, ${color.s}%, 50%)`
+                : '#888';
 
-                  return (
-                    <button
-                      key={light.id}
-                      onClick={() => toggleLightSelection(light.id)}
-                      className={`px-3 py-1.5 rounded-full text-sm font-medium transition-all flex items-center gap-2 ${
-                        isSelected || selectedLightIds.size === 0
-                          ? 'bg-zinc-700 text-white'
-                          : 'bg-zinc-800 text-zinc-500'
-                      }`}
-                    >
-                      <div
-                        className="w-3 h-3 rounded-full"
-                        style={{ backgroundColor: light.state.on ? bgColor : '#444' }}
-                      />
-                      {light.name}
-                    </button>
-                  );
-                })}
-              </div>
-
-              {selectedLightIds.size > 0 && (
+              return (
                 <button
-                  onClick={() => setSelectedLightIds(new Set())}
-                  className="mt-4 text-sm text-zinc-500 hover:text-white transition-all block mx-auto"
+                  key={light.id}
+                  onClick={() => setSelectedTrackLight(isSelected ? null : light.id)}
+                  className={`px-3 py-1.5 rounded-full text-sm font-medium transition-all flex items-center gap-2 ${
+                    isSelected
+                      ? 'bg-purple-600 text-white'
+                      : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
+                  }`}
                 >
-                  Clear selection
+                  <div
+                    className="w-3 h-3 rounded-full"
+                    style={{ backgroundColor: light.state.on ? bgColor : '#444' }}
+                  />
+                  {light.name}
                 </button>
-              )}
-
-              {colorLights.length === 0 && (
-                <p className="text-zinc-500 text-center">No color-capable lights available</p>
-              )}
-            </div>
-          )}
-
-          {/* Hint when palette is active */}
-          {activePalette && !selectedTrackLight && (
-            <p className="text-zinc-500 text-sm">
-              Click on a light dot to adjust its position on the palette
-            </p>
-          )}
+              );
+            })}
+          </div>
         </div>
       )}
 

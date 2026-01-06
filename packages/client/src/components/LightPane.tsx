@@ -162,6 +162,19 @@ export function LightPane({ light, roomId, onClose }: LightPaneProps) {
             {diag.connected ? 'connected' : 'disconnected'}
           </span>
         )}
+        {/* On/Off toggle */}
+        <button
+          onClick={() => setLightState(light.id, { on: !light.state.on })}
+          className={`ml-auto relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+            light.state.on ? 'bg-green-600' : 'bg-zinc-700'
+          }`}
+        >
+          <span
+            className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${
+              light.state.on ? 'translate-x-4' : 'translate-x-0.5'
+            }`}
+          />
+        </button>
       </div>
 
       <div className="flex gap-4 items-start">
