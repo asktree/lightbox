@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { ROOMS, HIDDEN_LIGHT_IDS } from '@lightbox/shared';
 import { useLightsStore } from './stores/lights';
 import { usePalettesStore, useRoomPlayState } from './stores/palettes';
@@ -63,6 +63,38 @@ export default function App() {
   const unreachableLights = lightsList.filter((l) => !l.reachable);
   const colorLights = reachableLights.filter((l) => l.capabilities.includes('color'));
 
+  // Global brightness for the room - value is the max brightness among lights
+  const brightnessCapableLights = reachableLights.filter((l) => l.capabilities.includes('brightness'));
+  const maxBrightness = Math.max(...brightnessCapableLights.map((l) => l.state.brightness ?? 100), 0);
+
+  // Store the brightness ratios when starting to drag
+  const brightnessRatiosRef = useRef<Map<string, number>>(new Map());
+  const isDraggingGlobalRef = useRef(false);
+
+  const handleGlobalBrightnessStart = useCallback(() => {
+    isDraggingGlobalRef.current = true;
+    // Capture current ratios relative to max
+    const currentMax = Math.max(...brightnessCapableLights.map((l) => l.state.brightness ?? 100), 1);
+    brightnessRatiosRef.current = new Map(
+      brightnessCapableLights.map((l) => [l.id, (l.state.brightness ?? 100) / currentMax])
+    );
+  }, [brightnessCapableLights]);
+
+  const handleGlobalBrightnessChange = useCallback((newMax: number) => {
+    const setLightState = useLightsStore.getState().setLightState;
+    const ratios = brightnessRatiosRef.current;
+
+    for (const light of brightnessCapableLights) {
+      const ratio = ratios.get(light.id) ?? 1;
+      const newBrightness = Math.max(1, Math.round(newMax * ratio));
+      setLightState(light.id, { brightness: newBrightness }, 50);
+    }
+  }, [brightnessCapableLights]);
+
+  const handleGlobalBrightnessEnd = useCallback(() => {
+    isDraggingGlobalRef.current = false;
+  }, []);
+
   // Get selected light for LightPane (only in wheel view)
   const selectedLight = view === 'wheel' && selectedTrackLight ? lights.get(selectedTrackLight) : null;
 
@@ -94,6 +126,29 @@ export default function App() {
             </span>
           )}
         </div>
+
+        {/* Global brightness slider */}
+        {brightnessCapableLights.length > 0 && (
+          <div className="flex items-center gap-3 flex-1 max-w-xs mx-8">
+            <input
+              type="range"
+              min="1"
+              max="100"
+              value={maxBrightness}
+              onMouseDown={handleGlobalBrightnessStart}
+              onTouchStart={handleGlobalBrightnessStart}
+              onChange={(e) => handleGlobalBrightnessChange(parseInt(e.target.value))}
+              onMouseUp={handleGlobalBrightnessEnd}
+              onTouchEnd={handleGlobalBrightnessEnd}
+              className="flex-1 h-2 bg-zinc-700 rounded-full appearance-none cursor-pointer accent-white"
+              style={{
+                background: `linear-gradient(to right, #fafafa 0%, #fafafa ${maxBrightness}%, #3f3f46 ${maxBrightness}%, #3f3f46 100%)`,
+              }}
+            />
+            <span className="text-sm text-zinc-400 w-10 text-right">{maxBrightness}%</span>
+          </div>
+        )}
+
         <div className="flex items-center gap-4">
           {/* Room selector */}
           <div className="flex bg-zinc-800 rounded-lg p-1">
