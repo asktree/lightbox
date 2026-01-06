@@ -40,7 +40,13 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('lightbox:currentRoom', currentRoom);
   }, [currentRoom]);
-  const [selectedTrackLight, setSelectedTrackLight] = useState<string | null>(null);
+
+  // Selection is per-room
+  const [selectedByRoom, setSelectedByRoom] = useState<Record<string, string | null>>({});
+  const selectedTrackLight = selectedByRoom[currentRoom] ?? null;
+  const setSelectedTrackLight = (lightId: string | null) => {
+    setSelectedByRoom((prev) => ({ ...prev, [currentRoom]: lightId }));
+  };
 
   // Get current room's palette state - efficient selector (no positions)
   const { activePaletteId } = useRoomPlayState(currentRoom);
@@ -57,8 +63,8 @@ export default function App() {
   const unreachableLights = lightsList.filter((l) => !l.reachable);
   const colorLights = reachableLights.filter((l) => l.capabilities.includes('color'));
 
-  // Get selected light for LightPane
-  const selectedLight = selectedTrackLight ? lights.get(selectedTrackLight) : null;
+  // Get selected light for LightPane (only in wheel view)
+  const selectedLight = view === 'wheel' && selectedTrackLight ? lights.get(selectedTrackLight) : null;
 
   return (
     <>
