@@ -178,7 +178,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Grid View */}
+      {/* Grid View - masonry/columnar layout */}
       {view === 'grid' && (
         <>
           {lightsList.length === 0 ? (
@@ -187,18 +187,22 @@ export default function App() {
             </div>
           ) : (
             <>
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+              <div className="columns-1 sm:columns-2 md:columns-3 lg:columns-4 gap-4">
                 {reachableLights.map((light) => (
-                  <LightPane key={light.id} light={light} roomId={currentRoom} variant="inline" />
+                  <div key={light.id} className="mb-4 break-inside-avoid">
+                    <LightPane light={light} roomId={currentRoom} variant="inline" />
+                  </div>
                 ))}
               </div>
 
               {unreachableLights.length > 0 && (
                 <>
                   <h2 className="text-sm text-zinc-500 mt-8 mb-4">Unreachable</h2>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                  <div className="columns-1 sm:columns-2 md:columns-3 lg:columns-4 gap-4">
                     {unreachableLights.map((light) => (
-                      <LightPane key={light.id} light={light} roomId={currentRoom} variant="inline" />
+                      <div key={light.id} className="mb-4 break-inside-avoid">
+                        <LightPane light={light} roomId={currentRoom} variant="inline" />
+                      </div>
                     ))}
                   </div>
                 </>
