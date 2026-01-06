@@ -73,6 +73,11 @@ export default function App() {
 
   const handleGlobalBrightnessStart = useCallback(() => {
     isDraggingGlobalRef.current = true;
+    // Mark all lights as controlled to prevent WebSocket overwrites
+    const { startControlling } = useLightsStore.getState();
+    for (const light of brightnessCapableLights) {
+      startControlling(light.id);
+    }
     // Capture current ratios relative to max
     const currentMax = Math.max(...brightnessCapableLights.map((l) => l.state.brightness ?? 100), 1);
     brightnessRatiosRef.current = new Map(
@@ -93,7 +98,12 @@ export default function App() {
 
   const handleGlobalBrightnessEnd = useCallback(() => {
     isDraggingGlobalRef.current = false;
-  }, []);
+    // Release all lights
+    const { stopControlling } = useLightsStore.getState();
+    for (const light of brightnessCapableLights) {
+      stopControlling(light.id);
+    }
+  }, [brightnessCapableLights]);
 
   // Get selected light for LightPane (only in wheel view)
   const selectedLight = view === 'wheel' && selectedTrackLight ? lights.get(selectedTrackLight) : null;

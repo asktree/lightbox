@@ -51,6 +51,8 @@ export function LightPane({ light, roomId, onClose, variant = 'fixed' }: LightPa
   const palettes = usePalettesStore((s) => s.palettes);
   const setLightTrackPosition = usePalettesStore((s) => s.setLightTrackPosition);
   const setLightState = useLightsStore((s) => s.setLightState);
+  const startControlling = useLightsStore((s) => s.startControlling);
+  const stopControlling = useLightsStore((s) => s.stopControlling);
   const diagnostics = useDebugStore((s) => s.diagnostics);
 
   // Get room-specific state - split for efficiency
@@ -193,6 +195,7 @@ export function LightPane({ light, roomId, onClose, variant = 'fixed' }: LightPa
             className="relative w-3 rounded-full overflow-hidden cursor-pointer"
             style={{ height: 120 }}
             onMouseDown={(e) => {
+              startControlling(light.id);
               const rect = e.currentTarget.getBoundingClientRect();
               const updateBrightness = (clientY: number) => {
                 const y = clientY - rect.top;
@@ -205,6 +208,7 @@ export function LightPane({ light, roomId, onClose, variant = 'fixed' }: LightPa
               const onUp = () => {
                 window.removeEventListener('mousemove', onMove);
                 window.removeEventListener('mouseup', onUp);
+                stopControlling(light.id);
               };
               window.addEventListener('mousemove', onMove);
               window.addEventListener('mouseup', onUp);
