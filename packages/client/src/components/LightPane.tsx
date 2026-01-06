@@ -43,10 +43,11 @@ async function setMutedChannels(id: string, channels: { r?: boolean; g?: boolean
 interface LightPaneProps {
   light: Light;
   roomId: string;
-  onClose: () => void;
+  onClose?: () => void;
+  variant?: 'fixed' | 'inline';
 }
 
-export function LightPane({ light, roomId, onClose }: LightPaneProps) {
+export function LightPane({ light, roomId, onClose, variant = 'fixed' }: LightPaneProps) {
   const palettes = usePalettesStore((s) => s.palettes);
   const setLightTrackPosition = usePalettesStore((s) => s.setLightTrackPosition);
   const setLightState = useLightsStore((s) => s.setLightState);
@@ -122,8 +123,14 @@ export function LightPane({ light, roomId, onClose }: LightPaneProps) {
 
   const brightness = light.state.brightness ?? 100;
 
+  const isInline = variant === 'inline';
+
   return (
-    <div className="fixed top-20 right-4 bg-zinc-900/95 backdrop-blur border border-zinc-700 rounded-lg shadow-xl p-4 min-w-[240px] max-w-[320px]">
+    <div className={
+      isInline
+        ? 'bg-zinc-900 border border-zinc-700 rounded-lg p-4'
+        : 'fixed top-20 right-4 bg-zinc-900/95 backdrop-blur border border-zinc-700 rounded-lg shadow-xl p-4 min-w-[240px] max-w-[320px]'
+    }>
       {/* Header */}
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
@@ -138,14 +145,16 @@ export function LightPane({ light, roomId, onClose }: LightPaneProps) {
             />
           )}
         </div>
-        <button
-          onClick={onClose}
-          className="text-zinc-500 hover:text-white transition-colors"
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-          </svg>
-        </button>
+        {onClose && (
+          <button
+            onClick={onClose}
+            className="text-zinc-500 hover:text-white transition-colors"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        )}
       </div>
 
       {/* Status line */}

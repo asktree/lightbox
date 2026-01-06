@@ -4,7 +4,6 @@ import { useLightsStore } from './stores/lights';
 import { usePalettesStore, useRoomPlayState } from './stores/palettes';
 import { useDebugStore } from './stores/debug';
 import { useWebSocket } from './hooks/useWebSocket';
-import { LightCard } from './components/LightCard';
 import { ColorWheel } from './components/ColorWheel';
 import { PaletteControls } from './components/PaletteControls';
 import { LightPane } from './components/LightPane';
@@ -60,12 +59,6 @@ export default function App() {
 
   // Get selected light for LightPane
   const selectedLight = selectedTrackLight ? lights.get(selectedTrackLight) : null;
-
-  // Handler for clicking a light's color indicator in grid view
-  const handleColorClick = (lightId: string) => {
-    setView('wheel');
-    setSelectedTrackLight(lightId);
-  };
 
   return (
     <>
@@ -188,18 +181,18 @@ export default function App() {
             </div>
           ) : (
             <>
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
                 {reachableLights.map((light) => (
-                  <LightCard key={light.id} light={light} onColorClick={handleColorClick} />
+                  <LightPane key={light.id} light={light} roomId={currentRoom} variant="inline" />
                 ))}
               </div>
 
               {unreachableLights.length > 0 && (
                 <>
                   <h2 className="text-sm text-zinc-500 mt-8 mb-4">Unreachable</h2>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
                     {unreachableLights.map((light) => (
-                      <LightCard key={light.id} light={light} onColorClick={handleColorClick} />
+                      <LightPane key={light.id} light={light} roomId={currentRoom} variant="inline" />
                     ))}
                   </div>
                 </>
