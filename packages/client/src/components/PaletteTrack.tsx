@@ -86,6 +86,9 @@ export function PaletteTrack({ palette, size, lightPositions, roomId, isEditing,
   const updateNodePosition = usePalettesStore((s) => s.updateNodePosition);
   const saveNodePositions = usePalettesStore((s) => s.saveNodePositions);
   const setLightTrackPosition = usePalettesStore((s) => s.setLightTrackPosition);
+  const setLocalLightPosition = usePalettesStore((s) => s.setLocalLightPosition);
+  const startDraggingLight = usePalettesStore((s) => s.startDraggingLight);
+  const stopDraggingLight = usePalettesStore((s) => s.stopDraggingLight);
   const removeNodeFromActive = usePalettesStore((s) => s.removeNodeFromActive);
   const setLightState = useLightsStore((s) => s.setLightState);
   const startControlling = useLightsStore((s) => s.startControlling);
@@ -182,8 +185,9 @@ export function PaletteTrack({ palette, size, lightPositions, roomId, isEditing,
     e.stopPropagation();
     setDraggingLight(lightId);
     startControlling(lightId);
+    startDraggingLight(lightId);
     didDragLightRef.current = false;
-  }, [canDragLights, startControlling]);
+  }, [canDragLights, startControlling, startDraggingLight]);
 
   const handleLightMouseMove = useCallback((e: MouseEvent) => {
     if (!draggingLight || !roomId) return;
@@ -200,21 +204,25 @@ export function PaletteTrack({ palette, size, lightPositions, roomId, isEditing,
     // Find closest point on the track
     const closestT = findClosestPointOnTrack(palette, x, y);
 
-    // Update light position on track (via server)
+    // Update local state immediately for responsive UI (bypasses WebSocket ignore)
+    setLocalLightPosition(roomId, palette.id, draggingLight, closestT);
+
+    // Send to server (throttled)
     setLightTrackPosition(roomId, draggingLight, closestT);
 
     // Update light color to match track position
     const point = getPointOnPalette(palette, closestT);
     const { h, s } = normalizedToHs(point.x, point.y);
     setLightState(draggingLight, { color: { h, s } }, 50);
-  }, [draggingLight, roomId, size, palette, setLightTrackPosition, setLightState]);
+  }, [draggingLight, roomId, size, palette, setLocalLightPosition, setLightTrackPosition, setLightState]);
 
   const handleLightMouseUp = useCallback(() => {
     if (draggingLight) {
       stopControlling(draggingLight);
+      stopDraggingLight();
       setDraggingLight(null);
     }
-  }, [draggingLight, stopControlling]);
+  }, [draggingLight, stopControlling, stopDraggingLight]);
 
   // Global mouse events for node dragging
   useEffect(() => {

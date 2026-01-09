@@ -117,6 +117,9 @@ export function createRoomsRouter(animator: PaletteAnimator): Router {
         return res.status(400).json({ error: 'Position must be a number between 0 and 1' });
       }
 
+      // Mark light as user-controlled to pause palette animation temporarily
+      animator.markUserControlled(req.params.lightId);
+
       await animator.setLightPosition(req.params.roomId, req.params.lightId, position);
       res.json({ ok: true });
     } catch (err: unknown) {

@@ -1,6 +1,35 @@
 import { create } from 'zustand';
 import type { Palette, PaletteNode, RoomState, PalettePositions } from '@lightbox/shared';
 
+// Throttle position updates per light - only send latest
+const pendingPositions = new Map<string, { roomId: string; position: number }>();
+const positionTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const POSITION_THROTTLE_MS = 50;
+
+// Track which light is being dragged - ignore WebSocket position updates for it
+let draggingLightId: string | null = null;
+
+function sendPositionThrottled(roomId: string, lightId: string, position: number) {
+  pendingPositions.set(lightId, { roomId, position });
+
+  if (!positionTimers.has(lightId)) {
+    const timer = setTimeout(() => {
+      const pending = pendingPositions.get(lightId);
+      pendingPositions.delete(lightId);
+      positionTimers.delete(lightId);
+
+      if (pending) {
+        fetch(`/api/rooms/${pending.roomId}/lights/${lightId}/position`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ position: pending.position }),
+        }).catch(console.error);
+      }
+    }, POSITION_THROTTLE_MS);
+    positionTimers.set(lightId, timer);
+  }
+}
+
 interface PalettesStore {
   // Palette definitions (global - same for all rooms)
   palettes: Palette[];
@@ -33,6 +62,11 @@ interface PalettesStore {
   pausePalette: (roomId: string) => Promise<void>;
   setRoomSpeed: (roomId: string, secondsPerNode: number) => Promise<void>;
   setLightTrackPosition: (roomId: string, lightId: string, position: number) => Promise<void>;
+
+  // Drag tracking - ignore WebSocket updates while dragging
+  startDraggingLight: (lightId: string) => void;
+  stopDraggingLight: () => void;
+  setLocalLightPosition: (roomId: string, paletteId: string, lightId: string, position: number) => void;
 
   // Editing (for creating new palettes - client-side)
   startEditing: () => void;
@@ -109,6 +143,9 @@ export const usePalettesStore = create<PalettesStore>((set, get) => ({
   },
 
   updateLightPosition: (roomId: string, paletteId: string, lightId: string, position: number) => {
+    // Skip WebSocket updates for the light being dragged (local updates are immediate)
+    if (draggingLightId === lightId) return;
+
     set((s) => {
       const current = s.roomPositions[roomId];
       if (!current || current.paletteId !== paletteId) {
@@ -175,12 +212,40 @@ export const usePalettesStore = create<PalettesStore>((set, get) => ({
   },
 
   setLightTrackPosition: async (roomId: string, lightId: string, position: number) => {
-    await fetch(`/api/rooms/${roomId}/lights/${lightId}/position`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ position }),
-    });
+    sendPositionThrottled(roomId, lightId, position);
     // State will be updated via WebSocket
+  },
+
+  startDraggingLight: (lightId: string) => {
+    draggingLightId = lightId;
+  },
+
+  stopDraggingLight: () => {
+    draggingLightId = null;
+  },
+
+  // Direct local update (doesn't check drag flag - for use during drag)
+  setLocalLightPosition: (roomId: string, paletteId: string, lightId: string, position: number) => {
+    set((s) => {
+      const current = s.roomPositions[roomId];
+      if (!current || current.paletteId !== paletteId) {
+        return {
+          roomPositions: {
+            ...s.roomPositions,
+            [roomId]: { paletteId, positions: { [lightId]: position } },
+          },
+        };
+      }
+      return {
+        roomPositions: {
+          ...s.roomPositions,
+          [roomId]: {
+            paletteId,
+            positions: { ...current.positions, [lightId]: position },
+          },
+        },
+      };
+    });
   },
 
   // Editing (client-side only)

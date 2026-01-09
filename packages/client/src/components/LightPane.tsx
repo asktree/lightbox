@@ -50,6 +50,9 @@ interface LightPaneProps {
 export function LightPane({ light, roomId, onClose, variant = 'fixed' }: LightPaneProps) {
   const palettes = usePalettesStore((s) => s.palettes);
   const setLightTrackPosition = usePalettesStore((s) => s.setLightTrackPosition);
+  const setLocalLightPosition = usePalettesStore((s) => s.setLocalLightPosition);
+  const startDraggingLight = usePalettesStore((s) => s.startDraggingLight);
+  const stopDraggingLight = usePalettesStore((s) => s.stopDraggingLight);
   const setLightState = useLightsStore((s) => s.setLightState);
   const startControlling = useLightsStore((s) => s.startControlling);
   const stopControlling = useLightsStore((s) => s.stopControlling);
@@ -130,14 +133,28 @@ export function LightPane({ light, roomId, onClose, variant = 'fixed' }: LightPa
   const handlePositionChange = useCallback((pos: number) => {
     if (!activePalette) return;
 
-    // Update position in store (via server)
+    // Update local state immediately for responsive UI (bypasses WebSocket ignore)
+    setLocalLightPosition(roomId, activePalette.id, light.id, pos);
+
+    // Send to server (throttled)
     setLightTrackPosition(roomId, light.id, pos);
 
     // Calculate color at this position and send to light with smooth transition
     const point = getPointOnPalette(activePalette, pos);
     const { h, s } = normalizedToHs(point.x, point.y);
     setLightState(light.id, { color: { h, s } }, 50);
-  }, [light.id, roomId, activePalette, setLightTrackPosition, setLightState]);
+  }, [light.id, roomId, activePalette, setLocalLightPosition, setLightTrackPosition, setLightState]);
+
+  // Handle drag start/stop on palette wheel
+  const handleDragStart = useCallback(() => {
+    startControlling(light.id);
+    startDraggingLight(light.id);
+  }, [light.id, startControlling, startDraggingLight]);
+
+  const handleDragEnd = useCallback(() => {
+    stopControlling(light.id);
+    stopDraggingLight();
+  }, [light.id, stopControlling, stopDraggingLight]);
 
   // Handle brightness change
   const handleBrightnessChange = useCallback((brightness: number) => {
@@ -280,6 +297,8 @@ export function LightPane({ light, roomId, onClose, variant = 'fixed' }: LightPa
             palette={activePalette}
             position={lightPosition}
             onChange={handlePositionChange}
+            onDragStart={handleDragStart}
+            onDragEnd={handleDragEnd}
             size={120}
           />
         )}

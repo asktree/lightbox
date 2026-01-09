@@ -5,6 +5,8 @@ interface Props {
   palette: Palette;
   position: number; // 0-1
   onChange: (position: number) => void;
+  onDragStart?: () => void;
+  onDragEnd?: () => void;
   size?: number;
 }
 
@@ -97,7 +99,7 @@ function hsvToHex(h: number, s: number, v: number = 100): string {
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 }
 
-export function PaletteWheel({ palette, position, onChange, size = 160 }: Props) {
+export function PaletteWheel({ palette, position, onChange, onDragStart, onDragEnd, size = 160 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -172,7 +174,8 @@ export function PaletteWheel({ palette, position, onChange, size = 160 }: Props)
     e.preventDefault();
     e.stopPropagation();
     setIsDragging(true);
-  }, []);
+    onDragStart?.();
+  }, [onDragStart]);
 
   const handleMouseMove = useCallback((e: MouseEvent) => {
     if (!isDragging || !containerRef.current) return;
@@ -188,7 +191,8 @@ export function PaletteWheel({ palette, position, onChange, size = 160 }: Props)
 
   const handleMouseUp = useCallback(() => {
     setIsDragging(false);
-  }, []);
+    onDragEnd?.();
+  }, [onDragEnd]);
 
   // Global mouse events
   useEffect(() => {

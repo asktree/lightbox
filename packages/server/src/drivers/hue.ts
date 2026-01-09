@@ -30,6 +30,10 @@ export class HueDriver implements LightDriver {
   private v2IdToV1Id: Map<string, string> = new Map(); // CLIP v2 UUID -> v1 numeric ID
   private eventStreamReq?: ReturnType<typeof https.request>;
 
+  // Command coalescing: max 1 in-flight + 1 pending per device
+  private inFlight: Record<string, boolean> = {};
+  private pending: Record<string, { state: Partial<LightState>; transition?: number }> = {};
+
   // Callback for pushing real-time updates
   onUpdate?: (deviceId: string, state: LightState) => void;
 
@@ -203,33 +207,62 @@ export class HueDriver implements LightDriver {
   async setState(deviceId: string, state: Partial<LightState>, transition?: number): Promise<void> {
     if (!this.api) throw new Error('Hue not connected');
 
-    const hueId = parseInt(deviceId);
-    const lightState = new v3.lightStates.LightState();
+    // Command coalescing: if something is in-flight, just update pending
+    if (this.inFlight[deviceId]) {
+      const existing = this.pending[deviceId];
+      this.pending[deviceId] = {
+        state: { ...(existing?.state || {}), ...state },
+        transition,
+      };
+      return;
+    }
 
-    if (state.on !== undefined) {
-      lightState.on(state.on);
-    }
-    if (state.brightness !== undefined) {
-      lightState.brightness(state.brightness);
-    }
-    // Color temperature and color are mutually exclusive - temperature takes priority
-    if (state.temperature !== undefined) {
-      // Convert Kelvin to mired - this switches the light to CT mode
-      const mired = Math.round(1000000 / state.temperature);
-      lightState.ct(Math.max(153, Math.min(500, mired)));
-      // Don't set color when setting temperature
-    } else if (state.color !== undefined) {
-      // Convert standard HSV hue to Hue's proprietary hue scale
-      // Hue API: Red=0, Green=25500, Blue=46920 (not linear with standard HSV)
-      const hueApiValue = this.hsvHueToHueApi(state.color.h);
-      lightState.hue(hueApiValue);
-      lightState.sat(Math.round(state.color.s * 2.54));
-    }
-    // Hue uses 100ms units. Default is 4 (400ms) which feels laggy.
-    // Use 0 for instant response unless explicitly specified.
-    lightState.transitiontime(transition !== undefined ? Math.round(transition / 100) : 0);
+    await this.sendCommand(deviceId, state, transition);
+  }
 
-    await this.api.lights.setLightState(hueId, lightState);
+  private async sendCommand(deviceId: string, state: Partial<LightState>, transition?: number): Promise<void> {
+    if (!this.api) return;
+
+    this.inFlight[deviceId] = true;
+
+    try {
+      const hueId = parseInt(deviceId);
+      const lightState = new v3.lightStates.LightState();
+
+      if (state.on !== undefined) {
+        lightState.on(state.on);
+      }
+      if (state.brightness !== undefined) {
+        lightState.brightness(state.brightness);
+      }
+      // Color temperature and color are mutually exclusive - temperature takes priority
+      if (state.temperature !== undefined) {
+        // Convert Kelvin to mired - this switches the light to CT mode
+        const mired = Math.round(1000000 / state.temperature);
+        lightState.ct(Math.max(153, Math.min(500, mired)));
+        // Don't set color when setting temperature
+      } else if (state.color !== undefined) {
+        // Convert standard HSV hue to Hue's proprietary hue scale
+        // Hue API: Red=0, Green=25500, Blue=46920 (not linear with standard HSV)
+        const hueApiValue = this.hsvHueToHueApi(state.color.h);
+        lightState.hue(hueApiValue);
+        lightState.sat(Math.round(state.color.s * 2.54));
+      }
+      // Hue uses 100ms units. Default is 4 (400ms) which feels laggy.
+      // Use 0 for instant response unless explicitly specified.
+      lightState.transitiontime(transition !== undefined ? Math.round(transition / 100) : 0);
+
+      await this.api.lights.setLightState(hueId, lightState);
+    } finally {
+      this.inFlight[deviceId] = false;
+
+      // Process pending command if any
+      const pendingCmd = this.pending[deviceId];
+      if (pendingCmd) {
+        delete this.pending[deviceId];
+        this.sendCommand(deviceId, pendingCmd.state, pendingCmd.transition).catch(() => {});
+      }
+    }
   }
 
   async dispose(): Promise<void> {
