@@ -24,6 +24,7 @@ interface TuyaDevice {
   reachable: boolean;
   connected: boolean;
   reconnectTimer?: NodeJS.Timeout;
+  reconnectAttempts: number;  // For exponential backoff
 }
 
 interface MutedChannels {
@@ -95,6 +96,9 @@ export class TuyaDriver implements LightDriver {
   // Callback for connection state changes
   onDiagnosticsChange?: () => void;
 
+  // Callback when device is ready for more commands (for fast palette updates)
+  onReadyForMore?: (deviceId: string) => void;
+
   private debugSeq = 0;
 
   // Command coalescing: max 1 in-flight + 1 pending per device
@@ -156,6 +160,7 @@ export class TuyaDriver implements LightDriver {
           state: { on: false },
           reachable: false,
           connected: false,
+          reconnectAttempts: 0,
         };
         this.devices.set(id, device);
 
@@ -190,6 +195,7 @@ export class TuyaDriver implements LightDriver {
           state: { on: false },
           reachable: false,
           connected: false,
+          reconnectAttempts: 0,
         };
         this.devices.set(id, device);
         this.setupDeviceEvents(device, id);
@@ -221,6 +227,7 @@ export class TuyaDriver implements LightDriver {
     api.on('connected', () => {
       device.connected = true;
       device.reachable = true;
+      device.reconnectAttempts = 0; // Reset backoff on successful connection
       emitDebug(config.name, 'connected', 'in');
       if (driver.onDiagnosticsChange) driver.onDiagnosticsChange();
     });
@@ -282,13 +289,19 @@ export class TuyaDriver implements LightDriver {
       clearTimeout(device.reconnectTimer);
     }
 
-    // Reconnect after 5 seconds
+    // Exponential backoff: 5s, 10s, 20s, 40s, max 60s
+    const baseDelay = 5000;
+    const maxDelay = 60000;
+    const delay = Math.min(baseDelay * Math.pow(2, device.reconnectAttempts), maxDelay);
+    device.reconnectAttempts++;
+
     device.reconnectTimer = setTimeout(async () => {
       if (device.connected) return; // Already reconnected
 
       try {
         await this.connectDevice(device, id);
         console.log(`Tuya: ${device.config.name} reconnected`);
+        device.reconnectAttempts = 0; // Reset on successful connection
 
         // Notify of state update after reconnection
         if (this.onUpdate) {
@@ -296,10 +309,10 @@ export class TuyaDriver implements LightDriver {
         }
         if (this.onDiagnosticsChange) this.onDiagnosticsChange();
       } catch {
-        // Will retry on next disconnect event or schedule again
+        // Will retry with increased backoff
         this.scheduleReconnect(device, id);
       }
-    }, 5000);
+    }, delay);
   }
 
   async getState(deviceId: string): Promise<LightState> {
@@ -394,6 +407,12 @@ export class TuyaDriver implements LightDriver {
       this.sendCommand(fullId, device, pendingCmd.state).catch(() => {
         // Errors already logged in sendCommand
       });
+    } else {
+      // No pending command - notify that we're ready for more
+      // (used by palette animator for fast continuous updates)
+      if (this.onReadyForMore) {
+        this.onReadyForMore(fullId);
+      }
     }
   }
 

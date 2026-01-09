@@ -52,7 +52,7 @@ export default function App() {
   const { activePaletteId } = useRoomPlayState(currentRoom);
   const activePalette = palettes.find((p) => p.id === activePaletteId);
 
-  const allLights = Array.from(lights.values()).filter((l) => !HIDDEN_LIGHT_IDS.has(l.id));
+  const allLights = Object.values(lights).filter((l) => !HIDDEN_LIGHT_IDS.has(l.id));
 
   // Filter lights by current room
   const roomConfig = ROOMS[currentRoom];
@@ -63,9 +63,12 @@ export default function App() {
   const unreachableLights = lightsList.filter((l) => !l.reachable);
   const colorLights = reachableLights.filter((l) => l.capabilities.includes('color'));
 
-  // Global brightness for the room - value is the max brightness among lights
+  // Global brightness for the room - value is the max brightness among ON lights
   const brightnessCapableLights = reachableLights.filter((l) => l.capabilities.includes('brightness'));
-  const maxBrightness = Math.max(...brightnessCapableLights.map((l) => l.state.brightness ?? 100), 0);
+  const onLights = brightnessCapableLights.filter((l) => l.state.on);
+  const maxBrightness = onLights.length > 0
+    ? Math.max(...onLights.map((l) => l.state.brightness ?? 100))
+    : 0;
 
   // Store the brightness ratios when starting to drag
   const brightnessRatiosRef = useRef<Map<string, number>>(new Map());
@@ -73,40 +76,40 @@ export default function App() {
 
   const handleGlobalBrightnessStart = useCallback(() => {
     isDraggingGlobalRef.current = true;
-    // Mark all lights as controlled to prevent WebSocket overwrites
+    // Mark all ON lights as controlled to prevent WebSocket overwrites
     const { startControlling } = useLightsStore.getState();
-    for (const light of brightnessCapableLights) {
+    for (const light of onLights) {
       startControlling(light.id);
     }
-    // Capture current ratios relative to max
-    const currentMax = Math.max(...brightnessCapableLights.map((l) => l.state.brightness ?? 100), 1);
+    // Capture current ratios relative to max (only for ON lights)
+    const currentMax = Math.max(...onLights.map((l) => l.state.brightness ?? 100), 1);
     brightnessRatiosRef.current = new Map(
-      brightnessCapableLights.map((l) => [l.id, (l.state.brightness ?? 100) / currentMax])
+      onLights.map((l) => [l.id, (l.state.brightness ?? 100) / currentMax])
     );
-  }, [brightnessCapableLights]);
+  }, [onLights]);
 
   const handleGlobalBrightnessChange = useCallback((newMax: number) => {
     const setLightState = useLightsStore.getState().setLightState;
     const ratios = brightnessRatiosRef.current;
 
-    for (const light of brightnessCapableLights) {
-      const ratio = ratios.get(light.id) ?? 1;
+    // Only adjust lights that have a captured ratio (were ON when drag started)
+    for (const [lightId, ratio] of ratios) {
       const newBrightness = Math.max(1, Math.round(newMax * ratio));
-      setLightState(light.id, { brightness: newBrightness }, 50);
+      setLightState(lightId, { brightness: newBrightness }, 50);
     }
-  }, [brightnessCapableLights]);
+  }, []);
 
   const handleGlobalBrightnessEnd = useCallback(() => {
     isDraggingGlobalRef.current = false;
-    // Release all lights
+    // Release lights that were controlled (those in the ratios map)
     const { stopControlling } = useLightsStore.getState();
-    for (const light of brightnessCapableLights) {
-      stopControlling(light.id);
+    for (const lightId of brightnessRatiosRef.current.keys()) {
+      stopControlling(lightId);
     }
-  }, [brightnessCapableLights]);
+  }, []);
 
   // Get selected light for LightPane (only in wheel view)
-  const selectedLight = view === 'wheel' && selectedTrackLight ? lights.get(selectedTrackLight) : null;
+  const selectedLight = view === 'wheel' && selectedTrackLight ? lights[selectedTrackLight] : null;
 
   return (
     <>

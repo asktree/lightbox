@@ -114,8 +114,8 @@ export function DebugPanel({ filterDevice, filterDevices, compact }: DebugPanelP
           {displayLogs.length === 0 ? (
             <div className="text-zinc-600 italic">no messages yet</div>
           ) : (
-            displayLogs.map((log, i) => (
-              <div key={`${log.id}-${i}`}>
+            displayLogs.map((log) => (
+              <div key={log.id}>
                 <div className="text-zinc-600">
                   {formatTime(log.timestamp)}
                   {' '}
@@ -179,8 +179,8 @@ export function DebugPanel({ filterDevice, filterDevices, compact }: DebugPanelP
         {filteredLogs.length === 0 ? (
           <div className="text-zinc-600 italic text-center py-4">waiting for messages...</div>
         ) : (
-          filteredLogs.map((log, i) => (
-            <div key={`${log.id}-${i}`}>
+          filteredLogs.map((log) => (
+            <div key={log.id}>
               <div className="text-[10px] text-zinc-600">
                 {formatTime(log.timestamp)}
                 {' '}

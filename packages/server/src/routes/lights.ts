@@ -1,8 +1,9 @@
 import { Router } from 'express';
 import type { LightManager } from '../lib/light-manager.js';
+import type { PaletteAnimator } from '../lib/palette-animator.js';
 import type { SetLightStateRequest } from '@lightbox/shared';
 
-export function createLightsRouter(lightManager: LightManager): Router {
+export function createLightsRouter(lightManager: LightManager, paletteAnimator?: PaletteAnimator): Router {
   const router = Router();
 
   // List all lights
@@ -31,6 +32,11 @@ export function createLightsRouter(lightManager: LightManager): Router {
       if (brightness !== undefined) state.brightness = brightness;
       if (color !== undefined) state.color = color;
       if (temperature !== undefined) state.temperature = temperature;
+
+      // Mark light as user-controlled to pause palette animation temporarily
+      if (paletteAnimator) {
+        paletteAnimator.markUserControlled(req.params.id);
+      }
 
       await lightManager.setLightState(req.params.id, state, transition);
       const light = lightManager.getLight(req.params.id);

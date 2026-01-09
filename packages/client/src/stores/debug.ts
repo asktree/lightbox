@@ -3,7 +3,7 @@ import type { DebugLogEntry, DeviceDiagnostics } from '@lightbox/shared';
 
 interface DebugState {
   logs: DebugLogEntry[];
-  diagnostics: Map<string, DeviceDiagnostics>;
+  diagnostics: Record<string, DeviceDiagnostics>;
   isOpen: boolean;
 
   addLog: (entry: DebugLogEntry) => void;
@@ -17,7 +17,7 @@ const MAX_LOGS = 200;
 
 export const useDebugStore = create<DebugState>((set) => ({
   logs: [],
-  diagnostics: new Map(),
+  diagnostics: {},
   isOpen: localStorage.getItem('lightbox:debugOpen') !== 'false',
 
   addLog: (entry) =>
@@ -39,10 +39,24 @@ export const useDebugStore = create<DebugState>((set) => ({
     }),
 
   syncDiagnostics: (diags) =>
-    set(() => {
-      const diagnostics = new Map<string, DeviceDiagnostics>();
+    set((state) => {
+      // Only update if data actually changed
+      const existingKeys = Object.keys(state.diagnostics);
+      let changed = diags.length !== existingKeys.length;
+      if (!changed) {
+        for (const d of diags) {
+          const existing = state.diagnostics[d.id];
+          if (!existing || existing.connected !== d.connected) {
+            changed = true;
+            break;
+          }
+        }
+      }
+      if (!changed) return state;
+
+      const diagnostics: Record<string, DeviceDiagnostics> = {};
       for (const d of diags) {
-        diagnostics.set(d.id, d);
+        diagnostics[d.id] = d;
       }
       return { diagnostics };
     }),

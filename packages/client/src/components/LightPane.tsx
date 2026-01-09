@@ -1,4 +1,4 @@
-import { useCallback, useState, useRef } from 'react';
+import { useCallback, useState, useRef, useEffect } from 'react';
 import type { Light } from '@lightbox/shared';
 import { getPointOnPalette } from '@lightbox/shared';
 import { usePalettesStore, useRoomPlayState, useRoomPositions } from '../stores/palettes';
@@ -60,10 +60,31 @@ export function LightPane({ light, roomId, onClose, variant = 'fixed' }: LightPa
   const lightPositions = useRoomPositions(roomId);
 
   // Get diagnostic for this light
-  const diag = diagnostics.get(light.id);
+  const diag = diagnostics[light.id];
 
   const activePalette = palettes.find((p) => p.id === activePaletteId);
   const lightPosition = lightPositions[light.id] ?? 0;
+
+  // Palette exclusion state
+  const [excludedFromPalette, setExcludedFromPalette] = useState(false);
+
+  // Fetch initial excluded state when palette is active
+  useEffect(() => {
+    if (!activePaletteId) return;
+    fetch(`/api/rooms/${roomId}/lights/${light.id}/excluded`)
+      .then(res => res.json())
+      .then(data => setExcludedFromPalette(data.excluded))
+      .catch(() => {});
+  }, [roomId, light.id, activePaletteId]);
+
+  const handleExcludedToggle = useCallback((excluded: boolean) => {
+    setExcludedFromPalette(excluded);
+    fetch(`/api/rooms/${roomId}/lights/${light.id}/excluded`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ excluded }),
+    }).catch(() => {});
+  }, [roomId, light.id]);
 
   // Galaxy Projector custom controls
   const isGalaxyProjector = light.id === GALAXY_PROJECTOR_ID;
@@ -187,6 +208,25 @@ export function LightPane({ light, roomId, onClose, variant = 'fixed' }: LightPa
           />
         </button>
       </div>
+
+      {/* Exclude from palette toggle - only when palette is active */}
+      {activePalette && (
+        <div className="flex items-center justify-between mb-3 py-2 px-2 bg-zinc-800/50 rounded">
+          <span className="text-xs text-zinc-400">Animate with palette</span>
+          <button
+            onClick={() => handleExcludedToggle(!excludedFromPalette)}
+            className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+              !excludedFromPalette ? 'bg-purple-600' : 'bg-zinc-700'
+            }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${
+                !excludedFromPalette ? 'translate-x-4' : 'translate-x-0.5'
+              }`}
+            />
+          </button>
+        </div>
+      )}
 
       <div className="flex gap-4 items-start">
         {/* Brightness slider (vertical) */}

@@ -81,6 +81,13 @@ export class LightManager extends EventEmitter {
           this.emit('diagnostics', this.getDiagnostics());
         };
       }
+
+      // Set up "ready for more" callback (Tuya) - used for fast palette updates
+      if ('onReadyForMore' in driver) {
+        (driver as any).onReadyForMore = (deviceId: string) => {
+          this.emit('ready_for_more', deviceId);
+        };
+      }
     }
 
     // Initialize and discover from all drivers in parallel

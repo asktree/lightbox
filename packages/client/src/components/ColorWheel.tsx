@@ -47,13 +47,13 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect,
   const setLightState = useLightsStore((s) => s.setLightState);
   const startControlling = useLightsStore((s) => s.startControlling);
   const stopControlling = useLightsStore((s) => s.stopControlling);
-  const bridgeStates = useLightsStore((s) => s.bridgeStates);
 
   const palettes = usePalettesStore((s) => s.palettes);
   const isEditing = usePalettesStore((s) => s.isEditing);
   const editingNodes = usePalettesStore((s) => s.editingNodes);
   const addNode = usePalettesStore((s) => s.addNode);
   const addNodeToActive = usePalettesStore((s) => s.addNodeToActive);
+  const editPaletteMode = usePalettesStore((s) => s.editPaletteMode);
 
   const diagnostics = useDebugStore((s) => s.diagnostics);
 
@@ -65,7 +65,7 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect,
 
   // Helper to check if a light is connected (using diagnostics or reachable)
   const isLightConnected = useCallback((light: Light) => {
-    const diag = diagnostics.get(light.id);
+    const diag = diagnostics[light.id];
     // Use diagnostics if available, otherwise fall back to light.reachable
     if (diag) {
       return diag.connected;
@@ -187,9 +187,9 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect,
     addNode(x, y);
   }, [isEditing, size, addNode]);
 
-  // Handle double-click on wheel to add node to active palette
+  // Handle double-click on wheel to add node to active palette (only when editPaletteMode is on)
   const handleWheelDoubleClick = useCallback((e: React.MouseEvent) => {
-    if (!activePalette || isEditing) return;
+    if (!activePalette || isEditing || !editPaletteMode) return;
     if (!containerRef.current) return;
 
     const rect = containerRef.current.getBoundingClientRect();
@@ -197,7 +197,7 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect,
     const y = (e.clientY - rect.top) / size;
 
     addNodeToActive(activePalette.id, x, y);
-  }, [activePalette, isEditing, size, addNodeToActive]);
+  }, [activePalette, isEditing, editPaletteMode, size, addNodeToActive]);
 
   // Handle drag (only used when no palette is active)
   const handleMouseMove = useCallback((e: React.MouseEvent | MouseEvent) => {
@@ -276,6 +276,7 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect,
           roomId={roomId}
           onLightClick={handleLightClick}
           selectedLightId={selectedLightId}
+          editPaletteMode={editPaletteMode}
         />
       )}
 
@@ -302,31 +303,9 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect,
         const pinColor = hsvToHex(color.h, color.s);
         const isDragging = dragging === light.id;
 
-        // Phantom pin showing bridge state
-        const bridgeState = bridgeStates.get(light.id);
-        const bridgeColor = bridgeState?.color;
-
         return (
           <div key={light.id}>
-            {/* Phantom pin (bridge state) - shows where the bridge thinks the light is */}
-            {isDragging && bridgeColor && (
-              <div
-                className="absolute flex items-center justify-center pointer-events-none z-5"
-                style={{
-                  left: hsToPosition(bridgeColor.h, bridgeColor.s).x - pinRadius,
-                  top: hsToPosition(bridgeColor.h, bridgeColor.s).y - pinRadius,
-                  width: pinRadius * 2,
-                  height: pinRadius * 2,
-                }}
-              >
-                <div
-                  className="w-full h-full rounded-full border-2 border-white/30 opacity-40"
-                  style={{ backgroundColor: hsvToHex(bridgeColor.h, bridgeColor.s) }}
-                />
-              </div>
-            )}
-
-            {/* Main pin (user-controlled position) */}
+            {/* Light pin */}
             <div
               onMouseDown={(e) => {
                 e.preventDefault();

@@ -13,6 +13,10 @@ interface PalettesStore {
   editingNodes: PaletteNode[];
   isEditing: boolean;
 
+  // Edit palette mode - when true, palette nodes are interactive, lights are not
+  editPaletteMode: boolean;
+  setEditPaletteMode: (mode: boolean) => void;
+
   // Actions - fetch palette definitions
   fetchPalettes: () => Promise<void>;
 
@@ -42,6 +46,7 @@ interface PalettesStore {
   setTension: (id: string, tension: number) => Promise<void>;
   setSpeed: (id: string, secondsPerNode: number) => Promise<void>;
   deletePalette: (id: string) => Promise<void>;
+  clonePalette: (id: string) => Promise<void>;
   updateNodePosition: (id: string, nodeIndex: number, x: number, y: number) => void;
   saveNodePositions: (id: string) => Promise<void>;
   addNodeToActive: (id: string, x: number, y: number) => Promise<void>;
@@ -58,6 +63,9 @@ export const usePalettesStore = create<PalettesStore>((set, get) => ({
   roomPositions: {},
   editingNodes: [],
   isEditing: false,
+  editPaletteMode: false,
+
+  setEditPaletteMode: (mode: boolean) => set({ editPaletteMode: mode }),
 
   fetchPalettes: async () => {
     const res = await fetch('/api/palettes');
@@ -84,7 +92,7 @@ export const usePalettesStore = create<PalettesStore>((set, get) => ({
             roomId,
             activePaletteId,
             isPlaying,
-            secondsPerNode: secondsPerNode ?? existing?.secondsPerNode ?? 2,
+            secondsPerNode: secondsPerNode ?? existing?.secondsPerNode ?? 20,
           },
         },
       };
@@ -131,7 +139,7 @@ export const usePalettesStore = create<PalettesStore>((set, get) => ({
     return {
       activePaletteId: state?.activePaletteId ?? null,
       isPlaying: state?.isPlaying ?? false,
-      secondsPerNode: state?.secondsPerNode ?? 2,
+      secondsPerNode: state?.secondsPerNode ?? 20,
       positions: posData?.positions ?? {},
     };
   },
@@ -268,6 +276,27 @@ export const usePalettesStore = create<PalettesStore>((set, get) => ({
     }));
   },
 
+  clonePalette: async (id: string) => {
+    const palette = get().palettes.find((p) => p.id === id);
+    if (!palette) return;
+
+    const res = await fetch('/api/palettes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: `${palette.name} (copy)`,
+        nodes: palette.nodes,
+        tension: palette.tension,
+        secondsPerNode: palette.secondsPerNode,
+      }),
+    });
+    const newPalette = await res.json();
+
+    set((s) => ({
+      palettes: [...s.palettes, newPalette],
+    }));
+  },
+
   updateNodePosition: (id: string, nodeIndex: number, x: number, y: number) => {
     set((s) => ({
       palettes: s.palettes.map((p) => {
@@ -367,6 +396,6 @@ export function useRoomPositions(roomId: string): PalettePositions {
 export function useRoomPlayState(roomId: string) {
   const activePaletteId = usePalettesStore((s) => s.roomStates[roomId]?.activePaletteId ?? null);
   const isPlaying = usePalettesStore((s) => s.roomStates[roomId]?.isPlaying ?? false);
-  const secondsPerNode = usePalettesStore((s) => s.roomStates[roomId]?.secondsPerNode ?? 2);
+  const secondsPerNode = usePalettesStore((s) => s.roomStates[roomId]?.secondsPerNode ?? 20);
   return { activePaletteId, isPlaying, secondsPerNode };
 }

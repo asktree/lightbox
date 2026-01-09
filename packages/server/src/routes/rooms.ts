@@ -87,6 +87,28 @@ export function createRoomsRouter(animator: PaletteAnimator): Router {
     }
   });
 
+  // Set light excluded from palette animation
+  router.put('/:roomId/lights/:lightId/excluded', (req, res) => {
+    try {
+      const { excluded } = req.body as { excluded: boolean };
+      if (typeof excluded !== 'boolean') {
+        return res.status(400).json({ error: 'excluded must be a boolean' });
+      }
+
+      animator.setLightExcluded(req.params.roomId, req.params.lightId, excluded);
+      res.json({ ok: true, excluded });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ error: message });
+    }
+  });
+
+  // Get light excluded status
+  router.get('/:roomId/lights/:lightId/excluded', (req, res) => {
+    const excluded = animator.isLightExcluded(req.params.roomId, req.params.lightId);
+    res.json({ excluded });
+  });
+
   // Set light position on track
   router.put('/:roomId/lights/:lightId/position', async (req, res) => {
     try {

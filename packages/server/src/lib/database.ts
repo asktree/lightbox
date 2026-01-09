@@ -46,13 +46,13 @@ export class Database {
         room_id TEXT PRIMARY KEY,
         active_palette_id TEXT,
         is_playing INTEGER DEFAULT 0,
-        seconds_per_node REAL DEFAULT 2
+        seconds_per_node REAL DEFAULT 20
       );
     `);
 
     // Migration: add seconds_per_node column if missing
     try {
-      this.db.exec(`ALTER TABLE room_state ADD COLUMN seconds_per_node REAL DEFAULT 2`);
+      this.db.exec(`ALTER TABLE room_state ADD COLUMN seconds_per_node REAL DEFAULT 20`);
     } catch {
       // Column already exists
     }
@@ -234,13 +234,13 @@ export class Database {
     ).get(roomId) as { room_id: string; active_palette_id: string | null; is_playing: number; seconds_per_node: number } | undefined;
 
     if (!row) {
-      return { roomId, activePaletteId: null, isPlaying: false, secondsPerNode: 2 };
+      return { roomId, activePaletteId: null, isPlaying: false, secondsPerNode: 20 };
     }
     return {
       roomId: row.room_id,
       activePaletteId: row.active_palette_id,
       isPlaying: row.is_playing === 1,
-      secondsPerNode: row.seconds_per_node ?? 2,
+      secondsPerNode: row.seconds_per_node ?? 20,
     };
   }
 
@@ -255,7 +255,7 @@ export class Database {
       roomId: row.room_id,
       activePaletteId: row.active_palette_id,
       isPlaying: row.is_playing === 1,
-      secondsPerNode: row.seconds_per_node ?? 2,
+      secondsPerNode: row.seconds_per_node ?? 20,
     }));
   }
 

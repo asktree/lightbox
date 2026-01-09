@@ -18,14 +18,21 @@ import type { LightManager } from './light-manager.js';
 const UPDATE_INTERVAL_MS = 300;
 const PERSIST_INTERVAL_TICKS = 10; // Persist every 10 ticks (3 seconds)
 
+// Galaxy Projector can handle fast updates - use ready_for_more loop only for this device
+const GALAXY_PROJECTOR_ID = 'tuya:ebc64ec87a6c462e20hmjo';
+
 interface RoomAnimationState {
   roomId: string;
   activePaletteId: string | null;
   isPlaying: boolean;
   secondsPerNode: number;
   positions: PalettePositions;
+  excludedLightIds: Set<string>;
   tickCount: number;
 }
+
+// How long to pause palette updates after user control (ms)
+const USER_CONTROL_COOLDOWN_MS = 2000;
 
 export class PaletteAnimator extends EventEmitter {
   private roomStates: Map<string, RoomAnimationState> = new Map();
@@ -33,10 +40,55 @@ export class PaletteAnimator extends EventEmitter {
   private db: Database;
   private lightManager: LightManager;
 
+  // Track lights being controlled by user (timestamp of last control)
+  private userControlledLights: Map<string, number> = new Map();
+
   constructor(db: Database, lightManager: LightManager) {
     super();
     this.db = db;
     this.lightManager = lightManager;
+
+    // Listen for "ready for more" events - but only use fast loop for Galaxy Projector
+    // Other Tuya devices get overwhelmed by rapid updates, causing ECONNRESET errors
+    this.lightManager.on('ready_for_more', (deviceId: string) => {
+      if (deviceId === GALAXY_PROJECTOR_ID) {
+        this.sendImmediateUpdate(deviceId);
+      }
+    });
+  }
+
+  /**
+   * Send an immediate color update to a specific light if it's in an active palette
+   */
+  private sendImmediateUpdate(lightId: string): void {
+    // Skip if user is controlling this light
+    if (this.isUserControlled(lightId)) return;
+
+    // Find which room this light is in and if it has an active, playing palette
+    for (const state of this.roomStates.values()) {
+      if (!state.isPlaying || !state.activePaletteId) continue;
+
+      // Skip excluded lights
+      if (state.excludedLightIds.has(lightId)) continue;
+
+      // Check if this light is in this room's animation
+      const position = state.positions[lightId];
+      if (position === undefined) continue;
+
+      // Get the palette and calculate current color
+      const palette = this.db.getPalette(state.activePaletteId);
+      if (!palette || palette.nodes.length < 2) continue;
+
+      const point = getPointOnPalette(palette, position);
+      const { h, s } = positionToColor(point);
+
+      // Send the update (this will trigger another ready_for_more when done)
+      this.lightManager.setLightState(lightId, { color: { h, s } }, 100).catch(() => {
+        // Ignore errors - light might be unreachable
+      });
+
+      return; // Found the light, we're done
+    }
   }
 
   /**
@@ -71,6 +123,7 @@ export class PaletteAnimator extends EventEmitter {
         isPlaying: dbState.isPlaying,
         secondsPerNode: dbState.secondsPerNode,
         positions,
+        excludedLightIds: new Set(),
         tickCount: 0,
       };
 
@@ -232,7 +285,7 @@ export class PaletteAnimator extends EventEmitter {
   getRoomState(roomId: string): RoomState {
     const state = this.roomStates.get(roomId);
     if (!state) {
-      return { roomId, activePaletteId: null, isPlaying: false, secondsPerNode: 2 };
+      return { roomId, activePaletteId: null, isPlaying: false, secondsPerNode: 20 };
     }
     return {
       roomId: state.roomId,
@@ -262,6 +315,46 @@ export class PaletteAnimator extends EventEmitter {
     }));
   }
 
+  /**
+   * Set whether a light is excluded from palette animation
+   */
+  setLightExcluded(roomId: string, lightId: string, excluded: boolean): void {
+    const state = this.getOrCreateState(roomId);
+    if (excluded) {
+      state.excludedLightIds.add(lightId);
+    } else {
+      state.excludedLightIds.delete(lightId);
+    }
+  }
+
+  /**
+   * Check if a light is excluded from palette animation
+   */
+  isLightExcluded(roomId: string, lightId: string): boolean {
+    const state = this.roomStates.get(roomId);
+    return state?.excludedLightIds.has(lightId) ?? false;
+  }
+
+  /**
+   * Mark a light as being controlled by user (pauses palette updates temporarily)
+   */
+  markUserControlled(lightId: string): void {
+    this.userControlledLights.set(lightId, Date.now());
+  }
+
+  /**
+   * Check if a light is currently under user control (within cooldown period)
+   */
+  private isUserControlled(lightId: string): boolean {
+    const timestamp = this.userControlledLights.get(lightId);
+    if (!timestamp) return false;
+    if (Date.now() - timestamp > USER_CONTROL_COOLDOWN_MS) {
+      this.userControlledLights.delete(lightId);
+      return false;
+    }
+    return true;
+  }
+
   // ---- Private methods ----
 
   private getOrCreateState(roomId: string): RoomAnimationState {
@@ -271,8 +364,9 @@ export class PaletteAnimator extends EventEmitter {
         roomId,
         activePaletteId: null,
         isPlaying: false,
-        secondsPerNode: 2,
+        secondsPerNode: 20,
         positions: {},
+        excludedLightIds: new Set(),
         tickCount: 0,
       };
       this.roomStates.set(roomId, state);
@@ -319,6 +413,12 @@ export class PaletteAnimator extends EventEmitter {
 
     // Update each light
     for (const lightId of Object.keys(state.positions)) {
+      // Skip excluded lights
+      if (state.excludedLightIds.has(lightId)) continue;
+
+      // Skip lights being controlled by user (e.g., adjusting brightness)
+      if (this.isUserControlled(lightId)) continue;
+
       const currentPos = state.positions[lightId] ?? 0;
       const newPos = (currentPos + delta) % 1;
       state.positions[lightId] = newPos;

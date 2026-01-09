@@ -36,9 +36,10 @@ interface Props {
   size: number;
   lightPositions: Record<string, number>;
   roomId?: string; // Required for active palettes, not needed for editing preview
-  isEditing?: boolean;
+  isEditing?: boolean; // For new palette creation mode
   onLightClick?: (lightId: string) => void;
   selectedLightId?: string | null;
+  editPaletteMode?: boolean; // When true, nodes are editable, lights are not
 }
 
 // Convert normalized (0-1) coords to canvas coords
@@ -78,7 +79,7 @@ function generateTrackPath(palette: Palette, size: number): string {
   return points.join(' ') + ' Z';
 }
 
-export function PaletteTrack({ palette, size, lightPositions, roomId, isEditing, onLightClick, selectedLightId }: Props) {
+export function PaletteTrack({ palette, size, lightPositions, roomId, isEditing, onLightClick, selectedLightId, editPaletteMode }: Props) {
   const [draggingNode, setDraggingNode] = useState<number | null>(null);
   const [draggingLight, setDraggingLight] = useState<string | null>(null);
   const didDragLightRef = useRef(false);
@@ -94,7 +95,7 @@ export function PaletteTrack({ palette, size, lightPositions, roomId, isEditing,
 
   // Helper to check if a light is connected
   const isLightConnected = useCallback((light: Light) => {
-    const diag = diagnostics.get(light.id);
+    const diag = diagnostics[light.id];
     if (diag) {
       return diag.connected;
     }
@@ -106,8 +107,10 @@ export function PaletteTrack({ palette, size, lightPositions, roomId, isEditing,
   const strokeColor = isEditing ? 'rgba(251, 191, 36, 0.7)' : 'rgba(168, 85, 247, 0.7)';
   const nodeColor = isEditing ? '#fbbf24' : '#a855f7';
 
-  // Can drag nodes if this is a real palette (not editing preview) and roomId is provided
-  const canDragNodes = !isEditing && !!roomId;
+  // Can drag nodes if edit mode is on (and this is a real palette, not editing preview)
+  const canDragNodes = !isEditing && !!roomId && !!editPaletteMode;
+  // Can drag lights if edit mode is off (and this is a real palette)
+  const canDragLights = !isEditing && !!roomId && !editPaletteMode;
 
   // Filter light positions to only include lights in this room
   const filteredLightPositions = useMemo(() => {
@@ -174,13 +177,13 @@ export function PaletteTrack({ palette, size, lightPositions, roomId, isEditing,
 
   // Light pin drag handlers
   const handleLightMouseDown = useCallback((e: React.MouseEvent, lightId: string) => {
-    if (!canDragNodes) return;
+    if (!canDragLights) return;
     e.preventDefault();
     e.stopPropagation();
     setDraggingLight(lightId);
     startControlling(lightId);
     didDragLightRef.current = false;
-  }, [canDragNodes, startControlling]);
+  }, [canDragLights, startControlling]);
 
   const handleLightMouseMove = useCallback((e: MouseEvent) => {
     if (!draggingLight || !roomId) return;
@@ -310,7 +313,7 @@ export function PaletteTrack({ palette, size, lightPositions, roomId, isEditing,
 
         {/* Light positions on track - styled pins with colors and labels */}
         {Object.entries(filteredLightPositions).map(([lightId, position]) => {
-          const light = lights.get(lightId);
+          const light = lights[lightId];
           if (!light) return null;
 
           // Skip unreachable/offline lights
@@ -328,14 +331,14 @@ export function PaletteTrack({ palette, size, lightPositions, roomId, isEditing,
             <g
               key={lightId}
               style={{
-                cursor: canDragNodes ? 'grab' : (onLightClick ? 'pointer' : 'default'),
+                cursor: canDragLights ? 'grab' : (onLightClick && !editPaletteMode ? 'pointer' : 'default'),
                 transform: `translate(${x}px, ${y}px)`,
                 transition: isDragging ? 'none' : 'transform 100ms ease-out',
               }}
               onMouseDown={(e) => handleLightMouseDown(e, lightId)}
               onClick={(e) => {
-                // Only handle click if we didn't drag (prevents toggle on drag release)
-                if (onLightClick && !didDragLightRef.current) {
+                // Only handle click if we didn't drag and not in edit palette mode
+                if (onLightClick && !didDragLightRef.current && !editPaletteMode) {
                   e.stopPropagation();
                   onLightClick(lightId);
                 }
@@ -347,7 +350,7 @@ export function PaletteTrack({ palette, size, lightPositions, roomId, isEditing,
                 cy={0}
                 r={pinRadius + 4}
                 fill="transparent"
-                style={{ pointerEvents: canDragNodes || onLightClick ? 'auto' : 'none' }}
+                style={{ pointerEvents: (canDragLights || (onLightClick && !editPaletteMode)) ? 'auto' : 'none' }}
               />
               {/* Colored pin circle */}
               <circle

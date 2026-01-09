@@ -1,6 +1,29 @@
 import { useEffect, useState, useRef } from 'react';
 import { usePalettesStore, useRoomPlayState } from '../stores/palettes';
 
+// Toggle switch component
+function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
+  return (
+    <label className="flex items-center gap-2 cursor-pointer">
+      <div className="relative">
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={(e) => onChange(e.target.checked)}
+          className="sr-only"
+        />
+        <div className={`w-9 h-5 rounded-full transition-colors ${checked ? 'bg-purple-600' : 'bg-zinc-600'}`} />
+        <div
+          className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${
+            checked ? 'translate-x-4' : 'translate-x-0'
+          }`}
+        />
+      </div>
+      <span className="text-xs text-zinc-300">{label}</span>
+    </label>
+  );
+}
+
 interface PaletteControlsProps {
   roomId: string; // Current room ID
 }
@@ -25,7 +48,12 @@ export function PaletteControls({ roomId }: PaletteControlsProps) {
   // Palette modification
   const setRoomSpeed = usePalettesStore((s) => s.setRoomSpeed);
   const deletePalette = usePalettesStore((s) => s.deletePalette);
+  const clonePalette = usePalettesStore((s) => s.clonePalette);
   const renamePalette = usePalettesStore((s) => s.renamePalette);
+
+  // Edit palette mode
+  const editPaletteMode = usePalettesStore((s) => s.editPaletteMode);
+  const setEditPaletteMode = usePalettesStore((s) => s.setEditPaletteMode);
 
   const [newName, setNewName] = useState('');
   const [isRenaming, setIsRenaming] = useState(false);
@@ -130,6 +158,12 @@ export function PaletteControls({ roomId }: PaletteControlsProps) {
     }
   };
 
+  const handleClone = async () => {
+    if (activePalette) {
+      await clonePalette(activePalette.id);
+    }
+  };
+
   return (
     <div className="fixed bottom-4 right-4 bg-zinc-900/95 backdrop-blur border border-zinc-700 rounded-lg shadow-xl p-4 min-w-[280px] max-w-[320px]">
 
@@ -212,6 +246,13 @@ export function PaletteControls({ roomId }: PaletteControlsProps) {
           {/* Active palette controls */}
           {activePalette && (
             <div className="space-y-3 pt-3 border-t border-zinc-700">
+              {/* Edit palette mode toggle */}
+              <Toggle
+                checked={editPaletteMode}
+                onChange={setEditPaletteMode}
+                label="Edit Palette"
+              />
+
               {/* Palette name (editable) */}
               <div>
                 {isRenaming ? (
@@ -271,13 +312,21 @@ export function PaletteControls({ roomId }: PaletteControlsProps) {
                 />
               </div>
 
-              {/* Delete */}
-              <button
-                onClick={handleDelete}
-                className="w-full py-1.5 text-sm bg-red-600/20 text-red-400 rounded hover:bg-red-600/30"
-              >
-                Delete Palette
-              </button>
+              {/* Clone / Delete */}
+              <div className="flex gap-2">
+                <button
+                  onClick={handleClone}
+                  className="flex-1 py-1.5 text-sm bg-zinc-700 text-zinc-300 rounded hover:bg-zinc-600"
+                >
+                  Clone
+                </button>
+                <button
+                  onClick={handleDelete}
+                  className="flex-1 py-1.5 text-sm bg-red-600/20 text-red-400 rounded hover:bg-red-600/30"
+                >
+                  Delete
+                </button>
+              </div>
             </div>
           )}
         </>

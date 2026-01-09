@@ -104,7 +104,7 @@ wss.on('connection', async (ws) => {
 });
 
 // Mount routes
-app.use('/api/lights', createLightsRouter(lightManager));
+app.use('/api/lights', createLightsRouter(lightManager, paletteAnimator));
 app.use('/api/groups', createGroupsRouter(lightManager));
 app.use('/api/palettes', createPalettesRouter(lightManager));
 app.use('/api/rooms', createRoomsRouter(paletteAnimator));
