@@ -32,7 +32,7 @@ interface RoomAnimationState {
 }
 
 // How long to pause palette updates after user control (ms)
-const USER_CONTROL_COOLDOWN_MS = 2000;
+const USER_CONTROL_COOLDOWN_MS = 250;
 
 export class PaletteAnimator extends EventEmitter {
   private roomStates: Map<string, RoomAnimationState> = new Map();
