@@ -1,0 +1,10 @@
+{
+  "name": "@lightbox/music-scraper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Downloads from Spotify via librespot, separates stems with Demucs, analyzes with essentia/librosa. Produces a canonical analysis cache per track. Python CLI — package.json exists only for workspace discovery.",
+  "scripts": {
+    "setup": "python3 -m venv .venv && .venv/bin/pip install -r requirements.txt",
+    "scrape": ".venv/bin/python -m scraper"
+  }
+}

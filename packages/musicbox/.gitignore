@@ -1,0 +1,7 @@
+data/
+dist/
+node_modules/
+.venv/
+.venv-essentia/
+__pycache__/
+*.pyc

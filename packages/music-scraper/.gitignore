@@ -1,0 +1,7 @@
+.venv/
+.venv-essentia/
+__pycache__/
+*.pyc
+.cache/
+*.db
+.spotipy_cache

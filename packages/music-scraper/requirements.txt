@@ -1,0 +1,14 @@
+# Audio download (librespot-based)
+librespot
+
+# Spotify Web API for listing liked songs / metadata
+spotipy
+
+# Source separation
+demucs
+
+# Analysis
+numpy<2
+librosa
+essentia
+mutagen
