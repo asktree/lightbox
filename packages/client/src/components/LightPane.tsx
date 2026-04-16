@@ -40,6 +40,21 @@ async function setMutedChannels(id: string, channels: { r?: boolean; g?: boolean
   });
 }
 
+// Get light settings
+async function getLightSettings(id: string): Promise<{ maxRefreshIntervalMs: number }> {
+  const res = await fetch(`/api/lights/${id}/settings`);
+  return res.json();
+}
+
+// Set light settings
+async function setLightSettings(id: string, maxRefreshIntervalMs: number) {
+  await fetch(`/api/lights/${id}/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ maxRefreshIntervalMs }),
+  });
+}
+
 interface LightPaneProps {
   light: Light;
   roomId: string;
@@ -101,6 +116,30 @@ export function LightPane({ light, roomId, onClose, variant = 'fixed' }: LightPa
   const [mutedG, setMutedG] = useState(false);
   const [mutedB, setMutedB] = useState(false);
 
+  // Per-light refresh interval for palette animation (ms between updates)
+  const [refreshInterval, setRefreshInterval] = useState(0);
+  const refreshIntervalThrottle = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Fetch initial muted channels from server
+  useEffect(() => {
+    if (!isGalaxyProjector) return;
+    fetch(`/api/lights/${light.id}/muted-channels`)
+      .then(r => r.json())
+      .then((ch: { r: boolean; g: boolean; b: boolean }) => {
+        setMutedR(ch.r);
+        setMutedG(ch.g);
+        setMutedB(ch.b);
+      })
+      .catch(() => {});
+  }, [light.id, isGalaxyProjector]);
+
+  // Fetch initial refresh interval setting
+  useEffect(() => {
+    getLightSettings(light.id)
+      .then(settings => setRefreshInterval(settings.maxRefreshIntervalMs))
+      .catch(() => {});
+  }, [light.id]);
+
   const handleLaserSpeedChange = useCallback((speed: number) => {
     setLaserSpeed(speed);
     // Throttle API calls for slider
@@ -127,6 +166,17 @@ export function LightPane({ light, roomId, onClose, variant = 'fixed' }: LightPa
     if (channel === 'g') setMutedG(muted);
     if (channel === 'b') setMutedB(muted);
     setMutedChannels(light.id, { [channel]: muted });
+  }, [light.id]);
+
+  const handleRefreshIntervalChange = useCallback((intervalMs: number) => {
+    setRefreshInterval(intervalMs);
+    // Throttle API calls for slider
+    if (refreshIntervalThrottle.current) {
+      clearTimeout(refreshIntervalThrottle.current);
+    }
+    refreshIntervalThrottle.current = setTimeout(() => {
+      setLightSettings(light.id, intervalMs);
+    }, 200);
   }, [light.id]);
 
   // Handle light position change on palette - update store AND send color to light
@@ -242,6 +292,34 @@ export function LightPane({ light, roomId, onClose, variant = 'fixed' }: LightPa
               }`}
             />
           </button>
+        </div>
+      )}
+
+      {/* Per-light refresh rate limiter - shown for Tuya lights (they have hardware fade) */}
+      {light.brand === 'tuya' && (
+        <div className="mb-3 py-2 px-2 bg-zinc-800/50 rounded">
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-xs text-zinc-400">Max refresh rate</span>
+            <span className="text-[10px] text-zinc-500">
+              {refreshInterval === 0 ? '180ms (default)' : `${refreshInterval}ms`}
+            </span>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={2000}
+            step={50}
+            value={refreshInterval}
+            onChange={(e) => handleRefreshIntervalChange(Number(e.target.value))}
+            className="w-full h-1.5 bg-zinc-700 rounded-full appearance-none cursor-pointer accent-purple-500"
+            style={{
+              background: `linear-gradient(to right, #a855f7 0%, #a855f7 ${refreshInterval / 20}%, #3f3f46 ${refreshInterval / 20}%, #3f3f46 100%)`,
+            }}
+          />
+          <div className="flex justify-between text-[9px] text-zinc-600 mt-1">
+            <span>Fast</span>
+            <span>Slow</span>
+          </div>
         </div>
       )}
 

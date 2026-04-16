@@ -4,9 +4,13 @@ import { useLightsStore } from '../stores/lights';
 import { useDebugStore } from '../stores/debug';
 import { usePalettesStore } from '../stores/palettes';
 
+let connectionIdCounter = 0;
+
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSeqRef = useRef<number>(0);
+  const connectionIdRef = useRef<number>(0);
 
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -23,8 +27,11 @@ export function useWebSocket() {
       wsRef.current = ws;
 
       ws.onopen = () => {
-        console.log('WebSocket connected');
+        connectionIdRef.current = ++connectionIdCounter;
+        console.log(`WebSocket connected (conn=${connectionIdRef.current})`);
         useLightsStore.getState().setConnected(true);
+        // Reset sequence counter on new connection (server counter may have advanced)
+        lastSeqRef.current = 0;
       };
 
       ws.onclose = () => {
@@ -70,9 +77,25 @@ export function useWebSocket() {
             palettesStore.updateRoomState(msg.roomId, msg.activePaletteId, msg.isPlaying, msg.secondsPerNode);
             break;
           case 'palette_positions':
+            if (msg.seq !== undefined) {
+              const prev = lastSeqRef.current;
+              const connId = connectionIdRef.current;
+              if (msg.seq <= prev) {
+                console.warn(`[WS conn=${connId}] Out-of-order palette_positions: seq=${msg.seq}, prev=${prev}, diff=${msg.seq - prev}`);
+              }
+              lastSeqRef.current = Math.max(prev, msg.seq);
+            }
             palettesStore.updatePalettePositions(msg.roomId, msg.paletteId, msg.positions);
             break;
           case 'position_update':
+            if (msg.seq !== undefined) {
+              const prev = lastSeqRef.current;
+              const connId = connectionIdRef.current;
+              if (msg.seq <= prev) {
+                console.warn(`[WS conn=${connId}] Out-of-order position_update: seq=${msg.seq}, prev=${prev}, diff=${msg.seq - prev}`);
+              }
+              lastSeqRef.current = Math.max(prev, msg.seq);
+            }
             palettesStore.updateLightPosition(msg.roomId, msg.paletteId, msg.lightId, msg.position);
             break;
         }

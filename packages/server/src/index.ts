@@ -14,6 +14,9 @@ import { createChatRouter } from './routes/chat.js';
 
 const PORT = process.env.PORT || 3001;
 
+// Sequence counter for position messages (to detect out-of-order delivery)
+let wsSeqCounter = 0;
+
 const app = express();
 app.use(express.json());
 
@@ -75,11 +78,11 @@ paletteAnimator.on('room_state', (state: RoomState) => {
 });
 
 paletteAnimator.on('palette_positions', (data: { roomId: string; paletteId: string; positions: PalettePositions }) => {
-  broadcast({ type: 'palette_positions', ...data } as WSMessage);
+  broadcast({ type: 'palette_positions', ...data, seq: ++wsSeqCounter } as WSMessage);
 });
 
 paletteAnimator.on('position_update', (data: { roomId: string; paletteId: string; lightId: string; position: number }) => {
-  broadcast({ type: 'position_update', ...data } as WSMessage);
+  broadcast({ type: 'position_update', ...data, seq: ++wsSeqCounter } as WSMessage);
 });
 
 // WebSocket connection handling

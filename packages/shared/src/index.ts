@@ -21,6 +21,13 @@ export interface Light {
   capabilities: Capability[];
   state: LightState;
   reachable: boolean;
+  maxRefreshIntervalMs?: number; // Per-light palette refresh rate limit (ms between updates)
+}
+
+// Per-light settings stored in database
+export interface LightSettings {
+  lightId: string;
+  maxRefreshIntervalMs: number; // 0 = use global default
 }
 
 export interface Group {
@@ -56,6 +63,10 @@ export interface SetLightStateRequest {
   color?: { h: number; s: number };
   temperature?: number;
   transition?: number; // ms
+}
+
+export interface SetLightSettingsRequest {
+  maxRefreshIntervalMs?: number;
 }
 
 export interface CreateGroupRequest {
@@ -106,8 +117,8 @@ export type WSMessage =
   // Room/palette animation messages
   | { type: 'room_states_sync'; roomStates: RoomState[] }
   | { type: 'room_state'; roomId: string; activePaletteId: string | null; isPlaying: boolean; secondsPerNode: number }
-  | { type: 'palette_positions'; roomId: string; paletteId: string; positions: PalettePositions }
-  | { type: 'position_update'; roomId: string; paletteId: string; lightId: string; position: number };
+  | { type: 'palette_positions'; roomId: string; paletteId: string; positions: PalettePositions; seq?: number }
+  | { type: 'position_update'; roomId: string; paletteId: string; lightId: string; position: number; seq?: number };
 
 // Driver interface (for server-side implementation)
 export interface LightDriver {

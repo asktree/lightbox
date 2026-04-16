@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import type { LightManager } from '../lib/light-manager.js';
 import type { PaletteAnimator } from '../lib/palette-animator.js';
-import type { SetLightStateRequest } from '@lightbox/shared';
+import type { SetLightStateRequest, SetLightSettingsRequest } from '@lightbox/shared';
 
 export function createLightsRouter(lightManager: LightManager, paletteAnimator?: PaletteAnimator): Router {
   const router = Router();
@@ -84,6 +84,30 @@ export function createLightsRouter(lightManager: LightManager, paletteAnimator?:
       };
       lightManager.setTuyaMutedChannels(req.params.id, channels);
       res.json(channels);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Get light settings (refresh interval, etc.)
+  router.get('/:id/settings', (req, res) => {
+    try {
+      const settings = lightManager.getLightSettings(req.params.id);
+      res.json(settings);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Set light settings
+  router.put('/:id/settings', (req, res) => {
+    try {
+      const { maxRefreshIntervalMs } = req.body as SetLightSettingsRequest;
+      if (maxRefreshIntervalMs !== undefined) {
+        lightManager.setLightSettings(req.params.id, maxRefreshIntervalMs);
+      }
+      const settings = lightManager.getLightSettings(req.params.id);
+      res.json(settings);
     } catch (err) {
       res.status(400).json({ error: (err as Error).message });
     }

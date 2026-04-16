@@ -84,7 +84,10 @@ export class TuyaDriver implements LightDriver {
   private configs: TuyaDeviceConfig[] = [];
 
   // Per-device muted RGB channels (for filtering out unwanted colors)
-  private mutedChannels: Map<string, MutedChannels> = new Map();
+  // Galaxy Projector defaults to G muted (green laser is overpowering)
+  private mutedChannels: Map<string, MutedChannels> = new Map([
+    ['tuya:ebc64ec87a6c462e20hmjo', { r: false, g: true, b: false }],
+  ]);
 
   // Callback for real-time updates (set by LightManager)
   onUpdate?: (deviceId: string, state: LightState) => void;

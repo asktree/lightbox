@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events';
-import type { Light, LightState, LightDriver, Group, Palette, PaletteNode, DebugLogEntry, DeviceDiagnostics } from '@lightbox/shared';
+import type { Light, LightState, LightDriver, Group, Palette, PaletteNode, DebugLogEntry, DeviceDiagnostics, LightSettings } from '@lightbox/shared';
 import { HueDriver } from '../drivers/hue.js';
 import { GoveeDriver } from '../drivers/govee.js';
 import { TuyaDriver } from '../drivers/tuya.js';
@@ -55,7 +55,7 @@ export class LightManager extends EventEmitter {
         };
       }
 
-      // Set up debug callbacks for drivers that support it (Tuya)
+      // Set up debug callbacks for drivers that support it
       if ('onDebug' in driver) {
         (driver as any).onDebug = (id: string, deviceName: string, message: string, direction: 'in' | 'out') => {
           const entry: DebugLogEntry = {
@@ -323,6 +323,19 @@ export class LightManager extends EventEmitter {
 
   deletePalette(id: string): void {
     this.db.deletePalette(id);
+  }
+
+  // Light Settings (per-light refresh intervals, etc.)
+  getLightSettings(lightId: string): LightSettings {
+    return this.db.getLightSettings(lightId);
+  }
+
+  getAllLightSettings(): LightSettings[] {
+    return this.db.getAllLightSettings();
+  }
+
+  setLightSettings(lightId: string, maxRefreshIntervalMs: number): void {
+    this.db.setLightSettings(lightId, maxRefreshIntervalMs);
   }
 
   async dispose(): Promise<void> {

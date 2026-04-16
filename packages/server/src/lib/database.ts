@@ -1,6 +1,6 @@
 import BetterSqlite3 from 'better-sqlite3';
 import type { Database as BetterSqlite3Database } from 'better-sqlite3';
-import type { Group, Palette, PaletteNode, RoomState, PalettePositions } from '@lightbox/shared';
+import type { Group, Palette, PaletteNode, RoomState, PalettePositions, LightSettings } from '@lightbox/shared';
 import { randomUUID } from 'crypto';
 import { existsSync, mkdirSync } from 'fs';
 import { dirname, join } from 'path';
@@ -47,6 +47,11 @@ export class Database {
         active_palette_id TEXT,
         is_playing INTEGER DEFAULT 0,
         seconds_per_node REAL DEFAULT 20
+      );
+
+      CREATE TABLE IF NOT EXISTS light_settings (
+        light_id TEXT PRIMARY KEY,
+        max_refresh_interval_ms INTEGER DEFAULT 0
       );
     `);
 
@@ -276,6 +281,41 @@ export class Database {
       ON CONFLICT (room_id) DO UPDATE SET
         seconds_per_node = excluded.seconds_per_node
     `).run(roomId, secondsPerNode);
+  }
+
+  // Light Settings
+  getLightSettings(lightId: string): LightSettings {
+    const row = this.db.prepare(
+      'SELECT light_id, max_refresh_interval_ms FROM light_settings WHERE light_id = ?'
+    ).get(lightId) as { light_id: string; max_refresh_interval_ms: number } | undefined;
+
+    if (!row) {
+      return { lightId, maxRefreshIntervalMs: 0 };
+    }
+    return {
+      lightId: row.light_id,
+      maxRefreshIntervalMs: row.max_refresh_interval_ms,
+    };
+  }
+
+  getAllLightSettings(): LightSettings[] {
+    const rows = this.db.prepare('SELECT light_id, max_refresh_interval_ms FROM light_settings').all() as Array<{
+      light_id: string;
+      max_refresh_interval_ms: number;
+    }>;
+    return rows.map(row => ({
+      lightId: row.light_id,
+      maxRefreshIntervalMs: row.max_refresh_interval_ms,
+    }));
+  }
+
+  setLightSettings(lightId: string, maxRefreshIntervalMs: number): void {
+    this.db.prepare(`
+      INSERT INTO light_settings (light_id, max_refresh_interval_ms)
+      VALUES (?, ?)
+      ON CONFLICT (light_id) DO UPDATE SET
+        max_refresh_interval_ms = excluded.max_refresh_interval_ms
+    `).run(lightId, maxRefreshIntervalMs);
   }
 
   close(): void {

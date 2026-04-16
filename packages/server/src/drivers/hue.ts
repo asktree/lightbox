@@ -37,6 +37,25 @@ export class HueDriver implements LightDriver {
   // Callback for pushing real-time updates
   onUpdate?: (deviceId: string, state: LightState) => void;
 
+  // Debug logging callbacks (initialized so 'in' check works)
+  onDebug: ((id: string, deviceName: string, message: string, direction: 'in' | 'out') => void) | undefined = undefined;
+  onDebugUpdate: ((id: string, message: string) => void) | undefined = undefined;
+  private debugSeq = 0;
+
+  private emitDebug(deviceName: string, message: string, direction: 'in' | 'out'): string {
+    const id = `hue-${++this.debugSeq}`;
+    if (this.onDebug) {
+      this.onDebug(id, deviceName, message, direction);
+    }
+    return id;
+  }
+
+  private updateDebug(id: string, message: string): void {
+    if (this.onDebugUpdate) {
+      this.onDebugUpdate(id, message);
+    }
+  }
+
   async initialize(): Promise<void> {
     // Ensure config directory exists
     if (!existsSync(CONFIG_DIR)) {
@@ -131,7 +150,8 @@ export class HueDriver implements LightDriver {
 
     for (const hueLight of hueLights) {
       const id = `hue:${hueLight.id}`;
-      this.lights.set(id, hueLight);
+      // Store by numeric ID (what setState receives after prefix stripping)
+      this.lights.set(String(hueLight.id), hueLight);
 
       lights.push({
         id,
@@ -224,9 +244,22 @@ export class HueDriver implements LightDriver {
     if (!this.api) return;
 
     this.inFlight[deviceId] = true;
+    const hueId = parseInt(deviceId);
+    const light = this.lights.get(deviceId);
+    const deviceName = light?.name || `Light ${hueId}`;
+
+    // Build summary for debug log
+    const parts: string[] = [];
+    if (state.on !== undefined) parts.push(state.on ? 'on' : 'off');
+    if (state.brightness !== undefined) parts.push(`bri:${state.brightness}`);
+    if (state.color !== undefined) parts.push(`h:${state.color.h} s:${state.color.s}`);
+    if (state.temperature !== undefined) parts.push(`ct:${state.temperature}K`);
+    const summary = parts.join(' ');
+
+    const logId = this.emitDebug(deviceName, `${summary} (...)`, 'out');
+    const startTime = Date.now();
 
     try {
-      const hueId = parseInt(deviceId);
       const lightState = new v3.lightStates.LightState();
 
       if (state.on !== undefined) {
@@ -253,6 +286,11 @@ export class HueDriver implements LightDriver {
       lightState.transitiontime(transition !== undefined ? Math.round(transition / 100) : 0);
 
       await this.api.lights.setLightState(hueId, lightState);
+      const elapsed = Date.now() - startTime;
+      this.updateDebug(logId, `${summary} (✓ ${elapsed}ms)`);
+    } catch (err: any) {
+      const elapsed = Date.now() - startTime;
+      this.updateDebug(logId, `${summary} (✗ ${elapsed}ms)`);
     } finally {
       this.inFlight[deviceId] = false;
 
@@ -348,12 +386,26 @@ export class HueDriver implements LightDriver {
         if (item.type !== 'light') continue;
 
         const v1Id = this.v2IdToV1Id.get(item.id);
-        if (!v1Id || !this.onUpdate) continue;
+        if (!v1Id) continue;
 
         // Parse CLIP v2 state format
         const state = this.mapV2State(item);
         if (state) {
-          this.onUpdate(v1Id, state);
+          // Log incoming state update
+          const light = this.lights.get(v1Id);
+          const deviceName = light?.name || `Light ${v1Id}`;
+          const parts: string[] = [];
+          if (state.on !== undefined) parts.push(state.on ? 'on' : 'off');
+          if (state.brightness !== undefined) parts.push(`bri:${state.brightness}`);
+          if (state.color !== undefined) parts.push(`h:${state.color.h} s:${state.color.s}`);
+          if (state.temperature !== undefined) parts.push(`ct:${state.temperature}K`);
+          if (parts.length > 0) {
+            this.emitDebug(deviceName, parts.join(' '), 'in');
+          }
+
+          if (this.onUpdate) {
+            this.onUpdate(v1Id, state);
+          }
         }
       }
     }

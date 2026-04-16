@@ -15,8 +15,11 @@ import { ROOMS, getPointOnPalette, positionToColor } from '@lightbox/shared';
 import type { Database } from './database.js';
 import type { LightManager } from './light-manager.js';
 
-const UPDATE_INTERVAL_MS = 300;
-const PERSIST_INTERVAL_TICKS = 10; // Persist every 10 ticks (3 seconds)
+const UPDATE_INTERVAL_MS = 180;
+const PERSIST_INTERVAL_TICKS = 17; // Persist every ~3 seconds at 180ms
+
+// Default refresh interval for lights without custom settings (0 = use global UPDATE_INTERVAL_MS)
+const DEFAULT_REFRESH_INTERVAL_MS = 0;
 
 // Galaxy Projector can handle fast updates - use ready_for_more loop only for this device
 const GALAXY_PROJECTOR_ID = 'tuya:ebc64ec87a6c462e20hmjo';
@@ -42,6 +45,9 @@ export class PaletteAnimator extends EventEmitter {
 
   // Track lights being controlled by user (timestamp of last control)
   private userControlledLights: Map<string, number> = new Map();
+
+  // Track last update time per light for per-light throttling
+  private lastLightUpdateTime: Map<string, number> = new Map();
 
   constructor(db: Database, lightManager: LightManager) {
     super();
@@ -411,7 +417,10 @@ export class PaletteAnimator extends EventEmitter {
     const totalTime = state.secondsPerNode * palette.nodes.length;
     const delta = (UPDATE_INTERVAL_MS / 1000) / totalTime;
 
+    const now = Date.now();
+
     // Update each light
+    // TODO: Skip lights that are turned off (no point sending color updates to off lights)
     for (const lightId of Object.keys(state.positions)) {
       // Skip excluded lights
       if (state.excludedLightIds.has(lightId)) continue;
@@ -423,12 +432,27 @@ export class PaletteAnimator extends EventEmitter {
       const newPos = (currentPos + delta) % 1;
       state.positions[lightId] = newPos;
 
+      // Check per-light refresh rate throttling
+      const settings = this.lightManager.getLightSettings(lightId);
+      const maxInterval = settings.maxRefreshIntervalMs || DEFAULT_REFRESH_INTERVAL_MS;
+
+      if (maxInterval > 0) {
+        const lastUpdate = this.lastLightUpdateTime.get(lightId) || 0;
+        if (now - lastUpdate < maxInterval) {
+          // Skip this update - not enough time has passed
+          continue;
+        }
+      }
+
       // Calculate color and update light
       const point = getPointOnPalette(palette, newPos);
       const { h, s } = positionToColor(point);
       this.lightManager.setLightState(lightId, { color: { h, s } }, UPDATE_INTERVAL_MS).catch(() => {
         // Ignore errors during animation - light might be unreachable
       });
+
+      // Record update time for throttling
+      this.lastLightUpdateTime.set(lightId, now);
     }
 
     // Broadcast positions to clients
