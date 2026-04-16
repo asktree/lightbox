@@ -64,30 +64,6 @@ const EMPTY_ARR: number[] = [];
 
 // ---- DSP helpers (ported from the Python analyzer) ----
 
-// A-weighting curve to flatten the perceptual bass dominance for visualization
-function aWeight(freq: number): number {
-  if (freq < 1) return 0;
-  const f2 = freq * freq;
-  const num = 12194 ** 2 * f2 * f2;
-  const den =
-    (f2 + 20.6 ** 2) *
-    Math.sqrt((f2 + 107.7 ** 2) * (f2 + 737.9 ** 2)) *
-    (f2 + 12194 ** 2);
-  if (den === 0) return 0;
-  return num / den;
-}
-
-function buildAWeights(bins: number, sampleRate: number): Float32Array {
-  // Normalize so 1kHz = 1
-  const ref = aWeight(1000);
-  const w = new Float32Array(bins);
-  for (let i = 0; i < bins; i++) {
-    const f = (i * sampleRate) / (bins * 2);
-    w[i] = aWeight(f) / ref;
-  }
-  return w;
-}
-
 // Precompute bin ranges for the log-spaced bars, reused every frame
 function buildBarBinMap(numBars: number, bins: number, sampleRate: number): Array<[number, number]> {
   const minFreq = 20, maxFreq = 20000;
@@ -137,12 +113,39 @@ function buildFreqTable(bins: number, sampleRate: number): Float32Array {
   return out;
 }
 
-// Convert dB values (AnalyserNode gives dBFS, typically -100 to 0) to linear 0-1
-function dbToMag(db: number): number {
-  // -100 dB → 0, 0 dB → 1, above 0 clipped
+// AnalyserNode outputs dBFS. Convert to linear magnitude.
+function dbToLinear(db: number): number {
   if (db <= -100) return 0;
-  return Math.min(1, Math.pow(10, db / 20));
+  return Math.pow(10, db / 20);
 }
+
+// A-weighting — perceptual loudness curve. Attenuates freq ranges that human
+// hearing is less sensitive to (heavy rolloff below 500Hz, mild above 6kHz).
+// Applied as a linear multiplier per bin so bass drums don't visually
+// dominate just because they have more physical energy.
+function aWeight(freq: number): number {
+  if (freq < 1) return 0;
+  const f2 = freq * freq;
+  const num = 12194 ** 2 * f2 * f2;
+  const den =
+    (f2 + 20.6 ** 2) *
+    Math.sqrt((f2 + 107.7 ** 2) * (f2 + 737.9 ** 2)) *
+    (f2 + 12194 ** 2);
+  return den === 0 ? 0 : num / den;
+}
+
+// Precomputed A-weight table. The curve is smooth enough that 44.1kHz vs
+// 48kHz produces imperceptible differences, so we pick one and bake it.
+const A_WEIGHTS: Float32Array = (() => {
+  const SR = 48000;   // assume the common browser sample rate
+  const ref = aWeight(1000);
+  const w = new Float32Array(FREQ_BINS);
+  for (let i = 0; i < FREQ_BINS; i++) {
+    const f = (i * SR) / (FREQ_BINS * 2);
+    w[i] = aWeight(f) / ref;
+  }
+  return w;
+})();
 
 // ---- App ----
 
@@ -168,25 +171,22 @@ export default function App() {
   const [onsetStrength, setOnsetStrength] = useState({ low: 0, high: 0 });
   const [triggers, setTriggers] = useState({ beat: false, low: false, high: false });
 
-  const audioRefs = useRef<Record<Stem, HTMLAudioElement | null>>({
-    drums: null, bass: null, vocals: null, other: null,
-  });
 
-  // Web Audio graph — one AnalyserNode per stem, created once when the track loads
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const analyzersRef = useRef<Record<Stem, AnalyserNode | null>>({
-    drums: null, bass: null, vocals: null, other: null,
-  });
-  const sourcesRef = useRef<Record<Stem, MediaElementAudioSourceNode | null>>({
-    drums: null, bass: null, vocals: null, other: null,
-  });
+  // Audio context + per-stem audio element and analyser references. Populated
+  // by <StemTrack> children via callbacks — see the useAudioAnalyser hook.
+  const [audioCtx, setAudioCtx] = useState<AudioContext | null>(null);
+  const audioElsRef = useRef<Partial<Record<Stem, HTMLAudioElement>>>({});
+  const analyzersRef = useRef<Partial<Record<Stem, AnalyserNode>>>({});
   // Scratch buffers reused every frame (avoid allocation)
   const scratchDb = useRef(new Float32Array(FREQ_BINS));
   const scratchMag = useRef(new Float32Array(FREQ_BINS));
-  const aWeightsRef = useRef<Float32Array | null>(null);
   const freqTableRef = useRef<Float32Array | null>(null);
   const barBinMapRef = useRef<Array<[number, number]> | null>(null);
   const bandBinMapRef = useRef<Record<keyof Bands, [number, number]> | null>(null);
+  // Shared slow-decay peak across ALL stems — so inter-stem relative loudness
+  // is visible (drums' bass bar is tall, other's bass bar is shorter).
+  const sharedPeakRef = useRef(1e-4);
+  const sharedBandPeakRef = useRef(1e-5);
 
   // Cursors into the beat / onset peak arrays
   const lastBeatIdx = useRef(-1);
@@ -211,53 +211,19 @@ export default function App() {
       .catch(() => setLoading(false));
   }, [selected]);
 
-  // ---- Web Audio setup once per track ----
-
+  // Build the AudioContext lazily on first track select (needs user gesture-ish)
   useEffect(() => {
-    if (!selected) return;
-    // Lazy-create the AudioContext on first use (browsers require user gesture,
-    // but just creating it is OK — resume() is called on play)
-    if (!audioCtxRef.current) {
-      audioCtxRef.current = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
-      const sr = audioCtxRef.current.sampleRate;
-      aWeightsRef.current = buildAWeights(FREQ_BINS, sr);
-      freqTableRef.current = buildFreqTable(FREQ_BINS, sr);
-      barBinMapRef.current = buildBarBinMap(NUM_BARS, FREQ_BINS, sr);
-      bandBinMapRef.current = buildBandBinMap(FREQ_BINS, sr);
-    }
+    if (!selected || audioCtx) return;
+    const ctor = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    const ctx = new ctor();
+    const sr = ctx.sampleRate;
+    freqTableRef.current = buildFreqTable(FREQ_BINS, sr);
+    barBinMapRef.current = buildBarBinMap(NUM_BARS, FREQ_BINS, sr);
+    bandBinMapRef.current = buildBandBinMap(FREQ_BINS, sr);
+    setAudioCtx(ctx);
+  }, [selected, audioCtx]);
 
-    // Re-wire analyser graph for the new set of audio elements
-    for (const stem of STEMS) {
-      const el = audioRefs.current[stem];
-      if (!el || !audioCtxRef.current) continue;
-      // An HTMLMediaElement can only have ONE MediaElementAudioSourceNode ever.
-      // If we swap tracks, we'd need to recreate the <audio> element.
-      // Since we key each <audio> by track+stem, React will create fresh ones.
-      if (!sourcesRef.current[stem]) {
-        try {
-          const src = audioCtxRef.current.createMediaElementSource(el);
-          const analyser = audioCtxRef.current.createAnalyser();
-          analyser.fftSize = FFT_SIZE;
-          analyser.smoothingTimeConstant = 0.3;   // small smoothing; peak-hold is on the client viz
-          src.connect(analyser);
-          analyser.connect(audioCtxRef.current.destination);
-          sourcesRef.current[stem] = src;
-          analyzersRef.current[stem] = analyser;
-        } catch (err) {
-          console.error('Failed to create analyser for', stem, err);
-        }
-      }
-    }
-  }, [selected]);
-
-  // ---- Apply mute changes ----
-
-  useEffect(() => {
-    for (const stem of STEMS) {
-      const el = audioRefs.current[stem];
-      if (el) el.muted = muted[stem];
-    }
-  }, [muted]);
+  // (mute is applied inside <StemTrack>)
 
   // ---- rAF render loop ----
 
@@ -265,9 +231,9 @@ export default function App() {
     let raf: number;
 
     const tick = () => {
-      const master = audioRefs.current.drums;
+      const master = audioElsRef.current.drums;
       const an = analysis;
-      const ctx = audioCtxRef.current;
+      const ctx = audioCtx;
 
       if (master && an && ctx) {
         const posSec = master.currentTime;
@@ -290,31 +256,30 @@ export default function App() {
 
         // --- Per-frame from Web Audio (only when playing) ---
         if (!master.paused) {
-          const aw = aWeightsRef.current!;
           const freqs = freqTableRef.current!;
           const barMap = barBinMapRef.current!;
           const bandMap = bandBinMapRef.current!;
           const db = scratchDb.current;
           const mag = scratchMag.current;
 
-          // Compute per-stem spectrum
-          const nextStemSpectrum: Record<Stem, number[]> = {
-            drums: EMPTY_ARR, bass: EMPTY_ARR, vocals: EMPTY_ARR, other: EMPTY_ARR,
-          };
+          // Spectrum: linear mags (A-weighted for perceptual balance), RMS per
+          // log-spaced bar, normalized against a SHARED slow-decay peak so
+          // inter-stem loudness is visible (bass stem's bars are genuinely
+          // taller than other stem's bars when bass actually IS louder).
+          const SHARED_DECAY = 0.9995;   // peak decays slowly (~5s time constant at 60fps)
 
+          // First pass: compute raw RMS bars per stem, find the new max
+          const rawStemBars: Record<Stem, number[]> = {
+            drums: [], bass: [], vocals: [], other: [],
+          };
+          let frameMax = sharedPeakRef.current * SHARED_DECAY;
           for (const stem of STEMS) {
             const analyser = analyzersRef.current[stem];
             if (!analyser) continue;
             analyser.getFloatFrequencyData(db);
-
-            // Convert dB → linear magnitude, apply A-weighting
-            for (let i = 0; i < FREQ_BINS; i++) {
-              mag[i] = dbToMag(db[i]) * aw[i];
-            }
-
-            // Log-spaced RMS bars
+            // dB → linear, then A-weight
+            for (let i = 0; i < FREQ_BINS; i++) mag[i] = dbToLinear(db[i]) * A_WEIGHTS[i];
             const bars = new Array<number>(NUM_BARS);
-            let barMax = 1e-4;
             for (let b = 0; b < NUM_BARS; b++) {
               const [lo, hi] = barMap[b];
               let sumSq = 0;
@@ -322,85 +287,84 @@ export default function App() {
               for (let i = lo; i <= hi; i++) sumSq += mag[i] * mag[i];
               const v = Math.sqrt(sumSq / Math.max(1, count));
               bars[b] = v;
-              if (v > barMax) barMax = v;
+              if (v > frameMax) frameMax = v;
             }
-            // Normalize this stem's bars to its own current peak
-            for (let b = 0; b < NUM_BARS; b++) bars[b] = Math.min(1, bars[b] / barMax);
-            nextStemSpectrum[stem] = bars;
+            rawStemBars[stem] = bars;
+          }
+          sharedPeakRef.current = Math.max(frameMax, 1e-4);
+
+          // Second pass: normalize all stems against the shared peak
+          const peak = sharedPeakRef.current;
+          const nextStemSpectrum: Record<Stem, number[]> = {
+            drums: EMPTY_ARR, bass: EMPTY_ARR, vocals: EMPTY_ARR, other: EMPTY_ARR,
+          };
+          for (const stem of STEMS) {
+            const raw = rawStemBars[stem];
+            if (raw.length === 0) continue;
+            const norm = new Array<number>(NUM_BARS);
+            for (let b = 0; b < NUM_BARS; b++) norm[b] = Math.min(1, raw[b] / peak);
+            nextStemSpectrum[stem] = norm;
           }
           setStemSpectrum(nextStemSpectrum);
 
-          // Bands + chroma: use drums + other combined (approx full-mix energy)
-          // Actually simpler — use whatever the drums analyser has, which is enough
-          // to drive the band meters. For chroma prefer the "other" stem.
-          const drumsAnalyser = analyzersRef.current.drums;
-          const otherAnalyser = analyzersRef.current.other;
-
-          if (drumsAnalyser) {
-            drumsAnalyser.getFloatFrequencyData(db);
-            for (let i = 0; i < FREQ_BINS; i++) mag[i] = dbToMag(db[i]) * aw[i];
-            // We'll compute bands off the mix — sum drums + other + bass + vocals
-            // The above mag is just drums; let's accumulate all four.
+          // Energy bands: use drums stem, shared peak decay for stable reference
+          const drumsAn = analyzersRef.current.drums;
+          if (drumsAn) {
+            drumsAn.getFloatFrequencyData(db);
+            for (let i = 0; i < FREQ_BINS; i++) mag[i] = dbToLinear(db[i]) * A_WEIGHTS[i];
+            const rawBands = { ...EMPTY_BANDS };
+            let bandFrameMax = sharedBandPeakRef.current * SHARED_DECAY;
+            for (const k of Object.keys(rawBands) as (keyof Bands)[]) {
+              const [lo, hi] = bandMap[k];
+              let sumSq = 0;
+              const n = hi - lo + 1;
+              for (let i = lo; i <= hi; i++) sumSq += mag[i] * mag[i];
+              const v = Math.sqrt(sumSq / Math.max(1, n));
+              rawBands[k] = v;
+              if (v > bandFrameMax) bandFrameMax = v;
+            }
+            sharedBandPeakRef.current = Math.max(bandFrameMax, 1e-5);
+            const bandPeak = sharedBandPeakRef.current;
+            const newBands = { ...EMPTY_BANDS };
+            for (const k of Object.keys(rawBands) as (keyof Bands)[]) {
+              newBands[k] = Math.min(1, rawBands[k] / bandPeak);
+            }
+            setBands(newBands);
           }
 
-          // Sum magnitudes across all stems for band meters
-          const combined = new Float32Array(FREQ_BINS);
-          for (const stem of STEMS) {
-            const an2 = analyzersRef.current[stem];
-            if (!an2) continue;
-            an2.getFloatFrequencyData(db);
-            for (let i = 0; i < FREQ_BINS; i++) combined[i] += dbToMag(db[i]) * aw[i];
-          }
-
-          // Per-band RMS with per-band normalization (each band has its own peak tracker)
-          const newBands = { ...EMPTY_BANDS };
-          let peakAll = 1e-5;
-          for (const k of Object.keys(newBands) as (keyof Bands)[]) {
-            const [lo, hi] = bandMap[k];
-            let sumSq = 0;
-            const n = hi - lo + 1;
-            for (let i = lo; i <= hi; i++) sumSq += combined[i] * combined[i];
-            const v = Math.sqrt(sumSq / Math.max(1, n));
-            newBands[k] = v;
-            if (v > peakAll) peakAll = v;
-          }
-          for (const k of Object.keys(newBands) as (keyof Bands)[]) {
-            newBands[k] = Math.min(1, newBands[k] / peakAll);
-          }
-          setBands(newBands);
-
-          // Chroma on the 'other' stem (melodic content)
-          if (otherAnalyser) {
-            otherAnalyser.getFloatFrequencyData(db);
-            for (let i = 0; i < FREQ_BINS; i++) mag[i] = dbToMag(db[i]);
+          // Chroma from "other" stem (melodic content)
+          const otherAn = analyzersRef.current.other;
+          if (otherAn) {
+            otherAn.getFloatFrequencyData(db);
+            for (let i = 0; i < FREQ_BINS; i++) mag[i] = dbToLinear(db[i]);
             setChroma(computeChroma(mag, freqs));
           }
 
-          // Spectral centroid on combined
-          let magSum = 0, weightedSum = 0;
-          for (let i = 0; i < FREQ_BINS; i++) {
-            magSum += combined[i];
-            weightedSum += combined[i] * freqs[i];
+          // Spectral centroid from drums stem
+          if (drumsAn) {
+            drumsAn.getFloatFrequencyData(db);
+            let magSum = 0, weightedSum = 0;
+            for (let i = 0; i < FREQ_BINS; i++) {
+              const m = dbToLinear(db[i]);
+              magSum += m;
+              weightedSum += m * freqs[i];
+            }
+            setCentroid(magSum > 0 ? weightedSum / magSum : 0);
           }
-          setCentroid(magSum > 0 ? weightedSum / magSum : 0);
 
-          // Onset strength read (approximate — just recent drums energy change)
-          // For the continuous meter; the actual trigger fires from the peak timestamps.
-          const drumsE = analyzersRef.current.drums
-            ? (() => {
-                const a = analyzersRef.current.drums!;
-                a.getFloatFrequencyData(db);
-                let sum = 0;
-                // low = 20-500Hz ish, high = 2-16kHz ish
-                const lowHi = bandMap.lowMid[1];
-                const highLo = bandMap.highMid[0];
-                let low = 0, high = 0;
-                for (let i = 1; i < lowHi; i++) low += dbToMag(db[i]);
-                for (let i = highLo; i < FREQ_BINS; i++) high += dbToMag(db[i]);
-                return { low: Math.min(1, low / 20), high: Math.min(1, high / 20), sum };
-              })()
-            : { low: 0, high: 0 };
-          setOnsetStrength({ low: drumsE.low, high: drumsE.high });
+          // Continuous onset strength meters (rough; triggers come from cached peaks)
+          if (drumsAn) {
+            drumsAn.getFloatFrequencyData(db);
+            const lowHi = bandMap.lowMid[1];
+            const highLo = bandMap.highMid[0];
+            let lowSum = 0, highSum = 0;
+            for (let i = 1; i < lowHi; i++) lowSum += dbToLinear(db[i]);
+            for (let i = highLo; i < FREQ_BINS; i++) highSum += dbToLinear(db[i]);
+            setOnsetStrength({
+              low: Math.min(1, lowSum / (sharedBandPeakRef.current * 5)),
+              high: Math.min(1, highSum / (sharedBandPeakRef.current * 10)),
+            });
+          }
         }
       }
       raf = requestAnimationFrame(tick);
@@ -416,9 +380,9 @@ export default function App() {
   });
 
   const togglePlay = async () => {
-    const ctx = audioCtxRef.current;
+    const ctx = audioCtx;
     if (ctx && ctx.state === 'suspended') await ctx.resume();
-    const allRefs = STEMS.map(s => audioRefs.current[s]).filter(Boolean) as HTMLAudioElement[];
+    const allRefs = STEMS.map(s => audioElsRef.current[s]).filter(Boolean) as HTMLAudioElement[];
     const shouldPlay = allRefs.some(a => a.paused);
     if (shouldPlay) await Promise.allSettled(allRefs.map(a => a.play()));
     else allRefs.forEach(a => a.pause());
@@ -489,22 +453,21 @@ export default function App() {
             </header>
 
             {STEMS.map(stem => (
-              <audio
-                key={`${selected.id}-${stem}`}
-                ref={el => { audioRefs.current[stem] = el; }}
-                src={hasStems ? `/api/library/${selected.id}/stem/${stem}` : `/api/library/${selected.id}/audio`}
+              <StemTrack
+                key={stem}
+                url={hasStems ? `/api/library/${selected.id}/stem/${stem}` : `/api/library/${selected.id}/audio`}
+                muted={muted[stem]}
+                audioCtx={audioCtx}
+                onAudio={(el) => { audioElsRef.current[stem] = el ?? undefined; }}
+                onAnalyser={(a) => { analyzersRef.current[stem] = a ?? undefined; }}
                 onPlay={stem === 'drums' ? () => setPlaying(true) : undefined}
                 onPause={stem === 'drums' ? () => setPlaying(false) : undefined}
-                onEnded={stem === 'drums' ? () => setPlaying(false) : undefined}
-                onSeeked={stem === 'drums' ? () => {
-                  if (!analysis || !audioRefs.current.drums) return;
-                  const t = audioRefs.current.drums.currentTime;
+                onSeeked={stem === 'drums' ? (t) => {
+                  if (!analysis) return;
                   lastBeatIdx.current = (analysis.beats ?? []).filter(p => p <= t).length - 1;
                   lastLowPeakIdx.current = (analysis.onsetLowPeaks ?? []).filter(p => p <= t).length - 1;
                   lastHighPeakIdx.current = (analysis.onsetHighPeaks ?? []).filter(p => p <= t).length - 1;
                 } : undefined}
-                preload="auto"
-                crossOrigin="anonymous"
               />
             ))}
 
@@ -550,7 +513,7 @@ export default function App() {
               duration={analysis.duration}
               onSeek={(t) => {
                 for (const stem of STEMS) {
-                  const el = audioRefs.current[stem];
+                  const el = audioElsRef.current[stem];
                   if (el) el.currentTime = t;
                 }
               }}
@@ -575,6 +538,102 @@ function StemPane({ label, data, muted, onToggleMute }: {
       </label>
       <Spectrum data={data} />
     </div>
+  );
+}
+
+// ---- Self-contained audio stem component ----
+//
+// Owns one <audio> element and its Web Audio analyser graph. The audio
+// element is keyed by `url` so any URL change (track switch) fully unmounts
+// and remounts it — which fires the effect cleanup and fresh setup, with
+// no stale refs to manage in the parent.
+//
+// createMediaElementSource can only be called once per <audio> element, so
+// we memoize in a WeakMap keyed by the element. This makes the effect
+// idempotent under React.StrictMode's double-run-in-dev.
+
+const MEDIA_GRAPH = new WeakMap<
+  HTMLAudioElement,
+  { source: MediaElementAudioSourceNode; analyser: AnalyserNode; gain: GainNode }
+>();
+
+/**
+ * Wires up Web Audio for an <audio> element.
+ *   source → analyser → gain → destination
+ * The GainNode lets us "mute" output without starving the analyser of data,
+ * so muted stems can still render their spectrum (faded).
+ */
+function useStemAudioGraph(
+  audioEl: HTMLAudioElement | null,
+  audioCtx: AudioContext | null
+): { analyser: AnalyserNode | null; gain: GainNode | null } {
+  const [nodes, setNodes] = useState<{ analyser: AnalyserNode | null; gain: GainNode | null }>({
+    analyser: null, gain: null,
+  });
+
+  useEffect(() => {
+    if (!audioEl || !audioCtx) return;
+    let entry = MEDIA_GRAPH.get(audioEl);
+    if (!entry) {
+      try {
+        const source = audioCtx.createMediaElementSource(audioEl);
+        const analyser = audioCtx.createAnalyser();
+        analyser.fftSize = FFT_SIZE;
+        analyser.smoothingTimeConstant = 0.3;
+        const gain = audioCtx.createGain();
+        source.connect(analyser);
+        analyser.connect(gain);
+        gain.connect(audioCtx.destination);
+        entry = { source, analyser, gain };
+        MEDIA_GRAPH.set(audioEl, entry);
+      } catch (err) {
+        console.error('useStemAudioGraph: setup failed', err);
+        return;
+      }
+    }
+    setNodes({ analyser: entry.analyser, gain: entry.gain });
+    return () => setNodes({ analyser: null, gain: null });
+  }, [audioEl, audioCtx]);
+
+  return nodes;
+}
+
+function StemTrack({
+  url, muted, audioCtx, onAudio, onAnalyser, onPlay, onPause, onSeeked,
+}: {
+  url: string;
+  muted: boolean;
+  audioCtx: AudioContext | null;
+  onAudio: (el: HTMLAudioElement | null) => void;
+  onAnalyser: (a: AnalyserNode | null) => void;
+  onPlay?: () => void;
+  onPause?: () => void;
+  onSeeked?: (t: number) => void;
+}) {
+  const [el, setEl] = useState<HTMLAudioElement | null>(null);
+  const { analyser, gain } = useStemAudioGraph(el, audioCtx);
+
+  // Expose element and analyser upward. Refs are kept in sync via these.
+  useEffect(() => { onAudio(el); }, [el, onAudio]);
+  useEffect(() => { onAnalyser(analyser); }, [analyser, onAnalyser]);
+
+  // Mute via the GainNode rather than el.muted — keeps the analyser fed,
+  // which keeps the faded spectrum alive in the UI.
+  useEffect(() => {
+    if (gain) gain.gain.value = muted ? 0 : 1;
+  }, [gain, muted]);
+
+  return (
+    <audio
+      key={url}            // remount audio on URL change so the graph rebuilds cleanly
+      ref={setEl}
+      src={url}
+      preload="auto"
+      onPlay={onPlay}
+      onPause={onPause}
+      onEnded={onPause}
+      onSeeked={onSeeked ? (e) => onSeeked((e.currentTarget as HTMLAudioElement).currentTime) : undefined}
+    />
   );
 }
 
