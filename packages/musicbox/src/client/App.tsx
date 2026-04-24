@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import { Spectrum } from './components/Spectrum';
 import { SpectrumPulse } from './components/SpectrumPulse';
-import { EnergyBands } from './components/EnergyBands';
-import { Chroma } from './components/Chroma';
-import { OnsetIndicators } from './components/OnsetIndicators';
+import { OnsetTimeline, type MadmomOnsets } from './components/OnsetTimeline';
+import { LightPulseBindings } from './components/LightPulseBindings';
+import { AutopilotBar } from './components/AutopilotBar';
 
 const STEMS = ['drums', 'bass', 'vocals', 'other'] as const;
 type Stem = (typeof STEMS)[number];
@@ -45,21 +45,6 @@ const FFT_SIZE = 2048;                    // matches analyser's default musical 
 const FREQ_BINS = FFT_SIZE / 2;           // 1024 positive bins from AnalyserNode
 const NUM_BARS = 128;
 
-const BAND_DEFS: Record<keyof Bands, [number, number]> = {
-  subBass: [20, 60],
-  bass:    [60, 250],
-  lowMid:  [250, 500],
-  mid:     [500, 2000],
-  highMid: [2000, 4000],
-  high:    [4000, 20000],
-};
-
-interface Bands {
-  subBass: number; bass: number; lowMid: number;
-  mid: number; highMid: number; high: number;
-}
-
-const EMPTY_BANDS: Bands = { subBass: 0, bass: 0, lowMid: 0, mid: 0, highMid: 0, high: 0 };
 const EMPTY_ARR: number[] = [];
 
 // ---- DSP helpers (ported from the Python analyzer) ----
@@ -77,39 +62,6 @@ function buildBarBinMap(numBars: number, bins: number, sampleRate: number): Arra
       Math.min(bins - 1, Math.ceil(fHi / binWidth)),
     ]);
   }
-  return out;
-}
-
-function buildBandBinMap(bins: number, sampleRate: number): Record<keyof Bands, [number, number]> {
-  const binWidth = sampleRate / (bins * 2);
-  const out = {} as Record<keyof Bands, [number, number]>;
-  for (const [name, [lo, hi]] of Object.entries(BAND_DEFS)) {
-    out[name as keyof Bands] = [
-      Math.max(1, Math.floor(lo / binWidth)),
-      Math.min(bins - 1, Math.ceil(hi / binWidth)),
-    ];
-  }
-  return out;
-}
-
-// Chroma: 12 pitch classes. Accumulate power into the nearest semitone bucket.
-function computeChroma(mag: Float32Array, freqs: Float32Array): number[] {
-  const chroma = new Array(12).fill(0);
-  for (let i = 0; i < mag.length; i++) {
-    const f = freqs[i];
-    if (f < 100 || f > 5000 || mag[i] < 1e-4) continue;
-    const midi = 69 + 12 * Math.log2(f / 440);
-    const pc = ((Math.round(midi) % 12) + 12) % 12;
-    chroma[pc] += mag[i];
-  }
-  const m = Math.max(...chroma);
-  if (m > 0) for (let i = 0; i < 12; i++) chroma[i] /= m;
-  return chroma;
-}
-
-function buildFreqTable(bins: number, sampleRate: number): Float32Array {
-  const out = new Float32Array(bins);
-  for (let i = 0; i < bins; i++) out[i] = (i * sampleRate) / (bins * 2);
   return out;
 }
 
@@ -153,10 +105,27 @@ export default function App() {
   const [library, setLibrary] = useState<LibraryTrack[]>([]);
   const [filter, setFilter] = useState('');
   const [selected, setSelected] = useState<LibraryTrack | null>(null);
+  // Measured audio-output latency (ms) — how much the <audio> element's
+  // currentTime runs ahead of what the user actually hears. Subtracted from
+  // playhead so every visualization and every onset-crossing fires in
+  // sync with audible sound. Polled from autopilot's state file (which gets
+  // it from CoreAudio). Falls back to 0 if unavailable.
+  const [outputLatencyMs, setOutputLatencyMs] = useState<number>(0);
+  const outputLatencyMsRef = useRef(0);
+  useEffect(() => { outputLatencyMsRef.current = outputLatencyMs; }, [outputLatencyMs]);
+  // Queue of tracks to play after the current one ends. Advances FIFO.
+  // When empty, the current track loops (via <audio loop>).
+  const [queue, setQueue] = useState<LibraryTrack[]>([]);
+  // Set to true when we advance to a track via the queue, so the effect on
+  // `selected` knows to auto-play (can't call play() before the audio
+  // element mounts with the new src).
+  const autoPlayNextRef = useRef(false);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
+  const [madmom, setMadmom] = useState<MadmomOnsets | null>(null);
   const [loading, setLoading] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [position, setPosition] = useState(0);
+  const positionRef = useRef(0);
   const [muted, setMuted] = useState<Record<Stem, boolean>>({
     drums: false, bass: false, vocals: false, other: false,
   });
@@ -165,11 +134,7 @@ export default function App() {
   const [stemSpectrum, setStemSpectrum] = useState<Record<Stem, number[]>>({
     drums: EMPTY_ARR, bass: EMPTY_ARR, vocals: EMPTY_ARR, other: EMPTY_ARR,
   });
-  const [bands, setBands] = useState<Bands>(EMPTY_BANDS);
-  const [chroma, setChroma] = useState<number[]>([]);
-  const [centroid, setCentroid] = useState(0);
-  const [onsetStrength, setOnsetStrength] = useState({ low: 0, high: 0 });
-  const [triggers, setTriggers] = useState({ beat: false, low: false, high: false });
+  const [triggers, setTriggers] = useState({ low: false, high: false });
 
 
   // Audio context + per-stem audio element and analyser references. Populated
@@ -180,18 +145,23 @@ export default function App() {
   // Scratch buffers reused every frame (avoid allocation)
   const scratchDb = useRef(new Float32Array(FREQ_BINS));
   const scratchMag = useRef(new Float32Array(FREQ_BINS));
-  const freqTableRef = useRef<Float32Array | null>(null);
   const barBinMapRef = useRef<Array<[number, number]> | null>(null);
-  const bandBinMapRef = useRef<Record<keyof Bands, [number, number]> | null>(null);
   // Shared slow-decay peak across ALL stems — so inter-stem relative loudness
   // is visible (drums' bass bar is tall, other's bass bar is shorter).
   const sharedPeakRef = useRef(1e-4);
-  const sharedBandPeakRef = useRef(1e-5);
 
-  // Cursors into the beat / onset peak arrays
-  const lastBeatIdx = useRef(-1);
+  // Cursors into the madmom drums_low / drums_high peak arrays (for SpectrumPulse
+  // low/high flashes — kick/hat stage-light analog)
   const lastLowPeakIdx = useRef(-1);
   const lastHighPeakIdx = useRef(-1);
+
+  // Per-stem energy (mean of normalized bars). Used by LightPulseBindings
+  // to drive continuous level-tracking (e.g. bass energy → bulb brightness).
+  const stemEnergyRef = useRef<Record<Stem, number>>({ drums: 0, bass: 0, vocals: 0, other: 0 });
+  // Per-stem chroma = spectral centroid (0-1) = "where in the spectrum the
+  // stem's energy is centered right now". Roughly "how high or low" the
+  // sound is. Used to map palette position from the stem's live timbre.
+  const stemChromaRef = useRef<Record<Stem, number>>({ drums: 0.5, bass: 0.5, vocals: 0.5, other: 0.5 });
 
   // ---- Library + analysis loading ----
 
@@ -199,16 +169,48 @@ export default function App() {
     fetch('/api/library').then(r => r.json()).then(setLibrary).catch(() => {});
   }, []);
 
+  // Poll lightbox for the CoreAudio-measured output latency. Autopilot
+  // already reads it from macOS and writes to its state file.
   useEffect(() => {
-    if (!selected) { setAnalysis(null); return; }
+    let cancelled = false;
+    const LIGHTBOX = 'http://localhost:3001';
+    const tick = async () => {
+      try {
+        const r = await fetch(`${LIGHTBOX}/api/autopilot/state`);
+        const j = await r.json();
+        if (cancelled) return;
+        if (typeof j.output_latency_ms === 'number') setOutputLatencyMs(j.output_latency_ms);
+      } catch { /* ignore */ }
+    };
+    tick();
+    const t = window.setInterval(tick, 2000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, []);
+
+  useEffect(() => {
+    if (!selected) { setAnalysis(null); setMadmom(null); return; }
     setLoading(true);
-    lastBeatIdx.current = -1;
     lastLowPeakIdx.current = -1;
     lastHighPeakIdx.current = -1;
-    fetch(`/api/library/${selected.id}/analysis`)
-      .then(r => r.json())
-      .then((a: Analysis) => { setAnalysis(a); setLoading(false); })
-      .catch(() => setLoading(false));
+    const id = selected.id;
+    Promise.all([
+      fetch(`/api/library/${id}/analysis`).then(r => r.ok ? r.json() : null),
+      fetch(`/api/library/${id}/madmom-onsets`).then(r => r.ok ? r.json() : null),
+    ]).then(([a, m]) => {
+      setAnalysis(a);
+      setMadmom(m);
+      setLoading(false);
+      // If we got here via queue advance, start playing the new track as
+      // soon as its audio elements are ready.
+      if (autoPlayNextRef.current) {
+        autoPlayNextRef.current = false;
+        // Defer past layout + <audio> mount; `canplay` would be more
+        // correct but this is close enough in practice.
+        setTimeout(() => {
+          for (const stem of STEMS) audioElsRef.current[stem]?.play().catch(() => {});
+        }, 200);
+      }
+    }).catch(() => setLoading(false));
   }, [selected]);
 
   // Build the AudioContext lazily on first track select (needs user gesture-ish)
@@ -217,9 +219,7 @@ export default function App() {
     const ctor = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
     const ctx = new ctor();
     const sr = ctx.sampleRate;
-    freqTableRef.current = buildFreqTable(FREQ_BINS, sr);
     barBinMapRef.current = buildBarBinMap(NUM_BARS, FREQ_BINS, sr);
-    bandBinMapRef.current = buildBandBinMap(FREQ_BINS, sr);
     setAudioCtx(ctx);
   }, [selected, audioCtx]);
 
@@ -235,11 +235,17 @@ export default function App() {
       const an = analysis;
       const ctx = audioCtx;
 
-      if (master && an && ctx) {
-        const posSec = master.currentTime;
+      if (master && ctx) {
+        // Delay the visible/effective playhead by the measured audio output
+        // latency so everything downstream (OnsetTimeline, LightPulseBindings
+        // pulse firing, Scrubber readout) is aligned with what the user
+        // hears. For local speakers this is ~0; for AirPlay/Sonos ~2s.
+        const posSec = Math.max(0, master.currentTime - outputLatencyMsRef.current / 1000);
+        positionRef.current = posSec;
         setPosition(posSec);
 
-        // --- Trigger streams (timestamp crossings from the analysis data) ---
+        // --- Trigger streams (for SpectrumPulse: kick glow + hat glow) ---
+        // Driven by madmom drums_low / drums_high CNN peaks when available.
         const crossed = (arr: number[] | undefined, ref: { current: number }): boolean => {
           if (!arr) return false;
           let fired = false;
@@ -249,16 +255,13 @@ export default function App() {
           }
           return fired;
         };
-        const beatTrigger = crossed(an.beats, lastBeatIdx);
-        const lowTrigger = crossed(an.onsetLowPeaks, lastLowPeakIdx);
-        const highTrigger = crossed(an.onsetHighPeaks, lastHighPeakIdx);
-        setTriggers({ beat: beatTrigger, low: lowTrigger, high: highTrigger });
+        const lowTrigger = crossed(madmom?.drums_low?.cnn, lastLowPeakIdx);
+        const highTrigger = crossed(madmom?.drums_high?.cnn, lastHighPeakIdx);
+        setTriggers({ low: lowTrigger, high: highTrigger });
 
-        // --- Per-frame from Web Audio (only when playing) ---
-        if (!master.paused) {
-          const freqs = freqTableRef.current!;
+        // --- Per-frame spectrum (only when playing, and only if analysis exists) ---
+        if (!master.paused && an) {
           const barMap = barBinMapRef.current!;
-          const bandMap = bandBinMapRef.current!;
           const db = scratchDb.current;
           const mag = scratchMag.current;
 
@@ -300,78 +303,33 @@ export default function App() {
           };
           for (const stem of STEMS) {
             const raw = rawStemBars[stem];
-            if (raw.length === 0) continue;
+            if (raw.length === 0) { stemEnergyRef.current[stem] = 0; continue; }
             const norm = new Array<number>(NUM_BARS);
-            for (let b = 0; b < NUM_BARS; b++) norm[b] = Math.min(1, raw[b] / peak);
+            let sum = 0;
+            // Spectral-centroid computation in the same pass: Σ(bar_index × energy) / Σ(energy).
+            // Divided by (NUM_BARS - 1) gives a 0-1 value that's roughly
+            // "pitch height" of the stem's current frame.
+            let weighted = 0;
+            for (let b = 0; b < NUM_BARS; b++) {
+              norm[b] = Math.min(1, raw[b] / peak);
+              sum += norm[b];
+              weighted += b * norm[b];
+            }
             nextStemSpectrum[stem] = norm;
+            stemEnergyRef.current[stem] = sum / NUM_BARS;   // mean normalized energy, 0-1
+            // Require at least some energy or chroma is meaningless noise.
+            if (sum > 0.02) {
+              stemChromaRef.current[stem] = weighted / sum / (NUM_BARS - 1);
+            }
           }
           setStemSpectrum(nextStemSpectrum);
-
-          // Energy bands: use drums stem, shared peak decay for stable reference
-          const drumsAn = analyzersRef.current.drums;
-          if (drumsAn) {
-            drumsAn.getFloatFrequencyData(db);
-            for (let i = 0; i < FREQ_BINS; i++) mag[i] = dbToLinear(db[i]) * A_WEIGHTS[i];
-            const rawBands = { ...EMPTY_BANDS };
-            let bandFrameMax = sharedBandPeakRef.current * SHARED_DECAY;
-            for (const k of Object.keys(rawBands) as (keyof Bands)[]) {
-              const [lo, hi] = bandMap[k];
-              let sumSq = 0;
-              const n = hi - lo + 1;
-              for (let i = lo; i <= hi; i++) sumSq += mag[i] * mag[i];
-              const v = Math.sqrt(sumSq / Math.max(1, n));
-              rawBands[k] = v;
-              if (v > bandFrameMax) bandFrameMax = v;
-            }
-            sharedBandPeakRef.current = Math.max(bandFrameMax, 1e-5);
-            const bandPeak = sharedBandPeakRef.current;
-            const newBands = { ...EMPTY_BANDS };
-            for (const k of Object.keys(rawBands) as (keyof Bands)[]) {
-              newBands[k] = Math.min(1, rawBands[k] / bandPeak);
-            }
-            setBands(newBands);
-          }
-
-          // Chroma from "other" stem (melodic content)
-          const otherAn = analyzersRef.current.other;
-          if (otherAn) {
-            otherAn.getFloatFrequencyData(db);
-            for (let i = 0; i < FREQ_BINS; i++) mag[i] = dbToLinear(db[i]);
-            setChroma(computeChroma(mag, freqs));
-          }
-
-          // Spectral centroid from drums stem
-          if (drumsAn) {
-            drumsAn.getFloatFrequencyData(db);
-            let magSum = 0, weightedSum = 0;
-            for (let i = 0; i < FREQ_BINS; i++) {
-              const m = dbToLinear(db[i]);
-              magSum += m;
-              weightedSum += m * freqs[i];
-            }
-            setCentroid(magSum > 0 ? weightedSum / magSum : 0);
-          }
-
-          // Continuous onset strength meters (rough; triggers come from cached peaks)
-          if (drumsAn) {
-            drumsAn.getFloatFrequencyData(db);
-            const lowHi = bandMap.lowMid[1];
-            const highLo = bandMap.highMid[0];
-            let lowSum = 0, highSum = 0;
-            for (let i = 1; i < lowHi; i++) lowSum += dbToLinear(db[i]);
-            for (let i = highLo; i < FREQ_BINS; i++) highSum += dbToLinear(db[i]);
-            setOnsetStrength({
-              low: Math.min(1, lowSum / (sharedBandPeakRef.current * 5)),
-              high: Math.min(1, highSum / (sharedBandPeakRef.current * 10)),
-            });
-          }
         }
       }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [analysis]);
+  }, [analysis, madmom, audioCtx]);
 
   const filtered = library.filter(t => {
     if (!filter) return true;
@@ -382,21 +340,99 @@ export default function App() {
   const togglePlay = async () => {
     const ctx = audioCtx;
     if (ctx && ctx.state === 'suspended') await ctx.resume();
+    // Nothing selected yet but queue has items? Pop the head and play.
+    // Lets the user enqueue a few tracks and hit play without manually
+    // picking one from the library.
+    if (!selected && queue.length > 0) {
+      const [next, ...rest] = queue;
+      autoPlayNextRef.current = true;
+      setSelected(next);
+      setQueue(rest);
+      return;
+    }
     const allRefs = STEMS.map(s => audioElsRef.current[s]).filter(Boolean) as HTMLAudioElement[];
     const shouldPlay = allRefs.some(a => a.paused);
     if (shouldPlay) await Promise.allSettled(allRefs.map(a => a.play()));
     else allRefs.forEach(a => a.pause());
   };
 
+  // Abandon current track, advance to next in queue. If queue is empty, no-op.
+  const skipNext = () => {
+    if (queue.length === 0) return;
+    const [next, ...rest] = queue;
+    autoPlayNextRef.current = true;
+    setSelected(next);
+    setQueue(rest);
+  };
+
   const analyzedCount = library.filter(t => t.analyzed).length;
   const hasStems = analysis != null && analysis.version >= 3;
 
   return (
-    <div className="h-screen bg-zinc-950 text-white flex overflow-hidden">
+    <div className="h-screen bg-zinc-950 text-white flex flex-col overflow-hidden">
+    <AutopilotBar />
+    <div className="flex-1 flex min-h-0 overflow-hidden">
+      {/* Play queue panel. Sits to the left of the library so you can see
+          what's lined up without hovering anything. Drag-to-reorder would
+          be nice but not built yet — remove via the × and re-add from the
+          library is fine for now. */}
+      <aside className="w-56 shrink-0 border-r border-zinc-800 flex flex-col bg-zinc-950">
+        <div className="px-3 py-2 border-b border-zinc-800 flex items-center gap-2">
+          <button
+            onClick={togglePlay}
+            disabled={!selected && queue.length === 0}
+            className="flex-1 px-2 py-1 text-xs font-mono rounded bg-green-700 hover:bg-green-600 disabled:opacity-40 disabled:cursor-not-allowed text-white"
+            title={!selected && queue.length === 0 ? 'Enqueue a track first' : (playing ? 'Pause' : 'Play')}
+          >{playing ? '❚❚' : '▶'}</button>
+          <button
+            onClick={skipNext}
+            disabled={queue.length === 0}
+            className="px-2 py-1 text-xs font-mono rounded bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed text-white"
+            title="Skip to next queued track"
+          >⏭</button>
+          <span className="text-[10px] text-zinc-600 font-mono">{queue.length}</span>
+        </div>
+        <div className="flex-1 overflow-y-auto">
+          {queue.length === 0 ? (
+            <div className="px-3 py-4 text-[11px] text-zinc-600">
+              No tracks queued.<br />
+              <span className="text-zinc-700">Click + next to a song.</span>
+            </div>
+          ) : (
+            queue.map((t, i) => (
+              <div
+                key={`${t.id}-${i}`}
+                className="group flex items-center gap-2 px-3 py-1.5 border-b border-zinc-900/50 text-xs hover:bg-zinc-900"
+              >
+                <span className="text-zinc-600 font-mono w-4 text-right">{i + 1}</span>
+                <div className="flex-1 min-w-0">
+                  <div className="truncate text-zinc-200">{t.name}</div>
+                  <div className="truncate text-zinc-500 text-[10px]">{t.artists.join(', ')}</div>
+                </div>
+                <button
+                  onClick={() => setQueue(q => q.filter((_, j) => j !== i))}
+                  title="Remove from queue"
+                  className="w-5 h-5 rounded text-[11px] font-mono flex items-center justify-center
+                    bg-zinc-800 text-zinc-500 hover:bg-zinc-700 hover:text-white"
+                >×</button>
+              </div>
+            ))
+          )}
+        </div>
+        {queue.length > 0 && (
+          <button
+            onClick={() => setQueue([])}
+            className="text-[10px] font-mono px-3 py-1.5 border-t border-zinc-800 text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300"
+          >clear queue</button>
+        )}
+      </aside>
+
       <aside className="w-80 shrink-0 border-r border-zinc-800 flex flex-col">
         <div className="px-3 py-2 border-b border-zinc-800">
           <h1 className="text-sm font-semibold text-zinc-200 mb-1">musicbox</h1>
-          <div className="text-[10px] text-zinc-500 mb-2">{analyzedCount} / {library.length} analyzed</div>
+          <div className="text-[10px] text-zinc-500 mb-2">
+            {analyzedCount} / {library.length} analyzed
+          </div>
           <input
             type="search"
             placeholder="filter..."
@@ -406,29 +442,51 @@ export default function App() {
           />
         </div>
         <div className="flex-1 overflow-y-auto">
-          {filtered.map(t => (
-            <button
-              key={t.id}
-              onClick={() => t.analyzed && setSelected(t)}
-              disabled={!t.analyzed}
-              className={`w-full text-left px-3 py-2 border-b border-zinc-900/50 text-xs transition-colors
-                ${selected?.id === t.id ? 'bg-zinc-800' : 'hover:bg-zinc-900'}
-                ${t.analyzed ? 'text-zinc-200' : 'text-zinc-600 cursor-not-allowed'}`}
-            >
-              <div className="truncate font-medium">{t.name}</div>
-              <div className="truncate text-zinc-500 text-[10px]">
-                {t.artists.join(', ')}
-                {t.analyzed && t.bpm != null && (
-                  <> · {Math.round(t.bpm)} BPM · {t.key}{t.mode === 'minor' ? 'm' : ''}</>
+          {filtered.map(t => {
+            const inQueue = queue.some(q => q.id === t.id);
+            return (
+              <div
+                key={t.id}
+                className={`relative w-full border-b border-zinc-900/50 text-xs transition-colors group
+                  ${selected?.id === t.id ? 'bg-zinc-800' : 'hover:bg-zinc-900'}
+                  ${t.analyzed ? 'text-zinc-200' : 'text-zinc-600'}`}
+              >
+                <button
+                  onClick={() => t.analyzed && setSelected(t)}
+                  disabled={!t.analyzed}
+                  className={`w-full text-left px-3 py-2 pr-10 ${t.analyzed ? '' : 'cursor-not-allowed'}`}
+                >
+                  <div className="truncate font-medium">{t.name}</div>
+                  <div className="truncate text-zinc-500 text-[10px]">
+                    {t.artists.join(', ')}
+                    {t.analyzed && t.bpm != null && (
+                      <> · {Math.round(t.bpm)} BPM · {t.key}{t.mode === 'minor' ? 'm' : ''}</>
+                    )}
+                    {!t.analyzed && ' · not analyzed'}
+                  </div>
+                </button>
+                {t.analyzed && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setQueue(q => inQueue ? q.filter(x => x.id !== t.id) : [...q, t]);
+                    }}
+                    title={inQueue ? 'Remove from queue' : 'Add to queue'}
+                    className={`absolute right-2 top-1/2 -translate-y-1/2 w-6 h-6 rounded text-xs font-mono
+                      flex items-center justify-center
+                      ${inQueue
+                        ? 'bg-indigo-600 text-white'
+                        : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white'}`}
+                  >{inQueue ? '−' : '+'}</button>
                 )}
-                {!t.analyzed && ' · not analyzed'}
               </div>
-            </button>
-          ))}
+            );
+          })}
         </div>
       </aside>
 
       <main className="flex-1 flex flex-col min-w-0">
+        <div className="flex-1 flex flex-col min-h-0">
         {!selected ? (
           <div className="flex-1 flex items-center justify-center text-zinc-500">Select a track</div>
         ) : loading || !analysis ? (
@@ -443,12 +501,6 @@ export default function App() {
               <div className="flex items-center gap-3 text-xs text-zinc-400 shrink-0 ml-4">
                 <span className="font-mono">{Math.round(analysis.bpm)} BPM</span>
                 <span className="font-mono">{analysis.key}{analysis.mode === 'minor' ? 'm' : ''}</span>
-                <button
-                  onClick={togglePlay}
-                  className="bg-zinc-700 hover:bg-zinc-600 rounded px-3 py-1 font-medium text-white"
-                >
-                  {playing ? 'Pause' : 'Play'}
-                </button>
               </div>
             </header>
 
@@ -458,15 +510,27 @@ export default function App() {
                 url={hasStems ? `/api/library/${selected.id}/stem/${stem}` : `/api/library/${selected.id}/audio`}
                 muted={muted[stem]}
                 audioCtx={audioCtx}
+                // No auto-repeat — when a track ends and the queue is empty,
+                // playback just stops. Queue head advance still works.
+                loop={false}
                 onAudio={(el) => { audioElsRef.current[stem] = el ?? undefined; }}
                 onAnalyser={(a) => { analyzersRef.current[stem] = a ?? undefined; }}
                 onPlay={stem === 'drums' ? () => setPlaying(true) : undefined}
                 onPause={stem === 'drums' ? () => setPlaying(false) : undefined}
+                // Only the drums (master) stem drives queue advance to avoid
+                // firing 4x per end. Pop head, set as selected, mark autoplay.
+                onEnded={stem === 'drums' ? () => {
+                  setQueue(q => {
+                    if (q.length === 0) return q;
+                    const [next, ...rest] = q;
+                    autoPlayNextRef.current = true;
+                    setSelected(next);
+                    return rest;
+                  });
+                } : undefined}
                 onSeeked={stem === 'drums' ? (t) => {
-                  if (!analysis) return;
-                  lastBeatIdx.current = (analysis.beats ?? []).filter(p => p <= t).length - 1;
-                  lastLowPeakIdx.current = (analysis.onsetLowPeaks ?? []).filter(p => p <= t).length - 1;
-                  lastHighPeakIdx.current = (analysis.onsetHighPeaks ?? []).filter(p => p <= t).length - 1;
+                  lastLowPeakIdx.current = (madmom?.drums_low?.cnn ?? []).filter(p => p <= t).length - 1;
+                  lastHighPeakIdx.current = (madmom?.drums_high?.cnn ?? []).filter(p => p <= t).length - 1;
                 } : undefined}
               />
             ))}
@@ -488,22 +552,15 @@ export default function App() {
                 </SpectrumPulse>
               </div>
 
-              <div className="flex-[1.5] min-h-0 border-t border-zinc-800/50 flex">
-                <div className="flex-1">
-                  <EnergyBands bands={bands} />
-                </div>
-                <div className="w-56 border-l border-zinc-800/50">
-                  <Chroma data={chroma} centroid={centroid} />
-                </div>
-                <div className="w-56 border-l border-zinc-800/50">
-                  <OnsetIndicators
-                    beatTrigger={triggers.beat}
-                    lowStrength={onsetStrength.low}
-                    lowTrigger={triggers.low}
-                    highStrength={onsetStrength.high}
-                    highTrigger={triggers.high}
-                    bpm={analysis.bpm}
-                  />
+              <div className="flex-[2] min-h-0 border-t border-zinc-800/50 flex flex-col">
+                <div className="flex-1 min-h-0">
+                  {madmom ? (
+                    <OnsetTimeline data={madmom} positionRef={positionRef} beats={analysis.beats} />
+                  ) : (
+                    <div className="h-full flex items-center justify-center text-[11px] text-zinc-600 font-mono">
+                      no madmom_onsets.json for this track
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -520,7 +577,18 @@ export default function App() {
             />
           </>
         )}
+        </div>
+        {/* Always-rendered so binding state (mode, sources, sliders) survives
+            track changes, loading transitions, and "no track selected". */}
+        <LightPulseBindings
+          data={madmom}
+          positionRef={positionRef}
+          playing={playing}
+          stemEnergyRef={stemEnergyRef}
+          stemChromaRef={stemChromaRef}
+        />
       </main>
+    </div>
     </div>
   );
 }
@@ -599,7 +667,7 @@ function useStemAudioGraph(
 }
 
 function StemTrack({
-  url, muted, audioCtx, onAudio, onAnalyser, onPlay, onPause, onSeeked,
+  url, muted, audioCtx, onAudio, onAnalyser, onPlay, onPause, onEnded, onSeeked, loop,
 }: {
   url: string;
   muted: boolean;
@@ -608,7 +676,9 @@ function StemTrack({
   onAnalyser: (a: AnalyserNode | null) => void;
   onPlay?: () => void;
   onPause?: () => void;
+  onEnded?: () => void;
   onSeeked?: (t: number) => void;
+  loop?: boolean;
 }) {
   const [el, setEl] = useState<HTMLAudioElement | null>(null);
   const { analyser, gain } = useStemAudioGraph(el, audioCtx);
@@ -629,9 +699,10 @@ function StemTrack({
       ref={setEl}
       src={url}
       preload="auto"
+      loop={loop}
       onPlay={onPlay}
       onPause={onPause}
-      onEnded={onPause}
+      onEnded={onEnded ?? onPause}
       onSeeked={onSeeked ? (e) => onSeeked((e.currentTarget as HTMLAudioElement).currentTime) : undefined}
     />
   );

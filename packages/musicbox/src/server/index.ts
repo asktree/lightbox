@@ -82,6 +82,15 @@ app.get('/api/library/:id/analysis', (req, res) => {
   res.type('application/json').sendFile(p);
 });
 
+app.get('/api/library/:id/madmom-onsets', (req, res) => {
+  const p = join(TRACKS_DIR, req.params.id, 'madmom_onsets.json');
+  if (!existsSync(p)) {
+    res.status(404).json({ error: 'not analyzed' });
+    return;
+  }
+  res.type('application/json').sendFile(p);
+});
+
 // Audio streaming
 app.get('/api/library/:id/audio', (req, res) => {
   const p = join(TRACKS_DIR, req.params.id, 'audio.ogg');

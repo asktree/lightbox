@@ -57,11 +57,13 @@ def run_demucs(audio_path: Path, out_dir: Path, device: str = "mps") -> dict[str
 
 def transcode_stem_to_ogg(wav_path: Path, ogg_path: Path, quality: int = 5) -> None:
     """Transcode a WAV stem to OGG Vorbis via ffmpeg. quality=5 is ~160kbps."""
+    # ffmpeg 8.x dropped libvorbis; use the native vorbis encoder, which is
+    # still marked experimental and requires -strict -2.
     ogg_path.parent.mkdir(parents=True, exist_ok=True)
     proc = subprocess.run([
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", str(wav_path),
-        "-c:a", "libvorbis", "-q:a", str(quality),
+        "-c:a", "vorbis", "-strict", "-2", "-q:a", str(quality),
         str(ogg_path),
     ], capture_output=True, text=True, timeout=120)
     if proc.returncode != 0:

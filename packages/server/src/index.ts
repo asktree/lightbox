@@ -1,4 +1,15 @@
 import 'dotenv/config';
+// Safety net: long-running driver sockets (tuyapi, hue EventStream) can
+// emit errors after their owning classes have been torn down. Without this
+// handler a stray unhandled 'error' kills the whole dev server mid-party.
+// Log + stay alive. Callers that care will observe degraded state normally.
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err?.stack ?? err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason);
+});
+
 import express from 'express';
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -11,6 +22,9 @@ import { createGroupsRouter } from './routes/groups.js';
 import { createPalettesRouter } from './routes/palettes.js';
 import { createRoomsRouter } from './routes/rooms.js';
 import { createChatRouter } from './routes/chat.js';
+import { createHueStreamRouter } from './routes/hue-stream.js';
+import { createAutopilotRouter, ensureAutopilotRunning } from './routes/autopilot.js';
+import { hueRestPulseEvents } from './drivers/hue-rest-pulse.js';
 
 const PORT = process.env.PORT || 3001;
 
@@ -112,6 +126,13 @@ app.use('/api/groups', createGroupsRouter(lightManager));
 app.use('/api/palettes', createPalettesRouter(lightManager));
 app.use('/api/rooms', createRoomsRouter(paletteAnimator));
 app.use('/api/chat', createChatRouter(lightManager));
+app.use('/api/hue-stream', createHueStreamRouter(paletteAnimator));
+app.use('/api/autopilot', createAutopilotRouter());
+
+// Pipe REST-pulse timing logs into the shared debug log broadcast.
+hueRestPulseEvents.on('debug', (entry) => {
+  broadcast({ type: 'debug_log', entry });
+});
 
 // Health check
 app.get('/api/health', (req, res) => {
@@ -133,6 +154,13 @@ async function start() {
 
     await paletteAnimator.initialize();
     console.log('Palette animator initialized');
+
+    // Start a persistent drift-only autopilot daemon if none is already
+    // running. This keeps the UI's drift readout fresh even when the user
+    // hasn't explicitly enabled any lights — autopilot just polls Spotify.
+    // Idempotent: skips the spawn if a prior detached process survived our
+    // dev-server restart.
+    ensureAutopilotRunning();
 
     // Broadcast updated state to all connected clients now that initialization is complete
     wss.clients.forEach((client) => {

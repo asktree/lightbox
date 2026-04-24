@@ -15,8 +15,13 @@ import { ROOMS, getPointOnPalette, positionToColor } from '@lightbox/shared';
 import type { Database } from './database.js';
 import type { LightManager } from './light-manager.js';
 
-const UPDATE_INTERVAL_MS = 180;
-const PERSIST_INTERVAL_TICKS = 17; // Persist every ~3 seconds at 180ms
+// 360ms tick halves bridge traffic vs. the original 180ms. The transition
+// duration passed to each setLightState is the same interval, so bulbs
+// interpolate across the gap — visually identical, 2× less pressure. With
+// 6 lights in living we go from ~33 PUTs/sec (over Hue's ~10/sec budget)
+// down to ~17, still over but less congested.
+const UPDATE_INTERVAL_MS = 360;
+const PERSIST_INTERVAL_TICKS = 9; // Persist every ~3 seconds at 360ms
 
 // Default refresh interval for lights without custom settings (0 = use global UPDATE_INTERVAL_MS)
 const DEFAULT_REFRESH_INTERVAL_MS = 0;
@@ -341,6 +346,89 @@ export class PaletteAnimator extends EventEmitter {
     return state?.excludedLightIds.has(lightId) ?? false;
   }
 
+  // ---- Pulse claim system ----
+  //
+  // Music-driven pulses (musicbox) want to drive a light's brightness via
+  // REST attack/decay PUTs at whatever color the palette animator has most
+  // recently set. Without coordination, the palette's periodic color
+  // updates fight with the pulse's brightness writes. A "pulse claim"
+  // excludes claimed lights from palette writes and exposes a way to look
+  // up the current intended palette color so pulses can include it.
+
+  private pulseClaimedLights: Set<string> = new Set();
+
+  setPulseClaim(lightIds: string[]): void {
+    const next = new Set(lightIds);
+    // Unclaim previously-claimed lights that dropped out of the new set.
+    for (const lid of this.pulseClaimedLights) {
+      if (!next.has(lid)) {
+        for (const state of this.roomStates.values()) state.excludedLightIds.delete(lid);
+      }
+    }
+    // Claim newly added lights.
+    for (const lid of next) {
+      if (!this.pulseClaimedLights.has(lid)) {
+        for (const state of this.roomStates.values()) state.excludedLightIds.add(lid);
+      }
+    }
+    this.pulseClaimedLights = next;
+  }
+
+  isPulseClaimed(lightId: string): boolean {
+    return this.pulseClaimedLights.has(lightId);
+  }
+
+  // Intended palette color for a light (the color the palette would be
+  // setting if the light weren't pulse-claimed). Returns uint16 RGB so the
+  // REST pulse can write it as xy. null if the light has no active palette.
+  //
+  // Respects position overrides (from external sources like musicbox
+  // chroma bindings) when the override is fresh (TTL-gated).
+  getPaletteColorForLight(lightId: string): { r: number; g: number; b: number } | null {
+    for (const state of this.roomStates.values()) {
+      if (!state.activePaletteId) continue;
+      const position = this.effectivePosition(state, lightId);
+      if (position === null) continue;
+      const palette = this.db.getPalette(state.activePaletteId);
+      if (!palette || palette.nodes.length < 2) continue;
+      const point = getPointOnPalette(palette, position);
+      const { h, s } = positionToColor(point);
+      return hsvToRgb16(h, s / 100, 1);
+    }
+    return null;
+  }
+
+  // --- Palette position overrides ---
+  //
+  // External systems (e.g. musicbox chroma bindings) can push a 0-1 palette
+  // position per light. The override wins over the time-driven natural
+  // progression as long as it's fresh (TTL). When the push stops, positions
+  // resume advancing naturally from wherever they are.
+
+  private positionOverrides = new Map<string, { position: number; updatedAt: number }>();
+  private static readonly POSITION_OVERRIDE_TTL_MS = 1500;
+
+  setPositionOverride(lightId: string, position: number): void {
+    this.positionOverrides.set(lightId, {
+      position: Math.max(0, Math.min(1, position)),
+      updatedAt: Date.now(),
+    });
+  }
+  clearPositionOverride(lightId: string): void {
+    this.positionOverrides.delete(lightId);
+  }
+
+  /** Position this light *should* render at, honoring overrides. null if no
+   *  entry in positions and no override. */
+  private effectivePosition(state: RoomAnimationState, lightId: string): number | null {
+    const ov = this.positionOverrides.get(lightId);
+    if (ov && Date.now() - ov.updatedAt < PaletteAnimator.POSITION_OVERRIDE_TTL_MS) {
+      return ov.position;
+    }
+    const p = state.positions[lightId];
+    return p === undefined ? null : p;
+  }
+
   /**
    * Mark a light as being controlled by user (pauses palette updates temporarily)
    */
@@ -419,18 +507,23 @@ export class PaletteAnimator extends EventEmitter {
 
     const now = Date.now();
 
+    let wrote = 0, skippedExcluded = 0, skippedUser = 0, skippedThrottle = 0;
     // Update each light
     // TODO: Skip lights that are turned off (no point sending color updates to off lights)
     for (const lightId of Object.keys(state.positions)) {
-      // Skip excluded lights
-      if (state.excludedLightIds.has(lightId)) continue;
+      // User-controlled overrides palette entirely (don't even advance).
+      if (this.isUserControlled(lightId)) { skippedUser++; continue; }
 
-      // Skip lights being controlled by user (e.g., adjusting brightness)
-      if (this.isUserControlled(lightId)) continue;
-
+      // Advance position for ALL lights, including claimed ones. Claimed
+      // lights get skipped from the bulb write below, but we still want
+      // their palette position to move forward so pulse firings look up
+      // the *current* color, not the one frozen at claim time.
       const currentPos = state.positions[lightId] ?? 0;
       const newPos = (currentPos + delta) % 1;
       state.positions[lightId] = newPos;
+
+      // Skip the bulb write for claimed lights — musicbox is driving them.
+      if (state.excludedLightIds.has(lightId)) { skippedExcluded++; continue; }
 
       // Check per-light refresh rate throttling
       const settings = this.lightManager.getLightSettings(lightId);
@@ -440,12 +533,15 @@ export class PaletteAnimator extends EventEmitter {
         const lastUpdate = this.lastLightUpdateTime.get(lightId) || 0;
         if (now - lastUpdate < maxInterval) {
           // Skip this update - not enough time has passed
+          skippedThrottle++;
           continue;
         }
       }
 
-      // Calculate color and update light
-      const point = getPointOnPalette(palette, newPos);
+      // Calculate color and update light — use override if fresh so
+      // chroma-bound lights show the externally-driven position.
+      const effPos = this.effectivePosition(state, lightId) ?? newPos;
+      const point = getPointOnPalette(palette, effPos);
       const { h, s } = positionToColor(point);
       this.lightManager.setLightState(lightId, { color: { h, s } }, UPDATE_INTERVAL_MS).catch(() => {
         // Ignore errors during animation - light might be unreachable
@@ -453,6 +549,7 @@ export class PaletteAnimator extends EventEmitter {
 
       // Record update time for throttling
       this.lastLightUpdateTime.set(lightId, now);
+      wrote++;
     }
 
     // Broadcast positions to clients
@@ -462,6 +559,12 @@ export class PaletteAnimator extends EventEmitter {
     state.tickCount++;
     if (state.tickCount % PERSIST_INTERVAL_TICKS === 0) {
       this.db.savePalettePositions(state.activePaletteId, state.positions);
+    }
+    // One line per ~second showing what the palette actually wrote. Helps
+    // diagnose palette-vs-pulse contention without flooding.
+    if (state.tickCount % 6 === 0) {
+      const claimed = [...state.excludedLightIds].join(',') || '(none)';
+      console.log(`[palette] room=${roomId} wrote=${wrote} excluded=${skippedExcluded} userCtrl=${skippedUser} throttle=${skippedThrottle} claimed=[${claimed}]`);
     }
   }
 
@@ -497,4 +600,26 @@ export class PaletteAnimator extends EventEmitter {
       }
     }
   }
+}
+
+// HSV (h:0-360, s/v:0-1) → uint16 RGB. Standard conversion; needed because
+// positionToColor returns standard HSV but the REST pulse writes CIE xy
+// computed from sRGB.
+function hsvToRgb16(h: number, s: number, v: number): { r: number; g: number; b: number } {
+  const c = v * s;
+  const hp = (h / 60) % 6;
+  const x = c * (1 - Math.abs((hp % 2) - 1));
+  let r = 0, g = 0, b = 0;
+  if (hp < 1) { r = c; g = x; b = 0; }
+  else if (hp < 2) { r = x; g = c; b = 0; }
+  else if (hp < 3) { r = 0; g = c; b = x; }
+  else if (hp < 4) { r = 0; g = x; b = c; }
+  else if (hp < 5) { r = x; g = 0; b = c; }
+  else { r = c; g = 0; b = x; }
+  const m = v - c;
+  return {
+    r: Math.round((r + m) * 65535),
+    g: Math.round((g + m) * 65535),
+    b: Math.round((b + m) * 65535),
+  };
 }

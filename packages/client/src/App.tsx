@@ -9,8 +9,9 @@ import { PaletteControls } from './components/PaletteControls';
 import { LightPane } from './components/LightPane';
 import { AgentChat } from './components/AgentChat';
 import { DebugPanel } from './components/DebugPanel';
+import { StreamTest } from './components/StreamTest';
 
-type View = 'grid' | 'wheel';
+type View = 'grid' | 'wheel' | 'stream';
 
 export default function App() {
   useWebSocket();
@@ -25,7 +26,7 @@ export default function App() {
 
   const [view, setView] = useState<View>(() => {
     const saved = localStorage.getItem('lightbox:viewMode');
-    return saved === 'grid' || saved === 'wheel' ? saved : 'wheel';
+    return saved === 'grid' || saved === 'wheel' || saved === 'stream' ? saved : 'wheel';
   });
   const [currentRoom, setCurrentRoom] = useState<string>(() => {
     const saved = localStorage.getItem('lightbox:currentRoom');
@@ -196,6 +197,14 @@ export default function App() {
             >
               Wheel
             </button>
+            <button
+              onClick={() => setView('stream')}
+              className={`px-3 py-1 text-sm rounded-md transition-all ${
+                view === 'stream' ? 'bg-zinc-600 text-white' : 'text-zinc-400'
+              }`}
+            >
+              Stream
+            </button>
           </div>
 
           {/* Debug toggle */}
@@ -326,6 +335,9 @@ export default function App() {
         </div>
       )}
 
+      {/* Stream test view */}
+      {view === 'stream' && <StreamTest />}
+
       {/* Light Pane - shown when a light is selected */}
       {selectedLight && (
         <LightPane
@@ -344,7 +356,7 @@ export default function App() {
       {/* Debug Panel */}
       {debugOpen && (
         <DebugPanel
-          filterDevices={roomConfig?.lightIds.length > 0 ? lightsList.map((l) => l.name) : undefined}
+          filterDevices={view === 'stream' || !roomConfig?.lightIds.length ? undefined : lightsList.map((l) => l.name)}
         />
       )}
     </div>

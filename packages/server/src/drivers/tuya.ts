@@ -108,6 +108,13 @@ export class TuyaDriver implements LightDriver {
   private inFlight = new Map<string, boolean>();
   private pending = new Map<string, { state: Partial<LightState>; transition?: number }>();
 
+  // Periodic health-check: pings each connected device, rebuilds the tuyapi
+  // instance on failure. The "restart the server" trick works because a
+  // fresh TuyAPI instance bypasses whatever stale state the old one got into
+  // — this does the same without a full server restart.
+  private healthCheckTimer?: NodeJS.Timeout;
+  private static readonly HEALTH_INTERVAL_MS = 45000;
+
   private emitDebug(deviceName: string, message: string, direction: 'in' | 'out'): string {
     const id = `tuya-${++this.debugSeq}`;
     if (this.onDebug) {
@@ -215,7 +222,62 @@ export class TuyaDriver implements LightDriver {
       }
     }
 
+    // Start periodic health check now that devices are wired up.
+    if (!this.healthCheckTimer) {
+      this.healthCheckTimer = setInterval(() => this.runHealthCheck(), TuyaDriver.HEALTH_INTERVAL_MS);
+    }
     return lights;
+  }
+
+  // Replace the tuyapi instance with a fresh one. Existing listeners are
+  // abandoned with the old api (GC'd). We re-attach setupDeviceEvents after.
+  // Called on persistent-connection failure — this bypasses whatever stale
+  // internal state the previous TuyAPI instance got wedged in.
+  //
+  // IMPORTANT: we keep a no-op 'error' listener on the OLD api instance
+  // before disconnecting it. The tuyapi-wrapped TCP socket can emit an
+  // 'error' (ECONNRESET) during the disconnect teardown; if no handler is
+  // attached, Node treats it as unhandled and kills the process.
+  private rebuildApi(device: TuyaDevice, id: string): void {
+    const old = device.api;
+    try { old.removeAllListeners?.(); } catch { /* ignore */ }
+    try { old.on?.('error', () => { /* swallow during teardown */ }); } catch { /* ignore */ }
+    try { old.disconnect?.(); } catch { /* ignore */ }
+    device.api = new TuyAPI({
+      id: device.config.id,
+      key: device.config.key,
+      ip: device.config.ip,
+      version: device.config.version || '3.3',
+    });
+    device.connected = false;
+    device.reachable = false;
+    this.setupDeviceEvents(device, id);
+  }
+
+  private async runHealthCheck(): Promise<void> {
+    for (const [id, device] of this.devices) {
+      if (!device.config.ip) continue; // nothing to check
+      try {
+        // Cheap liveness probe. If tuyapi's session is alive, this returns
+        // quickly. If it's wedged / device went to sleep / network dropped,
+        // this throws.
+        if (device.connected) {
+          await Promise.race([
+            device.api.get({ schema: true }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('heartbeat timeout')), 5000)),
+          ]);
+        } else {
+          // Not currently connected — scheduleReconnect has its own backoff.
+          // Nothing to do here unless the reconnect queue has gone quiet
+          // for too long, which the backoff itself handles.
+        }
+      } catch (err: any) {
+        console.log(`Tuya: ${device.config.name} heartbeat failed (${err?.message ?? err}), rebuilding api`);
+        this.rebuildApi(device, id);
+        this.scheduleReconnect(device, id);
+        if (this.onDiagnosticsChange) this.onDiagnosticsChange();
+      }
+    }
   }
 
   private setupDeviceEvents(device: TuyaDevice, id: string): void {
@@ -300,6 +362,10 @@ export class TuyaDriver implements LightDriver {
 
     device.reconnectTimer = setTimeout(async () => {
       if (device.connected) return; // Already reconnected
+
+      // Rebuild api instance before every attempt. Fresh TuyAPI avoids the
+      // stale-session wedge that only a server restart used to clear.
+      this.rebuildApi(device, id);
 
       try {
         await this.connectDevice(device, id);

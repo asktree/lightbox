@@ -6,30 +6,36 @@ Unified smart light control with React UI, Node.js backend, and MCP server.
 
 ```bash
 pnpm install
-pnpm dev        # Run all packages in dev mode (user runs this in terminal)
+pnpm dev        # Run all packages in dev mode (Claude runs this in background)
 pnpm server     # Run server only
 pnpm client     # Run client only
+pnpm musicbox   # Run musicbox only
 pnpm build      # Build all packages
 pnpm kill       # Kill all dev processes
-pnpm restart    # Kill and restart dev
+pnpm redev      # Kill and restart dev (named `redev` to avoid pnpm's `restart`
+                # lifecycle which implicitly requires `stop`/`start` scripts)
 ```
 
 Server: http://localhost:3001
 Client: http://localhost:5173
+Musicbox: http://localhost:5174
 WebSocket: ws://localhost:3001/ws
 
 ## Dev Server Management (for Claude)
 
-**Server runs in a separate terminal** - the user manages it manually. Don't try to kill or restart it. It's in watch mode with 3 processes:
+**Claude manages the dev server.** Start it with `pnpm dev` via Bash
+`run_in_background: true`. It pipes combined output to `/tmp/lightbox.log`.
+Three watchers run in parallel:
 - `tsx watch` for server (auto-restarts on .ts changes)
-- `vite` for client (HMR on file changes)
+- `vite` for client / musicbox (HMR on file changes)
 - `tsc --watch` for shared types
 
-**Logs**: Server logs are in `/tmp/lightbox.log` - read this to debug issues.
+**Logs**: read `/tmp/lightbox.log` to debug.
 
-**Code changes**: Automatic - just edit files, watch mode handles restart.
+**Code changes**: picked up automatically — no restart needed for .ts/.tsx edits.
 
-**Config/data changes** (e.g., `tuya-devices.json`): User needs to restart server manually.
+**Config/data changes** (e.g., `tuya-devices.json`, new routes added while the
+server had an import error, etc.): run `pnpm redev` to fully restart.
 
 To build a single package:
 ```bash

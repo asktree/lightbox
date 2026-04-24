@@ -14,6 +14,7 @@ SCOPES = [
     "user-library-read",        # /me/tracks (liked)
     "user-read-recently-played",
     "playlist-read-private",
+    "user-read-playback-state", # /me/player/currently-playing (autopilot)
 ]
 
 
@@ -29,7 +30,88 @@ def make_client(cfg: Config) -> spotipy.Spotify:
         cache_path=str(SPOTIPY_CACHE),
         open_browser=True,
     )
-    return spotipy.Spotify(auth_manager=auth)
+    return spotipy.Spotify(auth_manager=auth, requests_timeout=30, retries=5)
+
+
+def _track_to_dict(track: dict, added_at: str | None) -> dict | None:
+    """Convert a Spotify track object to our simplified dict. Returns None
+    for local/unavailable tracks with no id."""
+    if not track or not track.get("id"):
+        return None
+    return {
+        "id": track["id"],
+        "name": track["name"],
+        "artists": [a["name"] for a in track.get("artists", [])],
+        "album": (track.get("album") or {}).get("name", ""),
+        "duration_ms": track.get("duration_ms"),
+        "added_at": added_at,
+        "isrc": (track.get("external_ids") or {}).get("isrc"),
+    }
+
+
+def owned_playlists_since(client: spotipy.Spotify, since: str) -> Iterator[dict]:
+    """Yield tracks from user-owned playlists whose earliest added_at is >= `since`
+    (ISO8601, e.g. '2023-01-01'). Tracks are deduped by id across playlists."""
+    me = client.me()
+    user_id = me["id"]
+
+    # Collect all owned playlists
+    owned = []
+    offset = 0
+    while True:
+        page = client.current_user_playlists(limit=50, offset=offset)
+        items = page.get("items", [])
+        if not items:
+            break
+        for p in items:
+            if (p.get("owner") or {}).get("id") == user_id:
+                owned.append(p)
+        offset += len(items)
+        if not page.get("next"):
+            break
+
+    seen: set[str] = set()
+    for p in owned:
+        pid = p["id"]
+        pname = p["name"]
+        # Walk items once, collecting both the earliest added_at (to gate
+        # the playlist) and the track payloads (to emit if gate passes).
+        tracks_buf: list[tuple[dict, str | None]] = []
+        earliest: str | None = None
+        off = 0
+        while True:
+            # Spotify's API sometimes returns the track under `item` instead of
+            # `track` (appears to depend on client version/headers). Ask for both.
+            tp = client.playlist_items(
+                pid,
+                fields="items(added_at,is_local,track(id,name,artists,album(name),duration_ms,external_ids),item(id,name,artists,album(name),duration_ms,external_ids)),next",
+                limit=100,
+                offset=off,
+            )
+            items = tp.get("items", [])
+            if not items:
+                break
+            for it in items:
+                if it.get("is_local"):
+                    continue
+                a = it.get("added_at")
+                if a and (earliest is None or a < earliest):
+                    earliest = a
+                track_obj = it.get("track") or it.get("item") or {}
+                tracks_buf.append((track_obj, a))
+            off += len(items)
+            if not tp.get("next"):
+                break
+
+        if not earliest or earliest < since:
+            continue
+        print(f"  {pname}: {len(tracks_buf)} items (earliest {earliest[:10]})", flush=True)
+        for track, added_at in tracks_buf:
+            d = _track_to_dict(track, added_at)
+            if d is None or d["id"] in seen:
+                continue
+            seen.add(d["id"])
+            yield d
 
 
 def liked_tracks(client: spotipy.Spotify, limit: int | None = None) -> Iterator[dict]:
