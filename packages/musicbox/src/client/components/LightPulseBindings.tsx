@@ -12,8 +12,15 @@ import type { MadmomOnsets } from './OnsetTimeline';
 
 const LIGHTBOX_URL = 'http://localhost:3001';
 
-// Only surface these lights in the UI.
-const ALLOWED_LIGHT_NAMES = ['couch light actual', 'hue iris 1', 'spaceship floor', 'cockpit'];
+// Only surface these lights in the UI. Non-Hue lights (WiZ, Tuya) are
+// loaded separately and joined into the same list. Energy bindings dispatch
+// per-brand: Hue → entertainment stream, WiZ → UDP setPilot, Tuya → REST
+// setState (which coalesces per-device against the persistent connection).
+const ALLOWED_LIGHT_NAMES = ['couch light actual', 'hue iris 1', 'spaceship floor', 'cockpit', 'gu10 kitchen', 'sunvie gu10 couch'];
+
+// rid prefix marks a non-Hue light. Hue rids are bare CLIP v2 UUIDs.
+const isWizRid  = (rid: string) => rid.startsWith('wiz:');
+const isTuyaRid = (rid: string) => rid.startsWith('tuya:');
 
 // Pinned to the top of the dropdown and used by the "all →" button.
 const DEFAULT_SOURCE_KEY = 'drums_low_strict.sf';
@@ -79,12 +86,17 @@ interface Binding {
   floor: number;   // 1-100 — decay target for peaks, min level for energy
   decayMs: number; // peak only
   gain: number;    // energy only — multiplier on raw energy (0.5-30)
-  smooth: number;  // brightness smoothing — EMA alpha (0-0.99), energy mode
+  // Asymmetric envelope follower (energy mode). attackSmooth gates how fast
+  // brightness rises when raw energy increases; decaySmooth gates how fast
+  // it falls. 0 = no smoothing (instant), closer to 1 = heavy smoothing.
+  // Default fast-attack/slow-decay gives the classic "punch with tail" feel.
+  attackSmooth: number;
+  decaySmooth: number;
   chromaSmooth: number; // chroma smoothing — EMA alpha (0-0.99), chroma color
   colorSource: ColorSource; // how the palette position for this light is decided
 }
 function defaultBinding(): Binding {
-  return { sourceKey: null, peak: 100, floor: 5, decayMs: 400, gain: 10, smooth: 0.9, chromaSmooth: 0.9, colorSource: 'palette' };
+  return { sourceKey: null, peak: 100, floor: 5, decayMs: 400, gain: 10, attackSmooth: 0, decaySmooth: 0.9, chromaSmooth: 0.9, colorSource: 'palette' };
 }
 
 // Energy → chroma-update weight. Raw per-stem energy is typically 0-0.3 even
@@ -118,12 +130,32 @@ export function LightPulseBindings({
   const [frameHz, setFrameHz] = useState(50);
   const [bindings, setBindings] = useState<Record<string, Binding>>({});
   const [loadErr, setLoadErr] = useState<string | null>(null);
+  // WiZ bulbs choke around 30-50 packets/sec; throttle the rAF dispatch
+  // per-bulb so 60Hz tick doesn't translate into 60Hz UDP. Slider in the
+  // header lets the user tune it for the specific bulb / network.
+  const [wizHz, setWizHz] = useState(25);
+  // Tuya bulbs cap themselves through the persistent-connection coalescer
+  // (~1 in-flight per device, RTT ≈ 50-150ms), so a higher input rate is
+  // wasteful. Default 8 Hz is plenty given the firmware's 800ms internal fade.
+  const [tuyaHz, setTuyaHz] = useState(8);
 
-  // Load once.
+  // Load once. Combine Hue rest-lights with WiZ devices so both kinds can
+  // appear in the same binding dropdown.
   useEffect(() => {
-    fetch(`${LIGHTBOX_URL}/api/hue-stream/rest-lights`)
-      .then(r => r.ok ? r.json() : Promise.reject(new Error(`${r.status}`)))
-      .then(j => setLightsAll((j.lights || []).map((l: any) => ({ rid: l.rid, name: l.name }))))
+    Promise.all([
+      fetch(`${LIGHTBOX_URL}/api/hue-stream/rest-lights`)
+        .then(r => r.ok ? r.json() : Promise.reject(new Error(`hue ${r.status}`)))
+        .then(j => (j.lights || []).map((l: any) => ({ rid: l.rid as string, name: l.name as string }))),
+      fetch(`${LIGHTBOX_URL}/api/wiz/lights`)
+        .then(r => r.ok ? r.json() : { lights: [] })
+        .then(j => (j.lights || []).map((l: any) => ({ rid: l.id as string, name: l.name as string })))
+        .catch(() => []),
+      fetch(`${LIGHTBOX_URL}/api/tuya/lights`)
+        .then(r => r.ok ? r.json() : { lights: [] })
+        .then(j => (j.lights || []).map((l: any) => ({ rid: l.id as string, name: l.name as string })))
+        .catch(() => []),
+    ])
+      .then(([hue, wiz, tuya]) => setLightsAll([...hue, ...wiz, ...tuya]))
       .catch(e => setLoadErr(String(e)));
     fetch(`${LIGHTBOX_URL}/api/hue-stream/rest-max-sockets`)
       .then(r => r.json()).then(j => { if (typeof j.maxSockets === 'number') setMaxSockets(j.maxSockets); })
@@ -146,6 +178,32 @@ export function LightPulseBindings({
     tick();
     const t = setInterval(tick, 2000);
     return () => { cancelled = true; clearInterval(t); };
+  }, []);
+
+  // Heartbeat the stream watchdog so the server knows this tab is alive.
+  // Server tears the stream down if heartbeats stop for ~10s, so closing
+  // the tab/page (or losing connectivity) auto-shuts the stream and bulbs
+  // come back under REST/palette control. Best-effort sendBeacon on
+  // pagehide for instant teardown when possible.
+  useEffect(() => {
+    const beat = () => {
+      fetch(`${LIGHTBOX_URL}/api/hue-stream/heartbeat`, { method: 'POST' }).catch(() => {});
+    };
+    beat();
+    const t = setInterval(beat, 3000);
+    const onHide = (e: PageTransitionEvent) => {
+      // pagehide also fires when tabbing away (page → bfcache). Only act
+      // on REAL teardown — close, navigate, refresh — where persisted is
+      // false. Tabbing out leaves the heartbeat-based watchdog (which
+      // doesn't fire just from a tab switch since the interval keeps
+      // running unless the browser throttles it heavily) as the safety net.
+      if (e.persisted) return;
+      try {
+        navigator.sendBeacon?.(`${LIGHTBOX_URL}/api/hue-stream/stop`, new Blob([''], { type: 'application/json' }));
+      } catch { /* ignore */ }
+    };
+    window.addEventListener('pagehide', onHide);
+    return () => { clearInterval(t); window.removeEventListener('pagehide', onHide); };
   }, []);
 
   // Push server knobs live.
@@ -174,10 +232,13 @@ export function LightPulseBindings({
     return m;
   }, [visibleLights]);
 
-  // Light names whose binding is an energy source. Drives stream lifecycle.
+  // Light names whose binding is an energy source. Drives Hue entertainment
+  // stream lifecycle. WiZ rids are excluded — they're driven over UDP, not
+  // through the entertainment config.
   const energyLightNames = useMemo(() => {
     const names: string[] = [];
     for (const rid of Object.keys(bindings)) {
+      if (isWizRid(rid) || isTuyaRid(rid)) continue;
       const b = bindings[rid];
       if (!b?.sourceKey) continue;
       const src = SOURCE_BY_KEY.get(b.sourceKey);
@@ -241,8 +302,10 @@ export function LightPulseBindings({
 
   // Pulse-claim (peak bindings only — so the palette animator skips those
   // lights during pulsing). Re-asserted every 10s in case server restarts.
+  // WiZ rids excluded: pulse-claim is a Hue/CLIP-v2 concept.
   const peakBoundRids = useMemo(() => {
     return Object.keys(bindings).filter(rid => {
+      if (isWizRid(rid) || isTuyaRid(rid)) return false;
       const b = bindings[rid];
       if (!b?.sourceKey) return false;
       return SOURCE_BY_KEY.get(b.sourceKey)?.kind === 'peak';
@@ -261,8 +324,12 @@ export function LightPulseBindings({
   // Refs for rAF access without re-subscribing.
   const bindingsRef = useRef(bindings);
   const ridToChannelIdRef = useRef(ridToChannelId);
+  const wizHzRef = useRef(wizHz);
+  const tuyaHzRef = useRef(tuyaHz);
   useEffect(() => { bindingsRef.current = bindings; }, [bindings]);
   useEffect(() => { ridToChannelIdRef.current = ridToChannelId; }, [ridToChannelId]);
+  useEffect(() => { wizHzRef.current = wizHz; }, [wizHz]);
+  useEffect(() => { tuyaHzRef.current = tuyaHz; }, [tuyaHz]);
 
   // Chroma → palette-position pusher. ~45Hz — same ballpark as the stream
   // frame rate so color tracks pitch height continuously.
@@ -343,6 +410,9 @@ export function LightPulseBindings({
     const inFlight: Record<string, boolean> = {};
     const MIN_GAP_MS = 30;
     const energySmoothed: Record<string, number> = {};
+    // Per-rid throttles for non-stream brands.
+    const lastWizSendAt: Record<string, number> = {};
+    const lastTuyaSendAt: Record<string, number> = {};
 
     const tick = () => {
       const pos = positionRef.current;
@@ -357,26 +427,66 @@ export function LightPulseBindings({
         if (!src) continue;
 
         if (src.kind === 'energy') {
-          // Need the light's stream channel ID. If the stream hasn't
-          // started yet (lifecycle effect in flight) or this light isn't
-          // in the current config, skip silently — will start firing as
-          // soon as the channel is available.
-          const channelId = chMap.get(rid);
-          if (channelId === undefined) continue;
           const raw = stemEnergyRef.current[src.stem] ?? 0;
           const rawScaled = Math.max(0, Math.min(1, raw * b.gain));
-          const alpha = Math.max(0, Math.min(0.99, b.smooth));
           const prev = energySmoothed[rid] ?? rawScaled;
+          // Asymmetric EMA: pick alpha based on direction so attack and
+          // decay can be tuned independently. Higher alpha = more
+          // smoothing (slower change). Standard envelope-follower trick.
+          const alpha = rawScaled > prev
+            ? Math.max(0, Math.min(0.99, b.attackSmooth))
+            : Math.max(0, Math.min(0.99, b.decaySmooth));
           const smoothed = prev * alpha + rawScaled * (1 - alpha);
           energySmoothed[rid] = smoothed;
           const lo = b.floor / 100, hi = b.peak / 100;
           const level = lo + (hi - lo) * smoothed;
+
+          if (isWizRid(rid)) {
+            // WiZ has no entertainment stream — push dimming directly via
+            // setPilot UDP. No r/g/b means current color stays; only
+            // brightness modulates with energy. Floor/peak are interpreted
+            // as percent dimming. Clamp to WiZ's 10..100 range.
+            // Throttle per-rid: bulb firmware chokes >30-50 Hz.
+            const minGapMs = 1000 / Math.max(1, wizHzRef.current);
+            if (now - (lastWizSendAt[rid] ?? 0) < minGapMs) continue;
+            lastWizSendAt[rid] = now;
+            const dimming = Math.max(10, Math.min(100, Math.round(level * 100)));
+            fetch(`${LIGHTBOX_URL}/api/wiz/set`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ deviceId: rid, state: true, dimming }),
+            }).catch(() => {});
+            continue;
+          }
+
+          if (isTuyaRid(rid)) {
+            // Tuya: push brightness through setState; the driver coalesces
+            // per-device against its persistent connection. Color stays
+            // wherever palette/wheel set it. Bulb firmware adds an
+            // unavoidable ~800ms fade so the perceived envelope is mushier
+            // than Hue/WiZ regardless of client smoothing.
+            const minGapMs = 1000 / Math.max(1, tuyaHzRef.current);
+            if (now - (lastTuyaSendAt[rid] ?? 0) < minGapMs) continue;
+            lastTuyaSendAt[rid] = now;
+            const brightness = Math.max(1, Math.min(100, Math.round(level * 100)));
+            fetch(`${LIGHTBOX_URL}/api/tuya/set`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ deviceId: rid, on: true, brightness }),
+            }).catch(() => {});
+            continue;
+          }
+
+          // Hue: push level into the entertainment stream channel.
+          const channelId = chMap.get(rid);
+          if (channelId === undefined) continue;
           fetch(`${LIGHTBOX_URL}/api/hue-stream/level`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ channelId, level }),
           }).catch(() => {});
           continue;
         }
+
+        // Peak: WiZ/Tuya peak transport not implemented; skip.
+        if (isWizRid(rid) || isTuyaRid(rid)) continue;
 
         // Peak source — REST path.
         const entry = data[src.path[0]] as { cnn?: number[]; superflux?: number[] } | undefined;
@@ -435,6 +545,27 @@ export function LightPulseBindings({
   }
 
   const anyEnergy = energyLightNames.length > 0;
+  // True when any WiZ light has an energy binding (only then is the WiZ Hz
+  // slider relevant). WiZ rids skip the entertainment stream so they don't
+  // contribute to energyLightNames.
+  const anyWizEnergy = useMemo(() => {
+    for (const rid of Object.keys(bindings)) {
+      if (!isWizRid(rid)) continue;
+      const b = bindings[rid];
+      if (!b?.sourceKey) continue;
+      if (SOURCE_BY_KEY.get(b.sourceKey)?.kind === 'energy') return true;
+    }
+    return false;
+  }, [bindings]);
+  const anyTuyaEnergy = useMemo(() => {
+    for (const rid of Object.keys(bindings)) {
+      if (!isTuyaRid(rid)) continue;
+      const b = bindings[rid];
+      if (!b?.sourceKey) continue;
+      if (SOURCE_BY_KEY.get(b.sourceKey)?.kind === 'energy') return true;
+    }
+    return false;
+  }, [bindings]);
 
   return (
     <div className="px-3 py-2 border-t border-zinc-800 bg-zinc-950 overflow-y-auto">
@@ -457,6 +588,26 @@ export function LightPulseBindings({
             <input type="range" min={10} max={60} step={5} value={frameHz}
               onChange={(e) => setFrameHz(+e.target.value)} className="w-20" />
             <span className="w-5 text-right">{frameHz}</span>
+          </label>
+        )}
+
+        {anyWizEnergy && (
+          <label className="flex items-center gap-1.5 text-[10px] text-zinc-500 font-mono"
+            title="Max setPilot rate per WiZ bulb. Firmware chokes ~30-50 Hz; if you see stutter or stuck levels, lower this.">
+            WiZ Hz
+            <input type="range" min={5} max={60} step={1} value={wizHz}
+              onChange={(e) => setWizHz(+e.target.value)} className="w-20" />
+            <span className="w-5 text-right">{wizHz}</span>
+          </label>
+        )}
+
+        {anyTuyaEnergy && (
+          <label className="flex items-center gap-1.5 text-[10px] text-zinc-500 font-mono"
+            title="Max setState rate per Tuya bulb. Driver auto-coalesces against the persistent connection so higher = wasted client traffic; firmware ~800ms fade smears anything fast anyway.">
+            Tuya Hz
+            <input type="range" min={1} max={20} step={1} value={tuyaHz}
+              onChange={(e) => setTuyaHz(+e.target.value)} className="w-20" />
+            <span className="w-5 text-right">{tuyaHz}</span>
           </label>
         )}
 
@@ -570,14 +721,24 @@ export function LightPulseBindings({
                   </div>
                 )}
                 {isEnergy && (
-                  <div className="flex items-center gap-2 text-[10px] text-zinc-500">
-                    <span className="w-10 text-right">bri smth</span>
-                    <input type="range" min={0} max={0.99} step={0.01} value={b.smooth}
-                      onChange={(e) => update(l.rid, { smooth: +e.target.value })}
-                      className="flex-1"
-                      title="Brightness EMA alpha (energy mode). 0 = raw, 0.9 ≈ 250ms wave, 0.97 ≈ 1s slow drift." />
-                    <span className="w-12 text-right font-mono">{b.smooth.toFixed(2)}</span>
-                  </div>
+                  <>
+                    <div className="flex items-center gap-2 text-[10px] text-zinc-500">
+                      <span className="w-10 text-right">attack</span>
+                      <input type="range" min={0} max={0.99} step={0.01} value={b.attackSmooth}
+                        onChange={(e) => update(l.rid, { attackSmooth: +e.target.value })}
+                        className="flex-1"
+                        title="Brightness EMA alpha when energy is RISING. 0 = instant attack (snaps to peaks), 0.5 ≈ ~30ms ramp, 0.9 ≈ ~250ms — softens transients." />
+                      <span className="w-12 text-right font-mono">{b.attackSmooth.toFixed(2)}</span>
+                    </div>
+                    <div className="flex items-center gap-2 text-[10px] text-zinc-500">
+                      <span className="w-10 text-right">decay</span>
+                      <input type="range" min={0} max={0.99} step={0.01} value={b.decaySmooth}
+                        onChange={(e) => update(l.rid, { decaySmooth: +e.target.value })}
+                        className="flex-1"
+                        title="Brightness EMA alpha when energy is FALLING. 0 = snap to floor between hits, 0.9 ≈ 250ms tail, 0.97 ≈ 1s slow fade." />
+                      <span className="w-12 text-right font-mono">{b.decaySmooth.toFixed(2)}</span>
+                    </div>
+                  </>
                 )}
                 {b.colorSource !== 'palette' && (
                   <div className="flex items-center gap-2 text-[10px] text-zinc-500">

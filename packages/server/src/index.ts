@@ -23,6 +23,10 @@ import { createPalettesRouter } from './routes/palettes.js';
 import { createRoomsRouter } from './routes/rooms.js';
 import { createChatRouter } from './routes/chat.js';
 import { createHueStreamRouter } from './routes/hue-stream.js';
+import { createWizRouter } from './routes/wiz.js';
+import type { WizDriver } from './drivers/wiz.js';
+import { createTuyaRouter } from './routes/tuya.js';
+import type { TuyaDriver } from './drivers/tuya.js';
 import { createAutopilotRouter, ensureAutopilotRunning } from './routes/autopilot.js';
 import { hueRestPulseEvents } from './drivers/hue-rest-pulse.js';
 
@@ -127,6 +131,8 @@ app.use('/api/palettes', createPalettesRouter(lightManager));
 app.use('/api/rooms', createRoomsRouter(paletteAnimator));
 app.use('/api/chat', createChatRouter(lightManager));
 app.use('/api/hue-stream', createHueStreamRouter(paletteAnimator));
+app.use('/api/wiz', createWizRouter(() => lightManager.getDriverByBrand<WizDriver>('wiz')));
+app.use('/api/tuya', createTuyaRouter(() => lightManager.getDriverByBrand<TuyaDriver>('tuya')));
 app.use('/api/autopilot', createAutopilotRouter());
 
 // Pipe REST-pulse timing logs into the shared debug log broadcast.
@@ -155,12 +161,13 @@ async function start() {
     await paletteAnimator.initialize();
     console.log('Palette animator initialized');
 
-    // Start a persistent drift-only autopilot daemon if none is already
-    // running. This keeps the UI's drift readout fresh even when the user
-    // hasn't explicitly enabled any lights — autopilot just polls Spotify.
-    // Idempotent: skips the spawn if a prior detached process survived our
-    // dev-server restart.
-    ensureAutopilotRunning();
+    // Autopilot is OFF by default. Start it explicitly via the UI's
+    // toggle (or POST /api/autopilot/start). The previous auto-spawn-on-
+    // boot behavior was annoying — Spotify polling fires unconditionally
+    // even when the user hasn't asked for any lights. Comment out below
+    // to restore that behavior.
+    // ensureAutopilotRunning();
+    void ensureAutopilotRunning;
 
     // Broadcast updated state to all connected clients now that initialization is complete
     wss.clients.forEach((client) => {

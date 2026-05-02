@@ -13,6 +13,27 @@ function getDriver(): HueEntertainmentDriver {
 export function createHueStreamRouter(paletteAnimator?: PaletteAnimator): Router {
   const r = Router();
 
+  // Stream watchdog: musicbox heartbeats while it's the owner of the
+  // stream. If no heartbeat lands for STREAM_HEARTBEAT_TIMEOUT_MS, we
+  // tear the stream down. Closing the browser tab stops the heartbeat,
+  // so the stream auto-shuts within ~10s instead of leaving bulbs stuck
+  // in entertainment mode.
+  let lastStreamHeartbeatMs = 0;
+  // Generous timeout: backgrounded tabs get their setInterval throttled
+  // (Chrome: 1Hz when hidden, sometimes worse). 60s gives a tabbed-away
+  // client plenty of time to keep heartbeating without the stream dying.
+  const STREAM_HEARTBEAT_TIMEOUT_MS = 60_000;
+  setInterval(async () => {
+    try {
+      if (!driver?.active) return;
+      if (lastStreamHeartbeatMs === 0) return; // no client has ever heartbeated; nothing to expire
+      if (Date.now() - lastStreamHeartbeatMs < STREAM_HEARTBEAT_TIMEOUT_MS) return;
+      console.log('[hue-stream] watchdog: no heartbeat for', STREAM_HEARTBEAT_TIMEOUT_MS / 1000, 's, stopping stream');
+      lastStreamHeartbeatMs = 0;
+      await driver.stop();
+    } catch { /* ignore */ }
+  }, 2000);
+
   // Cache of REST lights keyed by lowercased/trimmed name. Used by the
   // high-rate stream color loop below to avoid async work at 45Hz.
   let cachedRestLightsByName: Map<string, { rid: string; lmId: string; name: string }> | null = null;
@@ -68,6 +89,8 @@ export function createHueStreamRouter(paletteAnimator?: PaletteAnimator): Router
         lightNames: Array.isArray(lightNames) ? lightNames : null,
         groupIntoSingleChannel: !!groupIntoSingleChannel,
       });
+      // Give the client a grace period to start heartbeating after start.
+      lastStreamHeartbeatMs = Date.now();
       res.json({ active: d.active, channels: d.getChannels() });
     } catch (err) {
       console.error('hue-stream /start failed:', err);
@@ -106,11 +129,21 @@ export function createHueStreamRouter(paletteAnimator?: PaletteAnimator): Router
     try {
       const d = getDriver();
       await d.stop();
+      lastStreamHeartbeatMs = 0;
       res.json({ active: d.active });
     } catch (err) {
       console.error('hue-stream /stop failed:', err);
       res.status(500).json({ error: String(err) });
     }
+  });
+
+  // Heartbeat from the client. While the stream is active and bindings
+  // demand it, musicbox posts here every few seconds. If the post stops
+  // (tab closed / page crashed / network drop), the watchdog above
+  // tears the stream down so bulbs aren't stuck in entertainment mode.
+  r.post('/heartbeat', (_req, res) => {
+    lastStreamHeartbeatMs = Date.now();
+    res.json({ ok: true });
   });
 
   // Body: { channelId?: number, r, g, b }  (omit channelId = all)

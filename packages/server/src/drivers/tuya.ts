@@ -390,6 +390,17 @@ export class TuyaDriver implements LightDriver {
     return device.state;
   }
 
+  // Returns currently-known Tuya devices for the bindings UI. Mirrors the
+  // shape the WiZ driver uses so the client can treat them similarly.
+  listDevices(): { id: string; name: string; reachable: boolean; connected: boolean }[] {
+    return [...this.devices.entries()].map(([id, d]) => ({
+      id,
+      name: d.config.name,
+      reachable: d.reachable,
+      connected: d.connected,
+    }));
+  }
+
   async setState(deviceId: string, state: Partial<LightState>, transition?: number): Promise<void> {
     const fullId = deviceId.startsWith('tuya:') ? deviceId : `tuya:${deviceId}`;
     const device = this.devices.get(fullId);

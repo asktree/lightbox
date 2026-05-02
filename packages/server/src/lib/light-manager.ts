@@ -4,6 +4,7 @@ import { HueDriver } from '../drivers/hue.js';
 import { GoveeDriver } from '../drivers/govee.js';
 import { TuyaDriver } from '../drivers/tuya.js';
 import { TuyaBLEProxyDriver } from '../drivers/tuya-ble-proxy.js';
+import { WizDriver } from '../drivers/wiz.js';
 import { Database } from './database.js';
 
 export class LightManager extends EventEmitter {
@@ -39,6 +40,7 @@ export class LightManager extends EventEmitter {
       new GoveeDriver(),
       new TuyaDriver(),
       new TuyaBLEProxyDriver(),
+      new WizDriver(),
     ];
 
     // Set up callbacks for all drivers first
@@ -111,6 +113,13 @@ export class LightManager extends EventEmitter {
 
     // Start polling for state updates (fallback for drivers without EventStream)
     this.startPolling();
+  }
+
+  // Look up a driver by brand. Used by brand-specific test routes (e.g.
+  // the WiZ test page) that need to call driver-specific methods not on
+  // the generic LightDriver interface.
+  getDriverByBrand<T extends LightDriver = LightDriver>(brand: string): T | undefined {
+    return this.drivers.find((d) => d.brand === brand) as T | undefined;
   }
 
   private startPolling(): void {

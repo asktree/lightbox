@@ -10,8 +10,9 @@ import { LightPane } from './components/LightPane';
 import { AgentChat } from './components/AgentChat';
 import { DebugPanel } from './components/DebugPanel';
 import { StreamTest } from './components/StreamTest';
+import { WizTest } from './components/WizTest';
 
-type View = 'grid' | 'wheel' | 'stream';
+type View = 'grid' | 'wheel' | 'stream' | 'wiz';
 
 export default function App() {
   useWebSocket();
@@ -26,7 +27,7 @@ export default function App() {
 
   const [view, setView] = useState<View>(() => {
     const saved = localStorage.getItem('lightbox:viewMode');
-    return saved === 'grid' || saved === 'wheel' || saved === 'stream' ? saved : 'wheel';
+    return saved === 'grid' || saved === 'wheel' || saved === 'stream' || saved === 'wiz' ? saved : 'wheel';
   });
   const [currentRoom, setCurrentRoom] = useState<string>(() => {
     const saved = localStorage.getItem('lightbox:currentRoom');
@@ -205,6 +206,14 @@ export default function App() {
             >
               Stream
             </button>
+            <button
+              onClick={() => setView('wiz')}
+              className={`px-3 py-1 text-sm rounded-md transition-all ${
+                view === 'wiz' ? 'bg-zinc-600 text-white' : 'text-zinc-400'
+              }`}
+            >
+              WiZ
+            </button>
           </div>
 
           {/* Debug toggle */}
@@ -337,6 +346,9 @@ export default function App() {
 
       {/* Stream test view */}
       {view === 'stream' && <StreamTest />}
+
+      {/* WiZ UDP test view */}
+      {view === 'wiz' && <WizTest />}
 
       {/* Light Pane - shown when a light is selected */}
       {selectedLight && (

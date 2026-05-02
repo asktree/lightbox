@@ -22,6 +22,7 @@ export const ROOMS: Record<string, Room> = {
       'hue:7', 'hue:6', // couch lights (hue:2 is couch go?), iris
       'tuya:eb58e8db101aa08a03txnf', 'tuya:ebbacf4e20fe4b56366pik', // SUNVIE GU10s
       'tuya-ble:eb9f3b3flegezedk', 'tuya-ble:eba738os6ajviwqc', // BLE: Sunset Lamp, Smart Bulb
+      'wiz:9877d5b2867e', // GU10 Kitchen (WiZ)
     ],
   },
   all: {
