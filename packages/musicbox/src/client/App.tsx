@@ -239,6 +239,11 @@ export default function App() {
         const posSec = master.currentTime;
         setPosition(posSec);
 
+        // Keep the play/pause button in sync with reality. The event-based
+        // approach (onPlay/onPause on <audio>) misses cases like a track
+        // unmounting while "playing" was true, leaving the button stale.
+        setPlaying(prev => (prev !== !master.paused ? !master.paused : prev));
+
         // --- Trigger streams (timestamp crossings from the analysis data) ---
         const crossed = (arr: number[] | undefined, ref: { current: number }): boolean => {
           if (!arr) return false;
@@ -460,8 +465,6 @@ export default function App() {
                 audioCtx={audioCtx}
                 onAudio={(el) => { audioElsRef.current[stem] = el ?? undefined; }}
                 onAnalyser={(a) => { analyzersRef.current[stem] = a ?? undefined; }}
-                onPlay={stem === 'drums' ? () => setPlaying(true) : undefined}
-                onPause={stem === 'drums' ? () => setPlaying(false) : undefined}
                 onSeeked={stem === 'drums' ? (t) => {
                   if (!analysis) return;
                   lastBeatIdx.current = (analysis.beats ?? []).filter(p => p <= t).length - 1;
@@ -599,15 +602,13 @@ function useStemAudioGraph(
 }
 
 function StemTrack({
-  url, muted, audioCtx, onAudio, onAnalyser, onPlay, onPause, onSeeked,
+  url, muted, audioCtx, onAudio, onAnalyser, onSeeked,
 }: {
   url: string;
   muted: boolean;
   audioCtx: AudioContext | null;
   onAudio: (el: HTMLAudioElement | null) => void;
   onAnalyser: (a: AnalyserNode | null) => void;
-  onPlay?: () => void;
-  onPause?: () => void;
   onSeeked?: (t: number) => void;
 }) {
   const [el, setEl] = useState<HTMLAudioElement | null>(null);
@@ -629,9 +630,6 @@ function StemTrack({
       ref={setEl}
       src={url}
       preload="auto"
-      onPlay={onPlay}
-      onPause={onPause}
-      onEnded={onPause}
       onSeeked={onSeeked ? (e) => onSeeked((e.currentTarget as HTMLAudioElement).currentTime) : undefined}
     />
   );

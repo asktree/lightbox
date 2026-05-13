@@ -58,6 +58,8 @@ importers:
         specifier: ^6.0.0
         version: 6.4.1(@types/node@25.0.3)(jiti@1.21.7)(tsx@4.21.0)
 
+  packages/music-scraper: {}
+
   packages/musicbox:
     dependencies:
       express:
@@ -130,6 +132,9 @@ importers:
       express:
         specifier: ^4.18.2
         version: 4.22.1
+      node-dtls-client:
+        specifier: ^2.0.2
+        version: 2.0.2
       node-hue-api:
         specifier: ^4.0.11
         version: 4.0.11
@@ -1609,6 +1614,91 @@ packages:
     resolution: {integrity: sha512-/bRZty2mXUIFY/xU5HLvveNHlswNJej+RnxBjOMkidWfwZzgTbPG1E3K5TOxRLOR+5hX7bSofy8yf1hZevMS8A==}
     engines: {node: ^18 || ^20 || >= 21}
 
+  node-aead-crypto-android-arm-eabi@3.0.1:
+    resolution: {integrity: sha512-bIAOQpwVPiAdi558WCOtbRQxjdQaQysLB12zzgb4LxXzNelNfQCx7gl/lBtQtsDd+MXTWW/acURM9X8c0Y627Q==}
+    engines: {node: '>= 10'}
+    cpu: [arm]
+    os: [android]
+
+  node-aead-crypto-android-arm64@3.0.1:
+    resolution: {integrity: sha512-EzKow9IduaOatF1hxoi2aNu+a70q7LtVVs/H04VcUBe93FbSuLRtSSOnEmvwwBProz2FV9Y0WhFrAbM+ruRXbA==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [android]
+
+  node-aead-crypto-darwin-arm64@3.0.1:
+    resolution: {integrity: sha512-qb5jCE5xfKWJGNwFGhzpcdEZf16RDXOpHu2zckM1rZw4xpfZpSaIzU5J6mBTHzuYfQJrpQSj/sZPuFGIjqEvBA==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [darwin]
+
+  node-aead-crypto-darwin-universal@3.0.1:
+    resolution: {integrity: sha512-0v44Z90wONd3B9KLPMWDi7p5IZLQUPBY27X9k2R9ZBuIgK00Zkyfd995xgaHeLPN8VLiddg5UmqdOISY88reMQ==}
+    engines: {node: '>= 10'}
+    os: [darwin]
+
+  node-aead-crypto-darwin-x64@3.0.1:
+    resolution: {integrity: sha512-Co6T1sb9R0W6uxlDwnLRlmCP2+5ZKYlQYAY5cWMaTC3RApZY2Qz7GlsK3+6hBaGr8iu4BG2Qdvb5gpS9A9ngLQ==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [darwin]
+
+  node-aead-crypto-linux-arm-gnueabihf@3.0.1:
+    resolution: {integrity: sha512-5sZobc1hqIQyULpaOVXw6Q+UIgMRIX3/CzHrCvvmWdc9LXG7ZZ7jzv5F8uTXBtJMXBVm3JdmD5bcu80uy9hfPg==}
+    engines: {node: '>= 10'}
+    cpu: [arm]
+    os: [linux]
+
+  node-aead-crypto-linux-arm64-gnu@3.0.1:
+    resolution: {integrity: sha512-cieHU0schCllZlDj54SKlYYknZSqBB83K44mFrIjfA/QLo1LQ5vgzpL7xZZLYe82HdcHRtVBLn9zfl1rtb3x+w==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [linux]
+
+  node-aead-crypto-linux-arm64-musl@3.0.1:
+    resolution: {integrity: sha512-NU2gUYA4cueaxXtULB4h+a85UIHLB6oH7lt9qHNSQtWkFesoQSUBStmzukX75zhNBI7tvi1Z+jukUrOPYe2ixQ==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [linux]
+
+  node-aead-crypto-linux-x64-gnu@3.0.1:
+    resolution: {integrity: sha512-KK+JrrtagnpzBsOofLE+kAf5reB5LGllh1Sdxknccg0e9oQEsL5dzTCjof5iMSdKZEBBKGrWxftMl8UxAR56Jg==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [linux]
+
+  node-aead-crypto-linux-x64-musl@3.0.1:
+    resolution: {integrity: sha512-CniTRbq1q+qaN2a0MB3PYZZVYVl7rS54MxT9gMaOBEd7KuG5dXry7G/cwwbJ0oR3Agjyt2mTWcW36SjJPudKXw==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [linux]
+
+  node-aead-crypto-win32-arm64-msvc@3.0.1:
+    resolution: {integrity: sha512-zDpx5flNM+v9rwN1qwtHudubEqTDtALkL6aCX+KwBG2uccV/PNFsy9imCDyLT86A/7D+U6WPZCpafZgN+w2aBg==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [win32]
+
+  node-aead-crypto-win32-ia32-msvc@3.0.1:
+    resolution: {integrity: sha512-XD3iIsFG4kWn+XT3PabblNmejS3rNjKAkihCM6R1nPHpGLZFKOPpkummRBi0dWs3s01cV6jx59YG2r1FsZwJ0g==}
+    engines: {node: '>= 10'}
+    cpu: [ia32]
+    os: [win32]
+
+  node-aead-crypto-win32-x64-msvc@3.0.1:
+    resolution: {integrity: sha512-I2rehJKYEDXlA2uf3Z/Cnjtg74ClO3cjZhpW/SVKHGfSnxSvLK7BJ3yNAV6x+XpaHBYJMlRvWZqnHqgaHuxWUA==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [win32]
+
+  node-aead-crypto@3.0.1:
+    resolution: {integrity: sha512-z1PSiyueg0Demr4iLJ5pqoB1NDP9OsBrsSiGGNx3GaQDBOWY2wyVjS4xRCPiWEN/yu3pgb2PklqaksW1Z4L8aw==}
+    engines: {node: '>= 10'}
+
+  node-dtls-client@2.0.2:
+    resolution: {integrity: sha512-ka5YQPt1OJglYP3o5dmtCbRE2RBY6x3B9v8KQ1OkCqouXqriQnQII6afTXOQxS/YRNdy3Jjy8fDP9NqEQ6b4ew==}
+    engines: {node: '>=22'}
+
   node-fetch@2.7.0:
     resolution: {integrity: sha512-c4FRfUm/dbcWZ7U+1Wq0AwCyFL+3nt2bEw05wfxSz+DWpWsitgmSgYmy2dQdWyKC1694ELPqMs/YzUSNozLt8A==}
     engines: {node: 4.x || >=6.0.0}
@@ -1900,6 +1990,11 @@ packages:
 
   semver@7.7.3:
     resolution: {integrity: sha512-SdsKMrI9TdgjdweUSR9MweHA4EJ8YxHn8DFaDisvhVlUOe4BF1tLD7GAj0lIqWVl+dPb/rExr0Btby5loQm20Q==}
+    engines: {node: '>=10'}
+    hasBin: true
+
+  semver@7.7.4:
+    resolution: {integrity: sha512-vFKC2IEtQnVhpT78h1Yp8wzwrf8CM+MzKMHGJZfBtzhZNycRFnXsHk6E5TxIkkMsgNS7mdX3AGB7x2QM2di4lA==}
     engines: {node: '>=10'}
     hasBin: true
 
@@ -3676,6 +3771,71 @@ snapshots:
 
   node-addon-api@8.5.0: {}
 
+  node-aead-crypto-android-arm-eabi@3.0.1:
+    optional: true
+
+  node-aead-crypto-android-arm64@3.0.1:
+    optional: true
+
+  node-aead-crypto-darwin-arm64@3.0.1:
+    optional: true
+
+  node-aead-crypto-darwin-universal@3.0.1:
+    optional: true
+
+  node-aead-crypto-darwin-x64@3.0.1:
+    optional: true
+
+  node-aead-crypto-linux-arm-gnueabihf@3.0.1:
+    optional: true
+
+  node-aead-crypto-linux-arm64-gnu@3.0.1:
+    optional: true
+
+  node-aead-crypto-linux-arm64-musl@3.0.1:
+    optional: true
+
+  node-aead-crypto-linux-x64-gnu@3.0.1:
+    optional: true
+
+  node-aead-crypto-linux-x64-musl@3.0.1:
+    optional: true
+
+  node-aead-crypto-win32-arm64-msvc@3.0.1:
+    optional: true
+
+  node-aead-crypto-win32-ia32-msvc@3.0.1:
+    optional: true
+
+  node-aead-crypto-win32-x64-msvc@3.0.1:
+    optional: true
+
+  node-aead-crypto@3.0.1:
+    optionalDependencies:
+      node-aead-crypto-android-arm-eabi: 3.0.1
+      node-aead-crypto-android-arm64: 3.0.1
+      node-aead-crypto-darwin-arm64: 3.0.1
+      node-aead-crypto-darwin-universal: 3.0.1
+      node-aead-crypto-darwin-x64: 3.0.1
+      node-aead-crypto-linux-arm-gnueabihf: 3.0.1
+      node-aead-crypto-linux-arm64-gnu: 3.0.1
+      node-aead-crypto-linux-arm64-musl: 3.0.1
+      node-aead-crypto-linux-x64-gnu: 3.0.1
+      node-aead-crypto-linux-x64-musl: 3.0.1
+      node-aead-crypto-win32-arm64-msvc: 3.0.1
+      node-aead-crypto-win32-ia32-msvc: 3.0.1
+      node-aead-crypto-win32-x64-msvc: 3.0.1
+    optional: true
+
+  node-dtls-client@2.0.2:
+    dependencies:
+      debug: 4.4.3
+      semver: 7.7.4
+    optionalDependencies:
+      node-aead-crypto: 3.0.1
+    transitivePeerDependencies:
+      - supports-color
+
   node-fetch@2.7.0(encoding@0.1.13):
     dependencies:
       whatwg-url: 5.0.0
@@ -3986,6 +4146,8 @@ snapshots:
   semver@6.3.1: {}
 
   semver@7.7.3: {}
+
+  semver@7.7.4: {}
 
   send@0.19.2:
     dependencies:

@@ -11,6 +11,7 @@ import { createGroupsRouter } from './routes/groups.js';
 import { createPalettesRouter } from './routes/palettes.js';
 import { createRoomsRouter } from './routes/rooms.js';
 import { createChatRouter } from './routes/chat.js';
+import { createStreamingRouter } from './routes/streaming.js';
 
 const PORT = process.env.PORT || 3001;
 
@@ -112,6 +113,7 @@ app.use('/api/groups', createGroupsRouter(lightManager));
 app.use('/api/palettes', createPalettesRouter(lightManager));
 app.use('/api/rooms', createRoomsRouter(paletteAnimator));
 app.use('/api/chat', createChatRouter(lightManager));
+app.use('/api/streaming', createStreamingRouter());
 
 // Health check
 app.get('/api/health', (req, res) => {
