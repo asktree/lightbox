@@ -142,5 +142,9 @@ def get_output_latency_ms() -> tuple[Optional[int], Optional[str]]:
 
 
 if __name__ == "__main__":
+    import json, sys
     ms, name = get_output_latency_ms()
-    print(f"latency: {ms} ms  (device: {name!r})")
+    if "--json" in sys.argv:
+        print(json.dumps({"output_latency_ms": ms, "output_device_name": name}))
+    else:
+        print(f"latency: {ms} ms  (device: {name!r})")

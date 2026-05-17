@@ -1,6 +1,7 @@
-import { useRef, useEffect, useState, useCallback } from 'react';
+import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import { motion } from 'framer-motion';
 import type { Light } from '@lightbox/shared';
+import { findClosestPointOnTrack } from '@lightbox/shared';
 import { useLightsStore } from '../stores/lights';
 import { usePalettesStore, useRoomPlayState, useRoomPositions } from '../stores/palettes';
 import { useDebugStore } from '../stores/debug';
@@ -12,6 +13,11 @@ interface Props {
   selectedLightId?: string | null;
   onLightSelect?: (lightId: string | null) => void;
   roomId: string; // Current room for palette state
+  // Render a faded ghost track for this palette on top of the wheel, with
+  // each light snapped to its closest point on that palette's path. Used
+  // by PaletteControls hover-preview. Ignored when equal to the active
+  // palette (would just double-draw the same path).
+  previewPaletteId?: string | null;
 }
 
 function hsvToHex(h: number, s: number, v: number = 100): string {
@@ -39,7 +45,7 @@ function hsvToHex(h: number, s: number, v: number = 100): string {
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 }
 
-export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect, roomId }: Props) {
+export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect, roomId, previewPaletteId }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [dragging, setDragging] = useState<string | null>(null);
@@ -75,6 +81,34 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect,
 
   const radius = size / 2;
   const pinRadius = 16;
+
+  // Preview palette: ignore if it's the active one (avoid double-render of
+  // the same path) or below 2 nodes (track needs an interpolation segment).
+  const previewPalette = useMemo(() => {
+    if (!previewPaletteId || previewPaletteId === activePaletteId) return null;
+    const p = palettes.find((p) => p.id === previewPaletteId);
+    return p && p.nodes.length >= 2 ? p : null;
+  }, [previewPaletteId, activePaletteId, palettes]);
+
+  // Snap each light's current (h,s) to the nearest point on the preview
+  // track. PaletteTrack expects normalized 0-1 xy in the SAME frame the
+  // track was authored in (relative to the wheel canvas). hsToPosition
+  // returns pixel xy on the wheel — divide by size to normalize.
+  const previewLightPositions = useMemo(() => {
+    if (!previewPalette) return {};
+    const out: Record<string, number> = {};
+    for (const light of lights) {
+      if (!light.capabilities.includes('color') || !light.state.on) continue;
+      const c = light.state.color;
+      if (!c) continue;
+      const angle = (c.h - 90) * Math.PI / 180;
+      const distance = (c.s / 100) * radius;
+      const nx = (radius + distance * Math.cos(angle)) / size;
+      const ny = (radius + distance * Math.sin(angle)) / size;
+      out[light.id] = findClosestPointOnTrack(previewPalette, nx, ny);
+    }
+    return out;
+  }, [previewPalette, lights, radius, size]);
 
   // Draw color wheel pixel-by-pixel for perfectly smooth gradients
   useEffect(() => {
@@ -277,6 +311,19 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect,
           onLightClick={handleLightClick}
           selectedLightId={selectedLightId}
           editPaletteMode={editPaletteMode}
+        />
+      )}
+
+      {/* Hover preview track — ghosted path of a different palette with
+          per-light positions snapped to where they'd land if it activated.
+          Light positions: closest-point-on-track of each light's current
+          (h,s) → normalized wheel xy. Cheap (~100 samples × N lights). */}
+      {previewPalette && (
+        <PaletteTrack
+          palette={previewPalette}
+          size={size}
+          lightPositions={previewLightPositions}
+          isPreview
         />
       )}
 

@@ -33,6 +33,9 @@ export default function App() {
     const saved = localStorage.getItem('lightbox:currentRoom');
     return saved && saved in ROOMS ? saved : 'bedroom';
   });
+  // Hovered palette in PaletteControls drives the ghost preview track on
+  // the ColorWheel. Lifted up so siblings can share without prop-drilling.
+  const [hoveredPaletteId, setHoveredPaletteId] = useState<string | null>(null);
 
   // Persist view mode and current room to localStorage
   useEffect(() => {
@@ -309,6 +312,7 @@ export default function App() {
               selectedLightId={selectedTrackLight}
               onLightSelect={setSelectedTrackLight}
               roomId={currentRoom}
+              previewPaletteId={hoveredPaletteId}
             />
           </div>
 
@@ -360,7 +364,7 @@ export default function App() {
       )}
 
       {/* Palette Controls */}
-      <PaletteControls roomId={currentRoom} />
+      <PaletteControls roomId={currentRoom} onHoverPalette={setHoveredPaletteId} />
 
       {/* Agent Chat */}
       <AgentChat />

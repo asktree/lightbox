@@ -4,6 +4,7 @@ import { SpectrumPulse } from './components/SpectrumPulse';
 import { OnsetTimeline, type MadmomOnsets } from './components/OnsetTimeline';
 import { LightPulseBindings } from './components/LightPulseBindings';
 import { AutopilotBar } from './components/AutopilotBar';
+import { OffsetBar } from './components/OffsetBar';
 
 const STEMS = ['drums', 'bass', 'vocals', 'other'] as const;
 type Stem = (typeof STEMS)[number];
@@ -113,9 +114,55 @@ export default function App() {
   const [outputLatencyMs, setOutputLatencyMs] = useState<number>(0);
   const outputLatencyMsRef = useRef(0);
   useEffect(() => { outputLatencyMsRef.current = outputLatencyMs; }, [outputLatencyMs]);
+  // Effective offset (ms) — written by OffsetBar to localStorage on every
+  // change. Read each rAF to apply uniformly across viz + bindings. We do
+  // not own the value here; OffsetBar is the single source.
+  const effectiveOffsetMsRef = useRef<number>(0);
+  // Fire-time playhead = master.currentTime − effectiveOffsetMs/1000. Used
+  // by LightPulseBindings for peak crossings, the same way autopilot's
+  // pos_s = playhead - offset works. positionRef stays at audible time
+  // for OnsetTimeline / Scrubber.
+  const firePositionRef = useRef(0);
   // Queue of tracks to play after the current one ends. Advances FIFO.
-  // When empty, the current track loops (via <audio loop>).
-  const [queue, setQueue] = useState<LibraryTrack[]>([]);
+  // Owned server-side (musicbox/src/server/index.ts) so curl / external
+  // tools can enqueue. Local mirror is polled every ~2s; mutations go
+  // through the API and use the response to update local state.
+  const [queue, setQueueState] = useState<LibraryTrack[]>([]);
+  const queueRef = useRef<LibraryTrack[]>([]);
+  useEffect(() => { queueRef.current = queue; }, [queue]);
+  const refreshQueue = async () => {
+    try {
+      const r = await fetch('/api/queue');
+      if (!r.ok) return;
+      setQueueState(await r.json());
+    } catch { /* ignore */ }
+  };
+  useEffect(() => {
+    refreshQueue();
+    const t = window.setInterval(refreshQueue, 2000);
+    return () => clearInterval(t);
+  }, []);
+  const apiEnqueue = async (trackId: string) => {
+    try {
+      const r = await fetch('/api/queue', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trackId }),
+      });
+      if (r.ok) { const j = await r.json(); setQueueState(j.queue); }
+    } catch { /* ignore */ }
+  };
+  const apiRemoveAt = async (idx: number) => {
+    try {
+      const r = await fetch(`/api/queue/${idx}`, { method: 'DELETE' });
+      if (r.ok) setQueueState(await r.json());
+    } catch { /* ignore */ }
+  };
+  const apiClearQueue = async () => {
+    try {
+      const r = await fetch('/api/queue', { method: 'DELETE' });
+      if (r.ok) setQueueState(await r.json());
+    } catch { /* ignore */ }
+  };
   // Set to true when we advance to a track via the queue, so the effect on
   // `selected` knows to auto-play (can't call play() before the audio
   // element mounts with the new src).
@@ -163,20 +210,34 @@ export default function App() {
   // sound is. Used to map palette position from the stem's live timbre.
   const stemChromaRef = useRef<Record<Stem, number>>({ drums: 0.5, bass: 0.5, vocals: 0.5, other: 0.5 });
 
+  // Per-stem ring buffer of recent {spectrum, energy, chroma, ts}. Sized
+  // for ~3.3s @ 60fps so a 2-3s lookback (output_latency / offset on
+  // AirPlay) can be served. Newest at the end. ~25 floats × 200 entries ×
+  // 4 stems ≈ 80KB total — trivial.
+  type RingFrame = { ts: number; spectrum: number[]; energy: number; chroma: number };
+  const RING_SIZE = 200;
+  const ringRef = useRef<Record<Stem, RingFrame[]>>({
+    drums: [], bass: [], vocals: [], other: [],
+  });
+
   // ---- Library + analysis loading ----
 
   useEffect(() => {
     fetch('/api/library').then(r => r.json()).then(setLibrary).catch(() => {});
   }, []);
 
-  // Poll lightbox for the CoreAudio-measured output latency. Autopilot
-  // already reads it from macOS and writes to its state file.
+  // Poll lightbox for the CoreAudio-measured output latency. The
+  // /api/audio-latency endpoint spawns the CoreAudio probe directly (no
+  // autopilot dependency) and caches; ?refresh=1 forces a remeasure
+  // after switching output device. Without this correction, every viz
+  // tracks the playhead while audio is delayed by output_latency, so
+  // the user sees ~2s drift on AirPlay.
   useEffect(() => {
     let cancelled = false;
     const LIGHTBOX = 'http://localhost:3001';
     const tick = async () => {
       try {
-        const r = await fetch(`${LIGHTBOX}/api/autopilot/state`);
+        const r = await fetch(`${LIGHTBOX}/api/audio-latency`);
         const j = await r.json();
         if (cancelled) return;
         if (typeof j.output_latency_ms === 'number') setOutputLatencyMs(j.output_latency_ms);
@@ -236,13 +297,20 @@ export default function App() {
       const ctx = audioCtx;
 
       if (master && ctx) {
-        // Delay the visible/effective playhead by the measured audio output
-        // latency so everything downstream (OnsetTimeline, LightPulseBindings
-        // pulse firing, Scrubber readout) is aligned with what the user
-        // hears. For local speakers this is ~0; for AirPlay/Sonos ~2s.
+        // Pull the latest effective offset written by OffsetBar. Single
+        // source of truth for all latency-correction in the client.
+        const rawOff = (typeof localStorage !== 'undefined') ? localStorage.getItem('lightbox:effectiveOffsetMs') : null;
+        const effOffMs = rawOff != null ? Math.max(0, parseInt(rawOff, 10) || 0) : outputLatencyMsRef.current;
+        effectiveOffsetMsRef.current = effOffMs;
+
+        // positionRef = audible time (master − output_latency). Drives
+        // OnsetTimeline / Scrubber. firePositionRef = master − offset,
+        // matches autopilot's pos_s semantics so peak crossings fire at
+        // the right moment for the slider's chosen offset.
         const posSec = Math.max(0, master.currentTime - outputLatencyMsRef.current / 1000);
         positionRef.current = posSec;
         setPosition(posSec);
+        firePositionRef.current = Math.max(0, master.currentTime - effOffMs / 1000);
 
         // --- Trigger streams (for SpectrumPulse: kick glow + hat glow) ---
         // Driven by madmom drums_low / drums_high CNN peaks when available.
@@ -296,14 +364,14 @@ export default function App() {
           }
           sharedPeakRef.current = Math.max(frameMax, 1e-4);
 
-          // Second pass: normalize all stems against the shared peak
+          // Second pass: normalize against the shared peak, then push to
+          // the ring buffer. Display + bindings read from the buffer at
+          // lookback = effOffMs so all latency-correction is uniform.
           const peak = sharedPeakRef.current;
-          const nextStemSpectrum: Record<Stem, number[]> = {
-            drums: EMPTY_ARR, bass: EMPTY_ARR, vocals: EMPTY_ARR, other: EMPTY_ARR,
-          };
+          const nowMs = performance.now();
           for (const stem of STEMS) {
             const raw = rawStemBars[stem];
-            if (raw.length === 0) { stemEnergyRef.current[stem] = 0; continue; }
+            if (raw.length === 0) continue;
             const norm = new Array<number>(NUM_BARS);
             let sum = 0;
             // Spectral-centroid computation in the same pass: Σ(bar_index × energy) / Σ(energy).
@@ -315,12 +383,35 @@ export default function App() {
               sum += norm[b];
               weighted += b * norm[b];
             }
-            nextStemSpectrum[stem] = norm;
-            stemEnergyRef.current[stem] = sum / NUM_BARS;   // mean normalized energy, 0-1
-            // Require at least some energy or chroma is meaningless noise.
-            if (sum > 0.02) {
-              stemChromaRef.current[stem] = weighted / sum / (NUM_BARS - 1);
+            const energy = sum / NUM_BARS;
+            // Hold previous chroma if this frame is too quiet to estimate.
+            const buf = ringRef.current[stem];
+            const prev = buf.length > 0 ? buf[buf.length - 1] : null;
+            const chroma = sum > 0.02 ? weighted / sum / (NUM_BARS - 1) : (prev?.chroma ?? 0.5);
+            buf.push({ ts: nowMs, spectrum: norm, energy, chroma });
+            if (buf.length > RING_SIZE) buf.shift();
+          }
+
+          // Read back at lookback. Bindings (energy/chroma) and display
+          // (spectrum) all see the same delayed frame.
+          const targetTs = nowMs - effOffMs;
+          const nextStemSpectrum: Record<Stem, number[]> = {
+            drums: EMPTY_ARR, bass: EMPTY_ARR, vocals: EMPTY_ARR, other: EMPTY_ARR,
+          };
+          for (const stem of STEMS) {
+            const buf = ringRef.current[stem];
+            if (buf.length === 0) { stemEnergyRef.current[stem] = 0; continue; }
+            // Walk back from newest. Buffer is small (≤200) — linear scan is fine.
+            let match: RingFrame | null = null;
+            for (let i = buf.length - 1; i >= 0; i--) {
+              if (buf[i].ts <= targetTs) { match = buf[i]; break; }
             }
+            // If lookback exceeds buffer span (e.g. just selected a track),
+            // fall back to oldest available so display isn't blank.
+            if (!match) match = buf[0];
+            nextStemSpectrum[stem] = match.spectrum;
+            stemEnergyRef.current[stem] = match.energy;
+            stemChromaRef.current[stem] = match.chroma;
           }
           setStemSpectrum(nextStemSpectrum);
         }
@@ -344,10 +435,10 @@ export default function App() {
     // Lets the user enqueue a few tracks and hit play without manually
     // picking one from the library.
     if (!selected && queue.length > 0) {
-      const [next, ...rest] = queue;
+      const [next] = queue;
       autoPlayNextRef.current = true;
       setSelected(next);
-      setQueue(rest);
+      apiRemoveAt(0);
       return;
     }
     const allRefs = STEMS.map(s => audioElsRef.current[s]).filter(Boolean) as HTMLAudioElement[];
@@ -359,10 +450,10 @@ export default function App() {
   // Abandon current track, advance to next in queue. If queue is empty, no-op.
   const skipNext = () => {
     if (queue.length === 0) return;
-    const [next, ...rest] = queue;
+    const [next] = queue;
     autoPlayNextRef.current = true;
     setSelected(next);
-    setQueue(rest);
+    apiRemoveAt(0);
   };
 
   const analyzedCount = library.filter(t => t.analyzed).length;
@@ -371,6 +462,7 @@ export default function App() {
   return (
     <div className="h-screen bg-zinc-950 text-white flex flex-col overflow-hidden">
     <AutopilotBar />
+    <OffsetBar />
     <div className="flex-1 flex min-h-0 overflow-hidden">
       {/* Play queue panel. Sits to the left of the library so you can see
           what's lined up without hovering anything. Drag-to-reorder would
@@ -410,7 +502,7 @@ export default function App() {
                   <div className="truncate text-zinc-500 text-[10px]">{t.artists.join(', ')}</div>
                 </div>
                 <button
-                  onClick={() => setQueue(q => q.filter((_, j) => j !== i))}
+                  onClick={() => apiRemoveAt(i)}
                   title="Remove from queue"
                   className="w-5 h-5 rounded text-[11px] font-mono flex items-center justify-center
                     bg-zinc-800 text-zinc-500 hover:bg-zinc-700 hover:text-white"
@@ -421,7 +513,7 @@ export default function App() {
         </div>
         {queue.length > 0 && (
           <button
-            onClick={() => setQueue([])}
+            onClick={apiClearQueue}
             className="text-[10px] font-mono px-3 py-1.5 border-t border-zinc-800 text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300"
           >clear queue</button>
         )}
@@ -469,7 +561,9 @@ export default function App() {
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      setQueue(q => inQueue ? q.filter(x => x.id !== t.id) : [...q, t]);
+                      const idx = queueRef.current.findIndex(x => x.id === t.id);
+                      if (idx >= 0) apiRemoveAt(idx);
+                      else apiEnqueue(t.id);
                     }}
                     title={inQueue ? 'Remove from queue' : 'Add to queue'}
                     className={`absolute right-2 top-1/2 -translate-y-1/2 w-6 h-6 rounded text-xs font-mono
@@ -520,13 +614,11 @@ export default function App() {
                 // Only the drums (master) stem drives queue advance to avoid
                 // firing 4x per end. Pop head, set as selected, mark autoplay.
                 onEnded={stem === 'drums' ? () => {
-                  setQueue(q => {
-                    if (q.length === 0) return q;
-                    const [next, ...rest] = q;
-                    autoPlayNextRef.current = true;
-                    setSelected(next);
-                    return rest;
-                  });
+                  const next = queueRef.current[0];
+                  if (!next) return;
+                  autoPlayNextRef.current = true;
+                  setSelected(next);
+                  apiRemoveAt(0);
                 } : undefined}
                 onSeeked={stem === 'drums' ? (t) => {
                   lastLowPeakIdx.current = (madmom?.drums_low?.cnn ?? []).filter(p => p <= t).length - 1;
@@ -582,7 +674,7 @@ export default function App() {
             track changes, loading transitions, and "no track selected". */}
         <LightPulseBindings
           data={madmom}
-          positionRef={positionRef}
+          firePositionRef={firePositionRef}
           playing={playing}
           stemEnergyRef={stemEnergyRef}
           stemChromaRef={stemChromaRef}

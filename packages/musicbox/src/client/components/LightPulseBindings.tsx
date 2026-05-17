@@ -33,7 +33,10 @@ type PeakSourceDef = {
   label: string;
   path: [keyof MadmomOnsets, 'cnn' | 'superflux'];
 };
-type EnergySourceDef = { kind: 'energy'; key: string; label: string; stem: Stem };
+// `stems` is summed (additive, NOT averaged) so combined sources like
+// "bass+drums" are punchier than either alone — they exceed the per-stem
+// peak when both fire together, then get clamped to 1 after gain scaling.
+type EnergySourceDef = { kind: 'energy'; key: string; label: string; stems: Stem[] };
 type SourceDef = PeakSourceDef | EnergySourceDef;
 
 const PEAK_SOURCES: PeakSourceDef[] = [
@@ -62,10 +65,12 @@ const PEAK_SOURCES: PeakSourceDef[] = [
   { kind: 'peak', key: 'full.sf',                label: 'full · sf',               path: ['full', 'superflux'] },
 ];
 const ENERGY_SOURCES: EnergySourceDef[] = [
-  { kind: 'energy', key: 'bass.energy',   label: 'bass · energy',   stem: 'bass' },
-  { kind: 'energy', key: 'drums.energy',  label: 'drums · energy',  stem: 'drums' },
-  { kind: 'energy', key: 'vocals.energy', label: 'vocals · energy', stem: 'vocals' },
-  { kind: 'energy', key: 'other.energy',  label: 'other · energy',  stem: 'other' },
+  { kind: 'energy', key: 'bass.energy',         label: 'bass · energy',         stems: ['bass'] },
+  { kind: 'energy', key: 'drums.energy',        label: 'drums · energy',        stems: ['drums'] },
+  { kind: 'energy', key: 'vocals.energy',       label: 'vocals · energy',       stems: ['vocals'] },
+  { kind: 'energy', key: 'other.energy',        label: 'other · energy',        stems: ['other'] },
+  { kind: 'energy', key: 'bass+drums.energy',   label: 'bass+drums · energy',   stems: ['bass', 'drums'] },
+  { kind: 'energy', key: 'other+vocals.energy', label: 'other+vocals · energy', stems: ['other', 'vocals'] },
 ];
 const ALL_SOURCES: SourceDef[] = [...PEAK_SOURCES, ...ENERGY_SOURCES];
 const SOURCE_BY_KEY = new Map(ALL_SOURCES.map(s => [s.key, s] as const));
@@ -99,6 +104,29 @@ function defaultBinding(): Binding {
   return { sourceKey: null, peak: 100, floor: 5, decayMs: 400, gain: 10, attackSmooth: 0, decaySmooth: 0.9, chromaSmooth: 0.9, colorSource: 'palette' };
 }
 
+const BINDINGS_STORAGE_KEY = 'lightbox:bindings';
+
+// Loader spreads defaultBinding into each saved entry so any field added in
+// later versions (e.g. attackSmooth/decaySmooth split out of an older
+// `smooth`) gets a sensible default rather than `undefined` blowing up
+// math in the rAF tick.
+function loadBindings(): Record<string, Binding> {
+  if (typeof window === 'undefined') return {};
+  const raw = localStorage.getItem(BINDINGS_STORAGE_KEY);
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return {};
+    const out: Record<string, Binding> = {};
+    for (const [rid, b] of Object.entries(parsed)) {
+      out[rid] = { ...defaultBinding(), ...(b as Partial<Binding>) };
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
 // Energy → chroma-update weight. Raw per-stem energy is typically 0-0.3 even
 // on loud sections; multiplying by 5 saturates the weight at ~0.2 raw energy.
 // Bigger → chroma responds to quieter sections too; smaller → only the
@@ -116,10 +144,15 @@ const COLOR_SOURCE_OPTIONS: Array<{ value: ColorSource; label: string }> = [
 const norm = (s: string) => s.trim().toLowerCase();
 
 export function LightPulseBindings({
-  data, positionRef, playing, stemEnergyRef, stemChromaRef,
+  data, firePositionRef, playing, stemEnergyRef, stemChromaRef,
 }: {
   data: MadmomOnsets | null;
-  positionRef: { current: number };
+  // Fire-time playhead = master.currentTime − offset_ms/1000. Peak
+  // crossings fire when peak <= firePos, matching autopilot's pos_s
+  // semantics. Energy/chroma refs from App.tsx are already lookback-
+  // delayed by the same offset (ring buffer in App.tsx). One knob
+  // (the offset slider) controls every light-event timing.
+  firePositionRef: { current: number };
   playing: boolean;
   stemEnergyRef: { current: Record<Stem, number> };
   stemChromaRef: { current: Record<Stem, number> };
@@ -128,7 +161,7 @@ export function LightPulseBindings({
   const [streamState, setStreamState] = useState<StreamStateResp>({ active: false, channels: [] });
   const [maxSockets, setMaxSockets] = useState(2);
   const [frameHz, setFrameHz] = useState(50);
-  const [bindings, setBindings] = useState<Record<string, Binding>>({});
+  const [bindings, setBindings] = useState<Record<string, Binding>>(() => loadBindings());
   const [loadErr, setLoadErr] = useState<string | null>(null);
   // WiZ bulbs choke around 30-50 packets/sec; throttle the rAF dispatch
   // per-bulb so 60Hz tick doesn't translate into 60Hz UDP. Slider in the
@@ -331,6 +364,13 @@ export function LightPulseBindings({
   useEffect(() => { wizHzRef.current = wizHz; }, [wizHz]);
   useEffect(() => { tuyaHzRef.current = tuyaHz; }, [tuyaHz]);
 
+  // Persist bindings on every change. Stringify is cheap relative to UI
+  // interaction rates (slider drags), no need to debounce.
+  useEffect(() => {
+    try { localStorage.setItem(BINDINGS_STORAGE_KEY, JSON.stringify(bindings)); }
+    catch { /* quota / private mode */ }
+  }, [bindings]);
+
   // Chroma → palette-position pusher. ~45Hz — same ballpark as the stream
   // frame rate so color tracks pitch height continuously.
   //
@@ -393,14 +433,16 @@ export function LightPulseBindings({
       if (!src || src.kind !== 'peak') { cursorsRef.current[rid] = -1; continue; }
       const entry = data[src.path[0]] as { cnn?: number[]; superflux?: number[] } | undefined;
       const peaks = entry?.[src.path[1]] ?? [];
-      const pos = positionRef.current;
+      // Cursor is the count of peaks already past the fire-time playhead.
+      // Same scale we'll compare against in the rAF loop below.
+      const pos = firePositionRef.current;
       let idx = -1;
       for (let i = 0; i < peaks.length; i++) {
         if (peaks[i] <= pos) idx = i; else break;
       }
       cursorsRef.current[rid] = idx;
     }
-  }, [bindings, data, positionRef]);
+  }, [bindings, data, firePositionRef]);
 
   // Main rAF loop — dispatch by source kind.
   useEffect(() => {
@@ -415,7 +457,10 @@ export function LightPulseBindings({
     const lastTuyaSendAt: Record<string, number> = {};
 
     const tick = () => {
-      const pos = positionRef.current;
+      // Peak crossings compare against firePositionRef (offset-shifted).
+      // Energy/chroma values from stemEnergyRef/stemChromaRef are also
+      // offset-corrected upstream (App.tsx ring-buffer lookback).
+      const pos = firePositionRef.current;
       const now = performance.now();
       const bs = bindingsRef.current;
       const chMap = ridToChannelIdRef.current;
@@ -427,7 +472,8 @@ export function LightPulseBindings({
         if (!src) continue;
 
         if (src.kind === 'energy') {
-          const raw = stemEnergyRef.current[src.stem] ?? 0;
+          let raw = 0;
+          for (const stem of src.stems) raw += stemEnergyRef.current[stem] ?? 0;
           const rawScaled = Math.max(0, Math.min(1, raw * b.gain));
           const prev = energySmoothed[rid] ?? rawScaled;
           // Asymmetric EMA: pick alpha based on direction so attack and
@@ -513,7 +559,7 @@ export function LightPulseBindings({
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [playing, data, positionRef, stemEnergyRef]);
+  }, [playing, data, firePositionRef, stemEnergyRef]);
 
   const update = (rid: string, patch: Partial<Binding>) => {
     setBindings(prev => ({ ...prev, [rid]: { ...(prev[rid] ?? defaultBinding()), ...patch } }));

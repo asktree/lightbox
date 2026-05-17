@@ -27,6 +27,7 @@ import { createWizRouter } from './routes/wiz.js';
 import type { WizDriver } from './drivers/wiz.js';
 import { createTuyaRouter } from './routes/tuya.js';
 import type { TuyaDriver } from './drivers/tuya.js';
+import { createAudioLatencyRouter } from './routes/audio-latency.js';
 import { createAutopilotRouter, ensureAutopilotRunning } from './routes/autopilot.js';
 import { hueRestPulseEvents } from './drivers/hue-rest-pulse.js';
 
@@ -133,6 +134,7 @@ app.use('/api/chat', createChatRouter(lightManager));
 app.use('/api/hue-stream', createHueStreamRouter(paletteAnimator));
 app.use('/api/wiz', createWizRouter(() => lightManager.getDriverByBrand<WizDriver>('wiz')));
 app.use('/api/tuya', createTuyaRouter(() => lightManager.getDriverByBrand<TuyaDriver>('tuya')));
+app.use('/api/audio-latency', createAudioLatencyRouter());
 app.use('/api/autopilot', createAutopilotRouter());
 
 // Pipe REST-pulse timing logs into the shared debug log broadcast.

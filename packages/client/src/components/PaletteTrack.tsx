@@ -37,6 +37,10 @@ interface Props {
   lightPositions: Record<string, number>;
   roomId?: string; // Required for active palettes, not needed for editing preview
   isEditing?: boolean; // For new palette creation mode
+  // Read-only ghost render of a different palette (e.g. on hover in PaletteControls)
+  // so the user can see what the path + light layout would look like
+  // before clicking. Disables all interactions and uses a faded/dashed stroke.
+  isPreview?: boolean;
   onLightClick?: (lightId: string) => void;
   selectedLightId?: string | null;
   editPaletteMode?: boolean; // When true, nodes are editable, lights are not
@@ -79,7 +83,7 @@ function generateTrackPath(palette: Palette, size: number): string {
   return points.join(' ') + ' Z';
 }
 
-export function PaletteTrack({ palette, size, lightPositions, roomId, isEditing, onLightClick, selectedLightId, editPaletteMode }: Props) {
+export function PaletteTrack({ palette, size, lightPositions, roomId, isEditing, isPreview, onLightClick, selectedLightId, editPaletteMode }: Props) {
   const [draggingNode, setDraggingNode] = useState<number | null>(null);
   const [draggingLight, setDraggingLight] = useState<string | null>(null);
   const didDragLightRef = useRef(false);
@@ -105,15 +109,16 @@ export function PaletteTrack({ palette, size, lightPositions, roomId, isEditing,
     return light.reachable;
   }, [diagnostics]);
 
-  const nodeRadius = 14;
+  const nodeRadius = isPreview ? 8 : 14;
   const pathD = generateTrackPath(palette, size);
-  const strokeColor = isEditing ? 'rgba(251, 191, 36, 0.7)' : 'rgba(168, 85, 247, 0.7)';
+  const strokeColor = isPreview
+    ? 'rgba(168, 85, 247, 0.45)'
+    : isEditing ? 'rgba(251, 191, 36, 0.7)' : 'rgba(168, 85, 247, 0.7)';
   const nodeColor = isEditing ? '#fbbf24' : '#a855f7';
 
-  // Can drag nodes if edit mode is on (and this is a real palette, not editing preview)
-  const canDragNodes = !isEditing && !!roomId && !!editPaletteMode;
-  // Can drag lights if edit mode is off (and this is a real palette)
-  const canDragLights = !isEditing && !!roomId && !editPaletteMode;
+  // Preview is read-only — can't drag anything. Edit-creation preview also blocks both.
+  const canDragNodes = !isPreview && !isEditing && !!roomId && !!editPaletteMode;
+  const canDragLights = !isPreview && !isEditing && !!roomId && !editPaletteMode;
 
   // Filter light positions to only include lights in this room
   const filteredLightPositions = useMemo(() => {
@@ -250,9 +255,16 @@ export function PaletteTrack({ palette, size, lightPositions, roomId, isEditing,
 
   return (
     <div
-      data-palette-track
+      data-palette-track={isPreview ? undefined : ''}
       className="absolute inset-0"
-      style={{ width: size, height: size, pointerEvents: canDragNodes ? 'auto' : 'none' }}
+      style={{
+        width: size,
+        height: size,
+        // Preview tracks must NEVER swallow pointer events — the user is
+        // still hovering over the live wheel UI.
+        pointerEvents: isPreview ? 'none' : (canDragNodes ? 'auto' : 'none'),
+        opacity: isPreview ? 0.85 : 1,
+      }}
     >
       <svg width={size} height={size} className="absolute inset-0">
         {/* Track path */}
@@ -261,9 +273,10 @@ export function PaletteTrack({ palette, size, lightPositions, roomId, isEditing,
             d={pathD}
             fill="none"
             stroke={strokeColor}
-            strokeWidth="3"
+            strokeWidth={isPreview ? 2 : 3}
             strokeLinecap="round"
             strokeLinejoin="round"
+            strokeDasharray={isPreview ? '6 4' : undefined}
             style={{ pointerEvents: 'none' }}
           />
         )}

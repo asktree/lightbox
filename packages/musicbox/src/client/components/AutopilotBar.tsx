@@ -47,12 +47,6 @@ function fmtTime(sec: number): string {
 
 export function AutopilotBar() {
   const [state, setState] = useState<AutopilotState>({ running: false });
-  // If the user has manually set an offset, we honor that value.
-  // Otherwise we auto-follow the suggested = outputLatency - bridgeRtt.
-  const [userOffsetMs, setUserOffsetMs] = useState<number | null>(() => {
-    const s = typeof window !== 'undefined' ? localStorage.getItem('autopilot:offsetMs') : null;
-    return s !== null ? parseInt(s, 10) : null;
-  });
   // Which lights are enabled. Defaults to couch only.
   const [selectedRids, setSelectedRids] = useState<string[]>(() => {
     const s = typeof window !== 'undefined' ? localStorage.getItem('autopilot:lightRids') : null;
@@ -60,49 +54,8 @@ export function AutopilotBar() {
     return [AUTOPILOT_LIGHTS[0].rid];
   });
   const [busy, setBusy] = useState(false);
-  // Source-agnostic bridge RTT — measured on the Node server for every
-  // /rest-pulse call. Declared early so the offset calculation can reference
-  // it below without a temporal dead zone trap.
-  const [serverBridgeRttMs, setServerBridgeRttMs] = useState<number | null>(null);
 
-  useEffect(() => {
-    if (userOffsetMs === null) localStorage.removeItem('autopilot:offsetMs');
-    else localStorage.setItem('autopilot:offsetMs', String(userOffsetMs));
-  }, [userOffsetMs]);
   useEffect(() => { localStorage.setItem('autopilot:lightRids', JSON.stringify(selectedRids)); }, [selectedRids]);
-
-  // Suggested offset = output_latency − bridge_rtt.
-  //  output_latency: how late audio is vs. playhead (AirPlay ≈ 2000ms, speakers ≈ 30ms)
-  //  bridge_rtt:     how late the bulb flashes vs. when we POST the pulse
-  // We want the bulb to flash when audio is audible, so we fire early by
-  // bridge_rtt and late by output_latency. Can be negative (speakers: fire
-  // before the peak so the bridge delay catches up to the ~instant audio).
-  //
-  // If bridge_rtt hasn't been measured yet (autopilot idle / no lights
-  // bound), use an observed typical of 150ms rather than a magic 300.
-  const BRIDGE_RTT_DEFAULT_MS = 150;
-  // Prefer the source-agnostic server measurement; fall back to autopilot's
-  // self-measurement, then the hardcoded default.
-  const effectiveBridgeRtt =
-    typeof serverBridgeRttMs === 'number' ? serverBridgeRttMs
-    : typeof state.bridge_rtt_ms === 'number' ? state.bridge_rtt_ms
-    : BRIDGE_RTT_DEFAULT_MS;
-  const bridgeRttForCalc = Math.round(effectiveBridgeRtt);
-  const suggestedOffsetMs: number | null =
-    typeof state.output_latency_ms === 'number'
-      ? state.output_latency_ms - bridgeRttForCalc
-      : null;
-
-  const effectiveOffsetMs: number = userOffsetMs ?? (suggestedOffsetMs ?? 0);
-
-  // Push the effective offset to autopilot whenever it changes.
-  useEffect(() => {
-    fetch(`${LIGHTBOX_URL}/api/autopilot/set-offset`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ offsetMs: effectiveOffsetMs }),
-    }).catch(() => {});
-  }, [effectiveOffsetMs]);
 
   // Live-push selection to autopilot whenever checkbox changes (or on mount)
   // so it applies without needing to stop/start.
@@ -118,18 +71,14 @@ export function AutopilotBar() {
     setSelectedRids((cur) => cur.includes(rid) ? cur.filter((r) => r !== rid) : [...cur, rid]);
   };
 
-  // Poll state. Light while alive, slow while dead.
+  // Poll autopilot state. Offset/audio/bridge readouts moved to OffsetBar.
   useEffect(() => {
     let cancelled = false;
     const tick = async () => {
       try {
-        const [stateRes, rttRes] = await Promise.all([
-          fetch(`${LIGHTBOX_URL}/api/autopilot/state`).then(r => r.json()),
-          fetch(`${LIGHTBOX_URL}/api/hue-stream/bridge-rtt`).then(r => r.json()).catch(() => ({})),
-        ]);
+        const r = await fetch(`${LIGHTBOX_URL}/api/autopilot/state`);
         if (cancelled) return;
-        setState(stateRes);
-        if (typeof rttRes?.bridge_rtt_ms === 'number') setServerBridgeRttMs(rttRes.bridge_rtt_ms);
+        setState(await r.json());
       } catch { /* ignore */ }
     };
     tick();
@@ -143,13 +92,16 @@ export function AutopilotBar() {
     }
     setBusy(true);
     try {
+      // offsetMs is owned by OffsetBar (separate component) and persisted
+      // via /api/autopilot/set-offset → autopilot's config file. Whatever
+      // value OffsetBar last pushed wins; the spawn-time default is just a
+      // brief placeholder that the autopilot loop overwrites on next read.
       const r = await fetch(`${LIGHTBOX_URL}/api/autopilot/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           lightRids: selectedRids,
           source: 'drums_low_strict.superflux',
-          offsetMs: effectiveOffsetMs,
           autoIngest: true,
         }),
       });
@@ -241,45 +193,6 @@ export function AutopilotBar() {
         <span className="flex-1 text-zinc-600">driven by Spotify · couch light · drums_low_strict·sf</span>
       )}
 
-      <label className="flex items-center gap-1.5 text-[10px] text-zinc-500 font-mono"
-        title={`Delay light events to align with audio. Default = output_latency − bridge_rtt (${
-          suggestedOffsetMs !== null ? suggestedOffsetMs + 'ms' : 'not yet measured'
-        }). Drag to override.`}>
-        offset
-        <input type="range" min={-500} max={3000} step={25} value={effectiveOffsetMs}
-          onChange={(e) => setUserOffsetMs(+e.target.value)}
-          className="w-24" />
-        <span className="w-12 text-right">{effectiveOffsetMs >= 0 ? '+' : ''}{effectiveOffsetMs}ms</span>
-        <span className="text-zinc-600">
-          {userOffsetMs === null ? '(auto)' : ''}
-        </span>
-      </label>
-      {userOffsetMs !== null && (
-        <button
-          onClick={() => setUserOffsetMs(null)}
-          className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-zinc-800 hover:bg-zinc-700"
-          title="Return to auto (output_latency − bridge_rtt)"
-        >auto</button>
-      )}
-      <span
-        className="text-[10px] font-mono text-zinc-500"
-        title={`Measured audio output latency for ${state.output_device_name ?? '?'} (CoreAudio device + stream + buffer + safety offset).`}
-      >audio {typeof state.output_latency_ms === 'number'
-        ? <span className={state.output_latency_ms > 500 ? 'text-amber-400' : 'text-zinc-300'}>
-            {state.output_latency_ms}ms
-            {state.output_device_name ? <span className="text-zinc-600"> ({state.output_device_name})</span> : null}
-          </span>
-        : <span className="text-zinc-600">—</span>
-      }</span>
-      <span
-        className="text-[10px] font-mono text-zinc-500"
-        title="EMA of round-trip time for every pulse the server sends to the Hue bridge. Source-agnostic: updates from musicbox pulses, autopilot, or any other caller. Subtracted from audio latency when computing the default offset."
-      >bridge {typeof serverBridgeRttMs === 'number'
-        ? <span className="text-zinc-300">{Math.round(serverBridgeRttMs)}ms</span>
-        : typeof state.bridge_rtt_ms === 'number'
-          ? <span className="text-zinc-300">{Math.round(state.bridge_rtt_ms)}ms</span>
-          : <span className="text-zinc-600">—</span>
-      }</span>
     </div>
   );
 }

@@ -26,9 +26,13 @@ function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: 
 
 interface PaletteControlsProps {
   roomId: string; // Current room ID
+  // Notifies the wheel of which palette button the user is currently
+  // hovering, so the wheel can render a ghost preview of that palette's
+  // path + projected light positions. Pass null on mouse-out.
+  onHoverPalette?: (paletteId: string | null) => void;
 }
 
-export function PaletteControls({ roomId }: PaletteControlsProps) {
+export function PaletteControls({ roomId, onHoverPalette }: PaletteControlsProps) {
   const palettes = usePalettesStore((s) => s.palettes);
   const isEditing = usePalettesStore((s) => s.isEditing);
   const editingNodes = usePalettesStore((s) => s.editingNodes);
@@ -225,6 +229,8 @@ export function PaletteControls({ roomId }: PaletteControlsProps) {
                 <button
                   key={palette.id}
                   onClick={() => handlePaletteClick(palette.id)}
+                  onMouseEnter={() => onHoverPalette?.(palette.id)}
+                  onMouseLeave={() => onHoverPalette?.(null)}
                   className={`px-3 py-1.5 text-sm rounded transition-colors ${
                     palette.id === activePaletteId
                       ? 'bg-purple-600 text-white'
