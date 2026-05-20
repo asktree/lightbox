@@ -30,6 +30,7 @@ import type { TuyaDriver } from './drivers/tuya.js';
 import { createAudioLatencyRouter } from './routes/audio-latency.js';
 import { createAutopilotRouter, ensureAutopilotRunning } from './routes/autopilot.js';
 import { hueRestPulseEvents } from './drivers/hue-rest-pulse.js';
+import { createStreamingRouter } from './routes/streaming.js';
 
 const PORT = process.env.PORT || 3001;
 
@@ -136,6 +137,7 @@ app.use('/api/wiz', createWizRouter(() => lightManager.getDriverByBrand<WizDrive
 app.use('/api/tuya', createTuyaRouter(() => lightManager.getDriverByBrand<TuyaDriver>('tuya')));
 app.use('/api/audio-latency', createAudioLatencyRouter());
 app.use('/api/autopilot', createAutopilotRouter());
+app.use('/api/streaming', createStreamingRouter());
 
 // Pipe REST-pulse timing logs into the shared debug log broadcast.
 hueRestPulseEvents.on('debug', (entry) => {

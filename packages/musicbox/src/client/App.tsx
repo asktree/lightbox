@@ -312,6 +312,11 @@ export default function App() {
         setPosition(posSec);
         firePositionRef.current = Math.max(0, master.currentTime - effOffMs / 1000);
 
+        // Keep the play/pause button in sync with reality. The event-based
+        // approach (onPlay/onPause on <audio>) misses cases like a track
+        // unmounting while "playing" was true, leaving the button stale.
+        setPlaying(prev => (prev !== !master.paused ? !master.paused : prev));
+
         // --- Trigger streams (for SpectrumPulse: kick glow + hat glow) ---
         // Driven by madmom drums_low / drums_high CNN peaks when available.
         const crossed = (arr: number[] | undefined, ref: { current: number }): boolean => {
@@ -609,8 +614,6 @@ export default function App() {
                 loop={false}
                 onAudio={(el) => { audioElsRef.current[stem] = el ?? undefined; }}
                 onAnalyser={(a) => { analyzersRef.current[stem] = a ?? undefined; }}
-                onPlay={stem === 'drums' ? () => setPlaying(true) : undefined}
-                onPause={stem === 'drums' ? () => setPlaying(false) : undefined}
                 // Only the drums (master) stem drives queue advance to avoid
                 // firing 4x per end. Pop head, set as selected, mark autoplay.
                 onEnded={stem === 'drums' ? () => {
@@ -759,15 +762,17 @@ function useStemAudioGraph(
 }
 
 function StemTrack({
-  url, muted, audioCtx, onAudio, onAnalyser, onPlay, onPause, onEnded, onSeeked, loop,
+  url, muted, audioCtx, onAudio, onAnalyser, onEnded, onSeeked, loop,
 }: {
   url: string;
   muted: boolean;
   audioCtx: AudioContext | null;
   onAudio: (el: HTMLAudioElement | null) => void;
   onAnalyser: (a: AnalyserNode | null) => void;
-  onPlay?: () => void;
-  onPause?: () => void;
+  // Play/pause state is polled in the rAF tick (setPlaying ←
+  // !master.paused) so we no longer wire onPlay/onPause through.
+  // onEnded stays because queue-advance wants a one-shot event, not a
+  // boolean poll.
   onEnded?: () => void;
   onSeeked?: (t: number) => void;
   loop?: boolean;
@@ -792,9 +797,7 @@ function StemTrack({
       src={url}
       preload="auto"
       loop={loop}
-      onPlay={onPlay}
-      onPause={onPause}
-      onEnded={onEnded ?? onPause}
+      onEnded={onEnded}
       onSeeked={onSeeked ? (e) => onSeeked((e.currentTarget as HTMLAudioElement).currentTime) : undefined}
     />
   );
