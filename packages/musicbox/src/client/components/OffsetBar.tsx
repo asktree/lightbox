@@ -60,7 +60,10 @@ export function OffsetBar() {
   };
   useEffect(() => {
     let cancelled = false;
+    let inFlight = false;
     const tick = async () => {
+      if (inFlight) return;
+      inFlight = true;
       try {
         const [rttRes, streamRes] = await Promise.all([
           fetch(`${LIGHTBOX_URL}/api/hue-stream/bridge-rtt`).then(r => r.json()).catch(() => ({})),
@@ -70,6 +73,7 @@ export function OffsetBar() {
         if (typeof rttRes?.bridge_rtt_ms === 'number') setBridgeRttMs(rttRes.bridge_rtt_ms);
         setHueStreamActive(!!streamRes?.active);
       } catch { /* ignore */ }
+      finally { inFlight = false; }
     };
     refreshAudioLatency(false);
     tick();
@@ -83,6 +87,11 @@ export function OffsetBar() {
   // REST/palette control resumes. Safe to call when no stream is up.
   const releaseHueStream = async () => {
     setReleasing(true);
+    // Suppress LightPulseBindings' auto-reconcile so it doesn't immediately
+    // restart the stream. Cleared there when bindings next change. Without
+    // this the release "bounces" — stream stops, reconcile sees active=false
+    // with energy bindings still present, and re-starts it.
+    try { localStorage.setItem('lightbox:hueStreamSuppressed', '1'); } catch {}
     try {
       await fetch(`${LIGHTBOX_URL}/api/hue-stream/stop`, { method: 'POST' });
       setHueStreamActive(false);

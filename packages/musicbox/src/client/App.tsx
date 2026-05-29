@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { Spectrum } from './components/Spectrum';
 import { SpectrumPulse } from './components/SpectrumPulse';
 import { OnsetTimeline, type MadmomOnsets } from './components/OnsetTimeline';
+import { EnvelopeTimeline } from './components/EnvelopeTimeline';
 import { LightPulseBindings } from './components/LightPulseBindings';
 import { AutopilotBar } from './components/AutopilotBar';
 import { OffsetBar } from './components/OffsetBar';
@@ -72,6 +73,20 @@ function dbToLinear(db: number): number {
   return Math.pow(10, db / 20);
 }
 
+// Empirical-CDF percentile lookup. `sorted` is a presorted Float32Array;
+// returns the fraction of entries < `v` (i.e., rank / N). Used to remap
+// per-stem energy/chroma to a uniform [0,1] over the track so binding
+// brightness averages 50% regardless of mix loudness.
+function valueToPercentile(sorted: Float32Array, v: number): number {
+  let lo = 0, hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (sorted[mid] < v) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo / sorted.length;
+}
+
 // A-weighting — perceptual loudness curve. Attenuates freq ranges that human
 // hearing is less sensitive to (heavy rolloff below 500Hz, mild above 6kHz).
 // Applied as a linear multiplier per bin so bass drums don't visually
@@ -138,8 +153,15 @@ export default function App() {
     } catch { /* ignore */ }
   };
   useEffect(() => {
-    refreshQueue();
-    const t = window.setInterval(refreshQueue, 2000);
+    let inFlight = false;
+    const tick = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try { await refreshQueue(); }
+      finally { inFlight = false; }
+    };
+    tick();
+    const t = window.setInterval(tick, 2000);
     return () => clearInterval(t);
   }, []);
   const apiEnqueue = async (trackId: string) => {
@@ -163,6 +185,27 @@ export default function App() {
       if (r.ok) setQueueState(await r.json());
     } catch { /* ignore */ }
   };
+  // Drag-to-reorder. Optimistically reorder locally, then PUT the move;
+  // reconcile with the server's response (or refetch on failure).
+  const dragIndexRef = useRef<number | null>(null);
+  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
+  const apiMove = async (from: number, to: number) => {
+    if (from === to) return;
+    setQueueState(prev => {
+      const next = [...prev];
+      const [item] = next.splice(from, 1);
+      next.splice(to, 0, item);
+      return next;
+    });
+    try {
+      const r = await fetch('/api/queue/move', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from, to }),
+      });
+      if (r.ok) setQueueState(await r.json());
+      else refreshQueue();
+    } catch { refreshQueue(); }
+  };
   // Set to true when we advance to a track via the queue, so the effect on
   // `selected` knows to auto-play (can't call play() before the audio
   // element mounts with the new src).
@@ -173,14 +216,39 @@ export default function App() {
   const [playing, setPlaying] = useState(false);
   const [position, setPosition] = useState(0);
   const positionRef = useRef(0);
-  const [muted, setMuted] = useState<Record<Stem, boolean>>({
-    drums: false, bass: false, vocals: false, other: false,
+
+  // Push current playback state to musicbox server so external consumers
+  // (twinklybox) can follow what's playing. Event-driven only — server
+  // interpolates position between pushes based on elapsed wall time.
+  const pushPlayback = (partial: { trackId?: string | null; position?: number; playing?: boolean }) => {
+    // Visible in browser devtools so we can confirm the push fires on
+    // pause/play/seek. Cheap; one log per real user action.
+    console.log('[playback push]', partial);
+    fetch('/api/playback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(partial),
+    }).catch((e) => console.error('[playback push] failed:', e));
+  };
+  // Per-stem output gain (0..1). Replaces the old mute toggle — 0 = silent
+  // (same as the old mute), 1 = full. Applied via each stem's GainNode.
+  const [stemGain, setStemGain] = useState<Record<Stem, number>>({
+    drums: 1, bass: 1, vocals: 1, other: 1,
   });
 
   // Per-render-frame analysis state (React state, re-renders at rAF rate)
   const [stemSpectrum, setStemSpectrum] = useState<Record<Stem, number[]>>({
     drums: EMPTY_ARR, bass: EMPTY_ARR, vocals: EMPTY_ARR, other: EMPTY_ARR,
   });
+
+  // Track-change & play/pause pushes. Position pushes happen in onSeeked
+  // below since seek is the only other user action that jumps position.
+  useEffect(() => {
+    pushPlayback({ trackId: selected?.id ?? null, position: 0, playing: false });
+  }, [selected?.id]);
+  useEffect(() => {
+    pushPlayback({ position: positionRef.current, playing });
+  }, [playing]);
   const [triggers, setTriggers] = useState({ low: false, high: false });
 
 
@@ -205,6 +273,11 @@ export default function App() {
   // Per-stem energy (mean of normalized bars). Used by LightPulseBindings
   // to drive continuous level-tracking (e.g. bass energy → bulb brightness).
   const stemEnergyRef = useRef<Record<Stem, number>>({ drums: 0, bass: 0, vocals: 0, other: 0 });
+  // Parallel ref carrying robust min-max (p2..p98) normalized energy. Lets
+  // each binding choose which normalization fits its stem on the current
+  // song without us having to switch globally. See bindings rAF for the
+  // pick site. Same lifecycle as stemEnergyRef.
+  const stemEnergyMinMaxRef = useRef<Record<Stem, number>>({ drums: 0, bass: 0, vocals: 0, other: 0 });
   // Per-stem chroma = spectral centroid (0-1) = "where in the spectrum the
   // stem's energy is centered right now". Roughly "how high or low" the
   // sound is. Used to map palette position from the stem's live timbre.
@@ -220,6 +293,26 @@ export default function App() {
     drums: [], bass: [], vocals: [], other: [],
   });
 
+  // Precomputed per-stem envelopes for the WHOLE track, sampled at
+  // ENVELOPE_SR Hz. Lets EnvelopeTimeline show future (incoming) values
+  // the same way OnsetTimeline shows future onsets — both are "the entire
+  // track's analysis, indexed by time." Populated once per track via
+  // decodeAudioData + per-chunk RMS (energy) and zero-crossing rate
+  // (chroma proxy, since high-frequency content drives ZCR up). ~400KB
+  // per envelope per 7-min track, two envelopes ≈ 800KB total.
+  const ENVELOPE_SR = 60;
+  // `sorted` is a sorted copy of `samples` used for percentile-rank lookup
+  // (empirical CDF). Letting bindings read percentile rather than raw
+  // amplitude makes brightness average to 50% over the track regardless
+  // of mix loudness — see binding-side rAF below for the actual mapping.
+  type Envelope = { samples: Float32Array; sorted: Float32Array; sr: number; max: number };
+  const energyEnvelopesRef = useRef<Partial<Record<Stem, Envelope>>>({});
+  const chromaEnvelopesRef = useRef<Partial<Record<Stem, Envelope>>>({});
+  // Bump on track change so the timelines re-read. We don't pass the
+  // envelopes as state because they'd cause heavy re-renders; the ref
+  // is read inside the rAF render loop.
+  const [envelopeVersion, setEnvelopeVersion] = useState(0);
+
   // ---- Library + analysis loading ----
 
   useEffect(() => {
@@ -234,14 +327,18 @@ export default function App() {
   // the user sees ~2s drift on AirPlay.
   useEffect(() => {
     let cancelled = false;
+    let inFlight = false;
     const LIGHTBOX = 'http://localhost:3001';
     const tick = async () => {
+      if (inFlight) return;
+      inFlight = true;
       try {
         const r = await fetch(`${LIGHTBOX}/api/audio-latency`);
         const j = await r.json();
         if (cancelled) return;
         if (typeof j.output_latency_ms === 'number') setOutputLatencyMs(j.output_latency_ms);
       } catch { /* ignore */ }
+      finally { inFlight = false; }
     };
     tick();
     const t = window.setInterval(tick, 2000);
@@ -282,6 +379,73 @@ export default function App() {
     const sr = ctx.sampleRate;
     barBinMapRef.current = buildBarBinMap(NUM_BARS, FREQ_BINS, sr);
     setAudioCtx(ctx);
+  }, [selected, audioCtx]);
+
+  // Precompute per-stem energy + chroma envelopes for the whole track.
+  // Fetches each stem's audio, decodes it, walks chunks computing both
+  // RMS (amplitude → energy) and ZCR (zero-crossing rate → pitch-height
+  // proxy) in a single pass. ~50-200ms per stem. Aborted via `cancelled`
+  // if the user changes tracks before decode finishes.
+  useEffect(() => {
+    if (!selected || !audioCtx) return;
+    let cancelled = false;
+    energyEnvelopesRef.current = {};
+    chromaEnvelopesRef.current = {};
+    setEnvelopeVersion(v => v + 1);
+    (async () => {
+      for (const stem of STEMS) {
+        try {
+          const r = await fetch(`/api/library/${selected.id}/stem/${stem}`);
+          if (!r.ok) continue;
+          const buf = await r.arrayBuffer();
+          if (cancelled) return;
+          const audioBuf = await audioCtx.decodeAudioData(buf);
+          if (cancelled) return;
+          const ch = audioBuf.getChannelData(0);
+          const samplesPerChunk = Math.max(1, Math.round(audioBuf.sampleRate / ENVELOPE_SR));
+          const numChunks = Math.ceil(ch.length / samplesPerChunk);
+          const energyOut = new Float32Array(numChunks);
+          const chromaOut = new Float32Array(numChunks);
+          let eMax = 0, cMax = 0;
+          for (let i = 0; i < numChunks; i++) {
+            const s = i * samplesPerChunk;
+            const e = Math.min(ch.length, s + samplesPerChunk);
+            const n = Math.max(1, e - s);
+            let sumSq = 0;
+            let zc = 0;
+            let prev = s > 0 ? ch[s - 1] : 0;
+            for (let j = s; j < e; j++) {
+              const v = ch[j];
+              sumSq += v * v;
+              // Sign change = zero crossing. Skip exact zeros to avoid
+              // counting them twice on noisy approach.
+              if ((prev >= 0) !== (v >= 0)) zc++;
+              prev = v;
+            }
+            const rms = Math.sqrt(sumSq / n);
+            const zcr = zc / n;
+            energyOut[i] = rms;
+            chromaOut[i] = zcr;
+            if (rms > eMax) eMax = rms;
+            if (zcr > cMax) cMax = zcr;
+          }
+          if (cancelled) return;
+          // Sort copies for percentile-rank queries (empirical CDF).
+          // `.slice()` so the visualization keeps the time-ordered array.
+          const energySorted = energyOut.slice();
+          energySorted.sort();
+          const chromaSorted = chromaOut.slice();
+          chromaSorted.sort();
+          energyEnvelopesRef.current[stem] = { samples: energyOut, sorted: energySorted, sr: ENVELOPE_SR, max: eMax };
+          chromaEnvelopesRef.current[stem] = { samples: chromaOut, sorted: chromaSorted, sr: ENVELOPE_SR, max: cMax };
+          setEnvelopeVersion(v => v + 1);
+        } catch {
+          // Stem missing / decode failure — silently skip; the row will
+          // just stay empty.
+        }
+      }
+    })();
+    return () => { cancelled = true; };
   }, [selected, audioCtx]);
 
   // (mute is applied inside <StemTrack>)
@@ -419,6 +583,42 @@ export default function App() {
             stemChromaRef.current[stem] = match.chroma;
           }
           setStemSpectrum(nextStemSpectrum);
+
+          // Per-stem normalization for binding values. Two views computed
+          // simultaneously so each binding can pick which suits its stem:
+          //   stemEnergyRef       = empirical-CDF rank (percentile). Uniform
+          //                         on [0,1], song-average ≈ 0.5. Good for
+          //                         dense songs; lifts noise floor on songs
+          //                         with long silent stretches.
+          //   stemEnergyMinMaxRef = robust min-max using p2..p98 bounds.
+          //                         Silence (≤p2) → 0, peaks (≥p98) → 1,
+          //                         outlier-immune at both ends. No
+          //                         auto-50% guarantee but handles songs
+          //                         with sparse stems cleanly.
+          // Falls back to ring values during the brief decode window after
+          // track select.
+          const firePosSec = firePositionRef.current;
+          for (const stem of STEMS) {
+            const eEnv = energyEnvelopesRef.current[stem];
+            if (eEnv && eEnv.sorted.length > 0) {
+              const i = Math.min(eEnv.samples.length - 1, Math.max(0, Math.floor(firePosSec * eEnv.sr)));
+              const raw = eEnv.samples[i];
+              stemEnergyRef.current[stem] = valueToPercentile(eEnv.sorted, raw);
+              // Robust min-max with p2/p98 bounds.
+              const n = eEnv.sorted.length;
+              const lo = eEnv.sorted[Math.floor(0.02 * n)];
+              const hi = eEnv.sorted[Math.min(n - 1, Math.floor(0.98 * n))];
+              const span = hi - lo;
+              stemEnergyMinMaxRef.current[stem] = span > 1e-9 ? Math.max(0, Math.min(1, (raw - lo) / span)) : 0;
+            }
+            // Chroma stays percentile-mapped (it's already bounded in a
+            // meaningful range; min-max stretching it has no real win).
+            const cEnv = chromaEnvelopesRef.current[stem];
+            if (cEnv && cEnv.sorted.length > 0) {
+              const i = Math.min(cEnv.samples.length - 1, Math.max(0, Math.floor(firePosSec * cEnv.sr)));
+              stemChromaRef.current[stem] = valueToPercentile(cEnv.sorted, cEnv.samples[i]);
+            }
+          }
         }
       }
       raf = requestAnimationFrame(tick);
@@ -499,8 +699,21 @@ export default function App() {
             queue.map((t, i) => (
               <div
                 key={`${t.id}-${i}`}
-                className="group flex items-center gap-2 px-3 py-1.5 border-b border-zinc-900/50 text-xs hover:bg-zinc-900"
+                draggable
+                onDragStart={(e) => { dragIndexRef.current = i; e.dataTransfer.effectAllowed = 'move'; }}
+                onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; if (dragOverIdx !== i) setDragOverIdx(i); }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  const from = dragIndexRef.current;
+                  if (from !== null) apiMove(from, i);
+                  dragIndexRef.current = null;
+                  setDragOverIdx(null);
+                }}
+                onDragEnd={() => { dragIndexRef.current = null; setDragOverIdx(null); }}
+                className={`group flex items-center gap-2 px-3 py-1.5 border-b text-xs hover:bg-zinc-900
+                  ${dragOverIdx === i ? 'border-t-2 border-t-purple-500 border-b-zinc-900/50' : 'border-b-zinc-900/50'}`}
               >
+                <span className="cursor-grab active:cursor-grabbing text-zinc-700 hover:text-zinc-400 select-none" title="Drag to reorder">⠿</span>
                 <span className="text-zinc-600 font-mono w-4 text-right">{i + 1}</span>
                 <div className="flex-1 min-w-0">
                   <div className="truncate text-zinc-200">{t.name}</div>
@@ -607,7 +820,7 @@ export default function App() {
               <StemTrack
                 key={stem}
                 url={hasStems ? `/api/library/${selected.id}/stem/${stem}` : `/api/library/${selected.id}/audio`}
-                muted={muted[stem]}
+                volume={stemGain[stem]}
                 audioCtx={audioCtx}
                 // No auto-repeat — when a track ends and the queue is empty,
                 // playback just stops. Queue head advance still works.
@@ -626,6 +839,9 @@ export default function App() {
                 onSeeked={stem === 'drums' ? (t) => {
                   lastLowPeakIdx.current = (madmom?.drums_low?.cnn ?? []).filter(p => p <= t).length - 1;
                   lastHighPeakIdx.current = (madmom?.drums_high?.cnn ?? []).filter(p => p <= t).length - 1;
+                  // Also tell the server about the jump so external
+                  // followers don't keep interpolating from the old anchor.
+                  pushPlayback({ position: t, playing });
                 } : undefined}
               />
             ))}
@@ -639,24 +855,46 @@ export default function App() {
                         key={stem}
                         label={STEM_LABEL[stem]}
                         data={stemSpectrum[stem]}
-                        muted={muted[stem]}
-                        onToggleMute={() => setMuted(m => ({ ...m, [stem]: !m[stem] }))}
+                        volume={stemGain[stem]}
+                        onVolumeChange={(v) => setStemGain(g => ({ ...g, [stem]: v }))}
                       />
                     ))}
                   </div>
                 </SpectrumPulse>
               </div>
 
-              <div className="flex-[2] min-h-0 border-t border-zinc-800/50 flex flex-col">
-                <div className="flex-1 min-h-0">
-                  {madmom ? (
-                    <OnsetTimeline data={madmom} positionRef={positionRef} beats={analysis.beats} />
-                  ) : (
-                    <div className="h-full flex items-center justify-center text-[11px] text-zinc-600 font-mono">
-                      no madmom_onsets.json for this track
-                    </div>
-                  )}
-                </div>
+              {/* Onset timeline gets its own flex share; the precomputed
+                  envelope charts below are shrink-0 siblings so they don't
+                  compete with the onset rows for the same vertical budget. */}
+              <div className="flex-[2] min-h-0 border-t border-zinc-800/50">
+                {madmom ? (
+                  <OnsetTimeline data={madmom} positionRef={positionRef} beats={analysis.beats} />
+                ) : (
+                  <div className="h-full flex items-center justify-center text-[11px] text-zinc-600 font-mono">
+                    no madmom_onsets.json for this track
+                  </div>
+                )}
+              </div>
+
+              {/* Per-stem precomputed envelopes — energy (RMS) above,
+                  chroma (ZCR proxy for pitch height) below. Both align
+                  with the onset timeline (same time axis + label gutter)
+                  so future values scroll in just like upcoming onsets. */}
+              <div className="shrink-0 border-t border-zinc-800/50">
+                <div className="text-[9px] font-mono uppercase tracking-wider text-zinc-600 px-2 py-0.5 border-b border-zinc-800/30">energy</div>
+                <EnvelopeTimeline
+                  envelopesRef={energyEnvelopesRef}
+                  positionRef={positionRef}
+                  version={envelopeVersion}
+                />
+              </div>
+              <div className="shrink-0 border-t border-zinc-800/50">
+                <div className="text-[9px] font-mono uppercase tracking-wider text-zinc-600 px-2 py-0.5 border-b border-zinc-800/30">chroma</div>
+                <EnvelopeTimeline
+                  envelopesRef={chromaEnvelopesRef}
+                  positionRef={positionRef}
+                  version={envelopeVersion}
+                />
               </div>
             </div>
 
@@ -680,6 +918,7 @@ export default function App() {
           firePositionRef={firePositionRef}
           playing={playing}
           stemEnergyRef={stemEnergyRef}
+          stemEnergyMinMaxRef={stemEnergyMinMaxRef}
           stemChromaRef={stemChromaRef}
         />
       </main>
@@ -690,15 +929,24 @@ export default function App() {
 
 // ---- Stem spectrum pane ----
 
-function StemPane({ label, data, muted, onToggleMute }: {
-  label: string; data: number[]; muted: boolean; onToggleMute: () => void;
+function StemPane({ label, data, volume, onVolumeChange }: {
+  label: string; data: number[]; volume: number; onVolumeChange: (v: number) => void;
 }) {
+  // Fade the pane toward silent as the stem is turned down (full at 1,
+  // floor at ~0.3 opacity so the spectrum's still visible when muted).
+  const opacity = 0.3 + 0.7 * volume;
   return (
-    <div className={`relative min-w-0 min-h-0 border border-zinc-900/50 ${muted ? 'opacity-35' : ''}`}>
-      <label className="absolute top-1 left-2 z-10 flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-zinc-400 font-mono cursor-pointer select-none">
-        <input type="checkbox" checked={!muted} onChange={onToggleMute} className="accent-zinc-400" />
-        {label}
-      </label>
+    <div className="relative min-w-0 min-h-0 border border-zinc-900/50" style={{ opacity }}>
+      <div className="absolute top-1 left-2 z-10 flex items-center gap-2 text-[10px] uppercase tracking-wider text-zinc-400 font-mono select-none">
+        <span className="w-12">{label}</span>
+        <input
+          type="range" min={0} max={1} step={0.01} value={volume}
+          onChange={(e) => onVolumeChange(+e.target.value)}
+          className="w-20 accent-zinc-400 cursor-pointer"
+          title={`${label} volume — ${Math.round(volume * 100)}%`}
+        />
+        <span className="w-7 text-right tabular-nums text-zinc-500">{Math.round(volume * 100)}</span>
+      </div>
       <Spectrum data={data} />
     </div>
   );
@@ -762,10 +1010,10 @@ function useStemAudioGraph(
 }
 
 function StemTrack({
-  url, muted, audioCtx, onAudio, onAnalyser, onEnded, onSeeked, loop,
+  url, volume, audioCtx, onAudio, onAnalyser, onEnded, onSeeked, loop,
 }: {
   url: string;
-  muted: boolean;
+  volume: number;
   audioCtx: AudioContext | null;
   onAudio: (el: HTMLAudioElement | null) => void;
   onAnalyser: (a: AnalyserNode | null) => void;
@@ -784,11 +1032,11 @@ function StemTrack({
   useEffect(() => { onAudio(el); }, [el, onAudio]);
   useEffect(() => { onAnalyser(analyser); }, [analyser, onAnalyser]);
 
-  // Mute via the GainNode rather than el.muted — keeps the analyser fed,
-  // which keeps the faded spectrum alive in the UI.
+  // Volume via the GainNode rather than el.volume — keeps the analyser fed,
+  // so the spectrum stays alive in the UI even at zero output.
   useEffect(() => {
-    if (gain) gain.gain.value = muted ? 0 : 1;
-  }, [gain, muted]);
+    if (gain) gain.gain.value = volume;
+  }, [gain, volume]);
 
   return (
     <audio

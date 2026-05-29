@@ -90,7 +90,10 @@ interface Binding {
   peak: number;    // 1-100 — attack brightness for peaks, max level for energy
   floor: number;   // 1-100 — decay target for peaks, min level for energy
   decayMs: number; // peak only
-  gain: number;    // energy only — multiplier on raw energy (0.5-30)
+  // (energy bindings used to have a `gain` multiplier here; removed once
+  // stemEnergyRef went percentile-mapped, since the input is already in
+  // [0,1] and gain became redundant with floor/peak. Lingering `gain`
+  // fields on persisted bindings are harmless — they're just ignored.)
   // Asymmetric envelope follower (energy mode). attackSmooth gates how fast
   // brightness rises when raw energy increases; decaySmooth gates how fast
   // it falls. 0 = no smoothing (instant), closer to 1 = heavy smoothing.
@@ -99,9 +102,14 @@ interface Binding {
   decaySmooth: number;
   chromaSmooth: number; // chroma smoothing — EMA alpha (0-0.99), chroma color
   colorSource: ColorSource; // how the palette position for this light is decided
+  // Energy normalization mode. 'percentile' = empirical-CDF rank (current
+  // default, song-average ≈ 50%); 'robust-minmax' = (raw − p2)/(p98 − p2)
+  // clipped, which maps silent stretches to 0 cleanly. App.tsx writes both
+  // refs every rAF tick; we pick at read time.
+  normMode?: 'percentile' | 'robust-minmax';
 }
 function defaultBinding(): Binding {
-  return { sourceKey: null, peak: 100, floor: 5, decayMs: 400, gain: 10, attackSmooth: 0, decaySmooth: 0.9, chromaSmooth: 0.9, colorSource: 'palette' };
+  return { sourceKey: null, peak: 100, floor: 5, decayMs: 400, attackSmooth: 0, decaySmooth: 0.9, chromaSmooth: 0.9, colorSource: 'palette', normMode: 'percentile' };
 }
 
 const BINDINGS_STORAGE_KEY = 'lightbox:bindings';
@@ -144,7 +152,7 @@ const COLOR_SOURCE_OPTIONS: Array<{ value: ColorSource; label: string }> = [
 const norm = (s: string) => s.trim().toLowerCase();
 
 export function LightPulseBindings({
-  data, firePositionRef, playing, stemEnergyRef, stemChromaRef,
+  data, firePositionRef, playing, stemEnergyRef, stemEnergyMinMaxRef, stemChromaRef,
 }: {
   data: MadmomOnsets | null;
   // Fire-time playhead = master.currentTime − offset_ms/1000. Peak
@@ -154,7 +162,10 @@ export function LightPulseBindings({
   // (the offset slider) controls every light-event timing.
   firePositionRef: { current: number };
   playing: boolean;
+  // Two parallel energy views populated by App.tsx each rAF tick — the
+  // binding picks via its `normMode` field which to read.
   stemEnergyRef: { current: Record<Stem, number> };
+  stemEnergyMinMaxRef: { current: Record<Stem, number> };
   stemChromaRef: { current: Record<Stem, number> };
 }) {
   const [lightsAll, setLightsAll] = useState<LightOption[]>([]);
@@ -171,6 +182,9 @@ export function LightPulseBindings({
   // (~1 in-flight per device, RTT ≈ 50-150ms), so a higher input rate is
   // wasteful. Default 8 Hz is plenty given the firmware's 800ms internal fade.
   const [tuyaHz, setTuyaHz] = useState(8);
+  // (Per-binding normMode lives on each binding now; the earlier parked
+  // global mode + localStorage plumbing was removed in favor of per-card
+  // selects on energy bindings.)
 
   // Load once. Combine Hue rest-lights with WiZ devices so both kinds can
   // appear in the same binding dropdown.
@@ -285,8 +299,25 @@ export function LightPulseBindings({
   // Stream auto-lifecycle: start/stop/reconfigure so the entertainment
   // config contains exactly the lights that currently have energy bindings.
   // Stop when none, start with appropriate subset when one or more.
+  // When the user manually releases the Hue stream (OffsetBar), we set
+  // localStorage 'lightbox:hueStreamSuppressed' so the reconcile below
+  // doesn't immediately restart it. Clear that suppression as soon as the
+  // set of energy-bound lights actually changes — i.e. the user re-binds
+  // something and clearly wants lights again. Skip the mount run so a
+  // release survives until a real binding change.
+  const prevEnergyKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    const energyKey = energyLightNames.join('|');
+    if (prevEnergyKeyRef.current !== null && prevEnergyKeyRef.current !== energyKey) {
+      try { localStorage.removeItem('lightbox:hueStreamSuppressed'); } catch {}
+    }
+    prevEnergyKeyRef.current = energyKey;
+  }, [energyLightNames.join('|')]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const lastReconcileKey = useRef<string>('');
   useEffect(() => {
+    // Respect a manual stream release — don't auto-restart while suppressed.
+    try { if (localStorage.getItem('lightbox:hueStreamSuppressed') === '1') return; } catch {}
     const desiredKey = energyLightNames.join('|'); // empty string = "no stream"
     const activeKey = streamState.active
       ? (streamState.channels ?? []).map(c => norm(c.lightName)).sort().join('|')
@@ -384,6 +415,10 @@ export function LightPulseBindings({
   const chromaSmoothedRef = useRef<Record<string, number>>({});
   useEffect(() => {
     if (!playing) return;
+    // Per-light in-flight tracking. Without this, when lightbox lags even
+    // briefly the 45 Hz × N pushes stack up and exhaust Chrome's per-host
+    // socket budget — which also starves stem audio downloads → desync.
+    const chromaInFlight: Record<string, boolean> = {};
     const t = setInterval(() => {
       const bs = bindingsRef.current;
       const activeChromaRids = new Set<string>();
@@ -401,13 +436,18 @@ export function LightPulseBindings({
         const smoothed = prev + (rawChroma - prev) * (1 - alpha) * w;
         chromaSmoothedRef.current[rid] = smoothed;
         activeChromaRids.add(rid);
+        if (chromaInFlight[rid]) continue;
+        chromaInFlight[rid] = true;
         fetch(`${LIGHTBOX_URL}/api/hue-stream/palette-position`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ lightId: rid, position: smoothed }),
-        }).catch(() => {});
+        })
+          .catch(() => {})
+          .finally(() => { chromaInFlight[rid] = false; });
       }
       // Clear overrides + smoothed state for lights that WERE chroma-bound
-      // but aren't now.
+      // but aren't now. These are one-shot — no need for per-rid in-flight
+      // tracking (at most one fire per rid per binding-change).
       for (const rid of prevChromaBoundRidsRef.current) {
         if (!activeChromaRids.has(rid)) {
           delete chromaSmoothedRef.current[rid];
@@ -456,6 +496,13 @@ export function LightPulseBindings({
     const lastWizSendAt: Record<string, number> = {};
     const lastTuyaSendAt: Record<string, number> = {};
 
+    // Per-endpoint, per-light in-flight maps. Same reason as the chroma
+    // path: rAF-rate POSTs with no backpressure exhaust Chrome's socket
+    // budget the moment lightbox is anything slower than instant.
+    const levelInFlight: Record<string, boolean> = {};
+    const wizInFlight: Record<string, boolean> = {};
+    const tuyaInFlight: Record<string, boolean> = {};
+
     const tick = () => {
       // Peak crossings compare against firePositionRef (offset-shifted).
       // Energy/chroma values from stemEnergyRef/stemChromaRef are also
@@ -472,9 +519,16 @@ export function LightPulseBindings({
         if (!src) continue;
 
         if (src.kind === 'energy') {
+          // Energy refs are both in [0,1] (see App.tsx). Binding picks
+          // which view via normMode. For combined stems we sum and clamp —
+          // keeping it additive matches the "bass+drums" presets that
+          // should hit peak when both stems are simultaneously loud.
+          const energySrc = b.normMode === 'robust-minmax'
+            ? stemEnergyMinMaxRef.current
+            : stemEnergyRef.current;
           let raw = 0;
-          for (const stem of src.stems) raw += stemEnergyRef.current[stem] ?? 0;
-          const rawScaled = Math.max(0, Math.min(1, raw * b.gain));
+          for (const stem of src.stems) raw += energySrc[stem] ?? 0;
+          const rawScaled = Math.max(0, Math.min(1, raw));
           const prev = energySmoothed[rid] ?? rawScaled;
           // Asymmetric EMA: pick alpha based on direction so attack and
           // decay can be tuned independently. Higher alpha = more
@@ -497,10 +551,14 @@ export function LightPulseBindings({
             if (now - (lastWizSendAt[rid] ?? 0) < minGapMs) continue;
             lastWizSendAt[rid] = now;
             const dimming = Math.max(10, Math.min(100, Math.round(level * 100)));
+            if (wizInFlight[rid]) continue;
+            wizInFlight[rid] = true;
             fetch(`${LIGHTBOX_URL}/api/wiz/set`, {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ deviceId: rid, state: true, dimming }),
-            }).catch(() => {});
+            })
+              .catch(() => {})
+              .finally(() => { wizInFlight[rid] = false; });
             continue;
           }
 
@@ -514,20 +572,28 @@ export function LightPulseBindings({
             if (now - (lastTuyaSendAt[rid] ?? 0) < minGapMs) continue;
             lastTuyaSendAt[rid] = now;
             const brightness = Math.max(1, Math.min(100, Math.round(level * 100)));
+            if (tuyaInFlight[rid]) continue;
+            tuyaInFlight[rid] = true;
             fetch(`${LIGHTBOX_URL}/api/tuya/set`, {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ deviceId: rid, on: true, brightness }),
-            }).catch(() => {});
+            })
+              .catch(() => {})
+              .finally(() => { tuyaInFlight[rid] = false; });
             continue;
           }
 
           // Hue: push level into the entertainment stream channel.
           const channelId = chMap.get(rid);
           if (channelId === undefined) continue;
+          if (levelInFlight[rid]) continue;
+          levelInFlight[rid] = true;
           fetch(`${LIGHTBOX_URL}/api/hue-stream/level`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ channelId, level }),
-          }).catch(() => {});
+          })
+            .catch(() => {})
+            .finally(() => { levelInFlight[rid] = false; });
           continue;
         }
 
@@ -559,7 +625,7 @@ export function LightPulseBindings({
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [playing, data, firePositionRef, stemEnergyRef]);
+  }, [playing, data, firePositionRef, stemEnergyRef, stemEnergyMinMaxRef]);
 
   const update = (rid: string, patch: Partial<Binding>) => {
     setBindings(prev => ({ ...prev, [rid]: { ...(prev[rid] ?? defaultBinding()), ...patch } }));
@@ -586,14 +652,11 @@ export function LightPulseBindings({
     });
   };
 
-  if (loadErr) {
-    return <div className="p-3 text-xs text-red-400 font-mono">lightbox unavailable ({loadErr})</div>;
-  }
-
+  // NOTE: these two useMemos USED to live below the `if (loadErr) return …`
+  // early return, which violated rules-of-hooks the first time loadErr
+  // flipped from null → string (the hooks count dropped, React tore down).
+  // Moved above the early return to keep the call order stable across renders.
   const anyEnergy = energyLightNames.length > 0;
-  // True when any WiZ light has an energy binding (only then is the WiZ Hz
-  // slider relevant). WiZ rids skip the entertainment stream so they don't
-  // contribute to energyLightNames.
   const anyWizEnergy = useMemo(() => {
     for (const rid of Object.keys(bindings)) {
       if (!isWizRid(rid)) continue;
@@ -612,6 +675,10 @@ export function LightPulseBindings({
     }
     return false;
   }, [bindings]);
+
+  if (loadErr) {
+    return <div className="p-3 text-xs text-red-400 font-mono">lightbox unavailable ({loadErr})</div>;
+  }
 
   return (
     <div className="px-3 py-2 border-t border-zinc-800 bg-zinc-950 overflow-y-auto">
@@ -749,15 +816,7 @@ export function LightPulseBindings({
                   <span className="w-8 text-right font-mono">{b.floor}</span>
                 </div>
 
-                {isEnergy ? (
-                  <div className="flex items-center gap-2 text-[10px] text-zinc-500">
-                    <span className="w-10 text-right">gain</span>
-                    <input type="range" min={0.5} max={30} step={0.25} value={b.gain}
-                      onChange={(e) => update(l.rid, { gain: +e.target.value })}
-                      className="flex-1" />
-                    <span className="w-12 text-right font-mono">×{b.gain.toFixed(1)}</span>
-                  </div>
-                ) : (
+                {!isEnergy && (
                   <div className="flex items-center gap-2 text-[10px] text-zinc-500">
                     <span className="w-10 text-right">decay</span>
                     <input type="range" min={50} max={2000} step={10} value={b.decayMs}
@@ -768,6 +827,18 @@ export function LightPulseBindings({
                 )}
                 {isEnergy && (
                   <>
+                    <div className="flex items-center gap-2 text-[10px] text-zinc-500"
+                      title="How raw stem energy is mapped to [0,1] before floor/peak. percentile = song-CDF rank (auto 50% song-average); robust min-max = (raw − p2)/(p98 − p2) clipped, handles silent stretches by mapping the noise floor to 0.">
+                      <span className="w-10 text-right">norm</span>
+                      <select
+                        value={b.normMode ?? 'percentile'}
+                        onChange={(e) => update(l.rid, { normMode: e.target.value as 'percentile' | 'robust-minmax' })}
+                        className="flex-1 bg-zinc-800 text-[11px] rounded px-1 py-0.5"
+                      >
+                        <option value="percentile">percentile</option>
+                        <option value="robust-minmax">robust min-max (p2-p98)</option>
+                      </select>
+                    </div>
                     <div className="flex items-center gap-2 text-[10px] text-zinc-500">
                       <span className="w-10 text-right">attack</span>
                       <input type="range" min={0} max={0.99} step={0.01} value={b.attackSmooth}

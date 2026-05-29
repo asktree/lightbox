@@ -71,15 +71,21 @@ export function AutopilotBar() {
     setSelectedRids((cur) => cur.includes(rid) ? cur.filter((r) => r !== rid) : [...cur, rid]);
   };
 
-  // Poll autopilot state. Offset/audio/bridge readouts moved to OffsetBar.
+  // Poll autopilot state. In-flight guard prevents stacking when the
+  // server lags — without it, slow responses pile up sockets and
+  // eventually trigger Chrome's ERR_INSUFFICIENT_RESOURCES across the tab.
   useEffect(() => {
     let cancelled = false;
+    let inFlight = false;
     const tick = async () => {
+      if (inFlight) return;
+      inFlight = true;
       try {
         const r = await fetch(`${LIGHTBOX_URL}/api/autopilot/state`);
         if (cancelled) return;
         setState(await r.json());
       } catch { /* ignore */ }
+      finally { inFlight = false; }
     };
     tick();
     const t = setInterval(tick, 1000);
