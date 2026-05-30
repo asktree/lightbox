@@ -246,8 +246,49 @@ export default function App() {
   useEffect(() => {
     pushPlayback({ trackId: selected?.id ?? null, position: 0, playing: false });
   }, [selected?.id]);
+  // Playback edge push, delayed by the user's effective offset so the
+  // playing=true/false transition lands at audible time rather than at the
+  // moment the user clicks play/pause. Without this, on AirPlay (which
+  // buffers ~2s of audio before/after the click):
+  //
+  //   - Hitting PAUSE freezes external consumers (twinklybox) instantly,
+  //     while speakers continue draining the buffer for ~2s. Lights stop
+  //     while you're still hearing music.
+  //   - Hitting PLAY animates lights instantly, while speakers stay silent
+  //     for ~2s waiting for the buffer to fill. Lights dance before any
+  //     sound emerges.
+  //
+  // Delaying the edge push by `effectiveOffsetMs` lines the transitions up
+  // with what the listener actually experiences.
+  //
+  // Subtleties handled below:
+  //  · PAUSE: master.currentTime is frozen at the pause moment, so we
+  //    capture it NOW (closure) and push that value when the timeout
+  //    fires. firePositionRef would otherwise carry the audible-time
+  //    formula (master − offset) and be 2s behind the actual stop point.
+  //  · PLAY:  master.currentTime keeps advancing, so we read
+  //    firePositionRef.current AT the moment the timeout fires — by then
+  //    it equals (master at T+offset) − offset ≈ position the listener is
+  //    just starting to hear. No need to capture early.
+  //  · Rapid toggle (play→pause→play within offsetMs) cancels the pending
+  //    timeout via cleanup and reschedules from the new state, so micro-
+  //    fiddling doesn't cause spurious mid-buffer pushes.
+  //  · effOffMs <= 0 falls through to an immediate push (matches old
+  //    behavior; no point in setTimeout(0)).
   useEffect(() => {
-    pushPlayback({ position: positionRef.current, playing });
+    const effOffMs = effectiveOffsetMsRef.current ?? 0;
+    // Snapshot the pause point at click moment (master.currentTime freezes
+    // when paused; firePositionRef would lag it by the offset).
+    const pausePosCaptured = playing
+      ? NaN
+      : (audioElsRef.current.drums?.currentTime ?? firePositionRef.current);
+    const fire = () => {
+      const pos = playing ? firePositionRef.current : pausePosCaptured;
+      pushPlayback({ position: pos, playing });
+    };
+    if (effOffMs <= 0) { fire(); return; }
+    const t = window.setTimeout(fire, effOffMs);
+    return () => window.clearTimeout(t);
   }, [playing]);
   const [triggers, setTriggers] = useState({ low: false, high: false });
 
@@ -839,9 +880,11 @@ export default function App() {
                 onSeeked={stem === 'drums' ? (t) => {
                   lastLowPeakIdx.current = (madmom?.drums_low?.cnn ?? []).filter(p => p <= t).length - 1;
                   lastHighPeakIdx.current = (madmom?.drums_high?.cnn ?? []).filter(p => p <= t).length - 1;
-                  // Also tell the server about the jump so external
-                  // followers don't keep interpolating from the old anchor.
-                  pushPlayback({ position: t, playing });
+                  // Push the offset-corrected position, matching what
+                  // [playing] does — so external followers stay in sync
+                  // with what the user is actually hearing post-offset.
+                  const effOffMs = effectiveOffsetMsRef.current ?? 0;
+                  pushPlayback({ position: Math.max(0, t - effOffMs / 1000), playing });
                 } : undefined}
               />
             ))}

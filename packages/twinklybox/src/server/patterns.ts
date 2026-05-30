@@ -24,7 +24,8 @@ export interface PatternContext {
   audio: {
     energy: { drums: number; bass: number; vocals: number; other: number };
     energyMinMax: { drums: number; bass: number; vocals: number; other: number };
-    bands: number[]; // length 12
+    bands: number[];        // length 12 — percentile per band
+    bandsMinMax: number[];  // length 12 — robust-minmax per band (p2..p98)
   };
 }
 
@@ -399,7 +400,13 @@ export function renderMegadrome(out: Uint8Array, ctx: PatternContext, p: Megadro
   let bandEnergies: number[];
   let bassPulse: number;
   if (p.bandMode === 'eq12') {
-    bandEnergies = ctx.audio.bands; // length 12
+    // eq12 honors normMode just like stems: percentile (uniform CDF) vs
+    // robust-minmax (p2..p98 bounded). minMaxGain applies in robust-minmax
+    // mode the same way it does for stems — multiply then clamp to [0,1].
+    const src = p.normMode === 'robust-minmax' ? ctx.audio.bandsMinMax : ctx.audio.bands;
+    const g = p.normMode === 'robust-minmax' ? p.minMaxGain : 1;
+    bandEnergies = new Array(src.length);
+    for (let b = 0; b < src.length; b++) bandEnergies[b] = Math.min(1, src[b] * g);
     const bb = bandEnergies;
     bassPulse = (bb[0] * 0.1 + bb[1] * 0.4 + bb[2] * 0.6 + bb[3] * 0.4 + bb[4] * 0.1) * p.pulseSize;
   } else {

@@ -25,10 +25,16 @@ export interface AudioBusState {
   // populates both each tick.
   energy: Record<Stem, number>;
   energyMinMax: Record<Stem, number>;
-  // 12-band FFT envelope of the equal-weighted stem sum — percentile-mapped
-  // per-band against the whole track. Used by megadrome's eq12 mode (true
-  // frequency bands, not stems). Same direction-aware smoothing applies.
+  // 12-band FFT envelope of the equal-weighted stem sum. Two normalization
+  // views, parallel to stems:
+  //   bands        — empirical-CDF percentile per band (uniform on [0,1]).
+  //   bandsMinMax  — robust min-max via each band's own p2..p98 (preserves
+  //                  relative loudness — quiet bands stay quiet, loud
+  //                  bands actually look loud).
+  // Used by megadrome's eq12 mode. Same direction-aware smoothing applies
+  // to both. Patterns pick which to read via the megadrome `normMode`.
   bands: number[];
+  bandsMinMax: number[];
   // Track/playback context for patterns or UI that want to render labels.
   // None of the math depends on these.
   trackId: string | null;
@@ -44,6 +50,7 @@ const state: AudioBusState = {
   energy: { drums: 0, bass: 0, vocals: 0, other: 0 },
   energyMinMax: { drums: 0, bass: 0, vocals: 0, other: 0 },
   bands: new Array(NUM_BANDS).fill(0),
+  bandsMinMax: new Array(NUM_BANDS).fill(0),
   trackId: null,
   trackName: null,
   position: 0,
@@ -70,7 +77,8 @@ export function audioBus(): Readonly<AudioBusState> {
 export function writeEnergy(values: {
   percentile: Record<Stem, number>;
   minMax: Record<Stem, number>;
-  bands?: number[]; // optional 12-band percentile values
+  bands?: number[];        // optional 12-band percentile values
+  bandsMinMax?: number[];  // optional 12-band robust-minmax values
 }) {
   for (const stem of STEMS) {
     {
@@ -86,13 +94,22 @@ export function writeEnergy(values: {
       state.energyMinMax[stem] = a > 0 ? prev * a + next * (1 - a) : next;
     }
   }
-  // Bands — smoothed independently with the same α settings.
+  // Bands — both percentile and robust-minmax views, each smoothed
+  // independently with the same α settings.
   if (values.bands && values.bands.length === NUM_BANDS) {
     for (let b = 0; b < NUM_BANDS; b++) {
       const prev = state.bands[b];
       const next = values.bands[b];
       const a = next > prev ? attackAlpha : decayAlpha;
       state.bands[b] = a > 0 ? prev * a + next * (1 - a) : next;
+    }
+  }
+  if (values.bandsMinMax && values.bandsMinMax.length === NUM_BANDS) {
+    for (let b = 0; b < NUM_BANDS; b++) {
+      const prev = state.bandsMinMax[b];
+      const next = values.bandsMinMax[b];
+      const a = next > prev ? attackAlpha : decayAlpha;
+      state.bandsMinMax[b] = a > 0 ? prev * a + next * (1 - a) : next;
     }
   }
   state.lastUpdate = Date.now();

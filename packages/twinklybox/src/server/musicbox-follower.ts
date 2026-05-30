@@ -255,7 +255,7 @@ export function tickFollower() {
     // synth still gives a recognizable picture (uniform allocation across
     // bands at the synth's instantaneous level).
     const bands = new Array(NUM_BANDS).fill(v.bass);
-    writeEnergy({ percentile: v, minMax: v, bands });
+    writeEnergy({ percentile: v, minMax: v, bands, bandsMinMax: bands });
     return;
   }
   const trackId = currentPlayback.trackId;
@@ -307,14 +307,20 @@ export function tickFollower() {
     const span = hi - lo;
     minMax[stem] = span > 1e-9 ? Math.max(0, Math.min(1, (raw - lo) / span)) : 0;
   }
-  // Per-band percentile lookup against each band's own historical distribution.
-  // Same idea as stems: uniform on [0,1] over the whole track, so megadrome's
-  // proportionalCumOctaveMap allocates band shares predictably regardless of
-  // raw FFT magnitudes (which vary wildly between low/high bands).
+  // Per-band normalization: percentile + robust-minmax, mirroring stems.
+  // The sorted array we already keep for percentile lookup also gives us
+  // p2 and p98 for free — no extra data needed, no extra storage cost.
   const bands = new Array(NUM_BANDS).fill(0);
+  const bandsMinMax = new Array(NUM_BANDS).fill(0);
   for (let b = 0; b < env.numBands && b < NUM_BANDS; b++) {
     const e = env.bands[b];
-    bands[b] = valueToPercentile(e.sorted, e.samples[idxRaw]);
+    const raw = e.samples[idxRaw];
+    bands[b] = valueToPercentile(e.sorted, raw);
+    const n = e.sorted.length;
+    const lo = e.sorted[Math.floor(0.02 * n)];
+    const hi = e.sorted[Math.min(n - 1, Math.floor(0.98 * n))];
+    const span = hi - lo;
+    bandsMinMax[b] = span > 1e-9 ? Math.max(0, Math.min(1, (raw - lo) / span)) : 0;
   }
-  writeEnergy({ percentile, minMax, bands });
+  writeEnergy({ percentile, minMax, bands, bandsMinMax });
 }

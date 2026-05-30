@@ -54,7 +54,7 @@ export class FrameLoop {
     }
   }
   setGamma(g: number) {
-    this.gamma = Math.max(0.1, Math.min(5, g));
+    this.gamma = Math.max(0.1, Math.min(10, g));
     this.rebuildGammaLut();
   }
   getGamma() { return this.gamma; }
@@ -113,7 +113,7 @@ export class FrameLoop {
         bytesPerLed: this.driver.bytesPerLed,
         coords: layout?.coords ?? null,
         tSec: (Date.now() - this.t0Ms) / 1000,
-        audio: { energy: bus.energy, energyMinMax: bus.energyMinMax, bands: bus.bands },
+        audio: { energy: bus.energy, energyMinMax: bus.energyMinMax, bands: bus.bands, bandsMinMax: bus.bandsMinMax },
       };
       render(this.buf, ctx, this.pattern);
     }

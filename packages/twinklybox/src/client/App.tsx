@@ -47,6 +47,8 @@ interface StreamStats { running: boolean; hz: number; frameCount: number; patter
 interface AudioState {
   energy: { drums: number; bass: number; vocals: number; other: number };
   energyMinMax: { drums: number; bass: number; vocals: number; other: number };
+  bands?: number[];
+  bandsMinMax?: number[];
   trackId: string | null;
   trackName: string | null;
   position: number;
@@ -363,7 +365,7 @@ export default function App() {
         <label className="ml-auto text-xs text-zinc-500 font-mono flex items-center gap-2"
           title="Perceptual gamma applied to every output byte. ~2.2 ≈ sRGB; lower lifts dim values, higher crushes them. Helps when the LEDs look 'binary' (mostly off or full bright).">
           γ
-          <input type="range" min={1} max={3.2} step={0.05} value={gamma} onChange={(e) => setGamma(+e.target.value)} className="w-24" />
+          <input type="range" min={1} max={10} step={0.05} value={gamma} onChange={(e) => setGamma(+e.target.value)} className="w-24" />
           <span className="w-8 text-right">{gamma.toFixed(2)}</span>
         </label>
         <label className="text-xs text-zinc-500 font-mono flex items-center gap-2">
@@ -476,9 +478,6 @@ export default function App() {
                   >{m}</button>
                 ))}
               </div>
-              {mdBandMode === 'eq12' && (
-                <span className="text-[10px] text-zinc-600">norm mode ignored — bands are already CDF-mapped</span>
-              )}
             </div>
             <div className="flex items-center gap-2 text-xs text-zinc-400 font-mono">
               <span className="w-16">norm mode</span>
@@ -500,33 +499,50 @@ export default function App() {
 
             {/* Gain dial + live meters — only relevant in robust-minmax mode.
                 Bars show the gained value the pattern is actually consuming
-                so you can see whether you've dialed in enough headroom. */}
-            {mdNormMode === 'robust-minmax' && (
-              <div className="bg-zinc-950 rounded p-2 space-y-1.5">
-                <Slider label="minmax gain" min={0.1} max={5} step={0.05} value={mdMinMaxGain} onChange={setMdMinMaxGain} />
-                <div className="grid grid-cols-4 gap-1.5">
-                  {(['drums', 'bass', 'vocals', 'other'] as const).map((stem) => {
-                    const raw = audio?.energyMinMax?.[stem] ?? 0;
-                    const gained = Math.min(1, raw * mdMinMaxGain);
-                    const clipping = raw * mdMinMaxGain >= 0.999;
-                    return (
-                      <div key={stem} className="text-[10px] font-mono">
-                        <div className="flex justify-between text-zinc-500">
-                          <span>{stem}</span>
-                          <span className={clipping ? 'text-red-400' : 'text-zinc-400'}>{gained.toFixed(2)}</span>
+                so you can see whether you've dialed in enough headroom. In
+                stems mode there are 4 bars (drums/bass/vocals/other); in
+                eq12 mode there are 12 (log-spaced FFT bands, low → high). */}
+            {mdNormMode === 'robust-minmax' && (() => {
+              // Pull raw min-max values from the audio bus for the active
+              // band source. Falls back to zeros while the bus is warming
+              // up after a track switch (envelope still streaming in).
+              const labels: string[] = mdBandMode === 'eq12'
+                ? Array.from({ length: 12 }, (_, i) => `b${i}`)
+                : ['drums', 'bass', 'vocals', 'other'];
+              const rawVals: number[] = mdBandMode === 'eq12'
+                ? (audio?.bandsMinMax ?? new Array(12).fill(0))
+                : (['drums', 'bass', 'vocals', 'other'] as const).map((s) => audio?.energyMinMax?.[s] ?? 0);
+              const gridCols = mdBandMode === 'eq12' ? 'grid-cols-6' : 'grid-cols-4';
+              return (
+                <div className="bg-zinc-950 rounded p-2 space-y-1.5">
+                  <Slider label="minmax gain" min={0.1} max={5} step={0.05} value={mdMinMaxGain} onChange={setMdMinMaxGain} />
+                  <div className={`grid ${gridCols} gap-1.5`}>
+                    {labels.map((label, i) => {
+                      const raw = rawVals[i] ?? 0;
+                      const gained = Math.min(1, raw * mdMinMaxGain);
+                      const clipping = raw * mdMinMaxGain >= 0.999;
+                      return (
+                        <div key={label} className="text-[10px] font-mono">
+                          <div className="flex justify-between text-zinc-500">
+                            <span>{label}</span>
+                            <span className={clipping ? 'text-red-400' : 'text-zinc-400'}>{gained.toFixed(2)}</span>
+                          </div>
+                          <div className="relative h-1.5 bg-zinc-900 rounded mt-0.5 overflow-hidden">
+                            {/* raw (pre-gain) shown faded behind the gained bar */}
+                            <div className="absolute inset-y-0 left-0 bg-zinc-700" style={{ width: `${raw * 100}%` }} />
+                            <div className={`absolute inset-y-0 left-0 ${clipping ? 'bg-red-500' : 'bg-emerald-500'}`} style={{ width: `${gained * 100}%` }} />
+                          </div>
                         </div>
-                        <div className="relative h-1.5 bg-zinc-900 rounded mt-0.5 overflow-hidden">
-                          {/* raw (pre-gain) shown faded behind the gained bar */}
-                          <div className="absolute inset-y-0 left-0 bg-zinc-700" style={{ width: `${raw * 100}%` }} />
-                          <div className={`absolute inset-y-0 left-0 ${clipping ? 'bg-red-500' : 'bg-emerald-500'}`} style={{ width: `${gained * 100}%` }} />
-                        </div>
-                      </div>
-                    );
-                  })}
+                      );
+                    })}
+                  </div>
+                  <div className="text-[9px] text-zinc-600 font-mono">
+                    faded = raw min-max · solid = ×gain (red = clipped at 1.0)
+                    {mdBandMode === 'eq12' && ' · b0 = lowest FFT band, b11 = highest'}
+                  </div>
                 </div>
-                <div className="text-[9px] text-zinc-600 font-mono">faded = raw min-max · solid = ×gain (red = clipped at 1.0)</div>
-              </div>
-            )}
+              );
+            })()}
 
             <Slider label="originX" min={0} max={1} step={0.01} value={mdOriginX} onChange={setMdOriginX} />
             <Slider label="originY" min={0} max={1} step={0.01} value={mdOriginY} onChange={setMdOriginY} />
