@@ -298,6 +298,35 @@ export default function App() {
   const [audioCtx, setAudioCtx] = useState<AudioContext | null>(null);
   const audioElsRef = useRef<Partial<Record<Stem, HTMLAudioElement>>>({});
   const analyzersRef = useRef<Partial<Record<Stem, AnalyserNode>>>({});
+
+  // ---- Master EQ ----
+  //
+  // 3-band shelving EQ inserted between the stem outputs and the speakers:
+  //   stems → eqInput → bass(lowshelf) → mid(peaking) → treble(highshelf) → destination
+  // Persisted via localStorage so settings survive refresh. Filter nodes are
+  // created alongside the AudioContext (see effect below) so eqInputRef is
+  // populated *before* setAudioCtx commits — that way useStemAudioGraph
+  // wires to the EQ input on its first run, no race.
+  const [eqBass, setEqBass] = useState(() => {
+    try { const v = localStorage.getItem('musicbox:eq.bass'); return v == null ? 0 : +v; } catch { return 0; }
+  });
+  const [eqMid, setEqMid] = useState(() => {
+    try { const v = localStorage.getItem('musicbox:eq.mid'); return v == null ? 0 : +v; } catch { return 0; }
+  });
+  const [eqTreble, setEqTreble] = useState(() => {
+    try { const v = localStorage.getItem('musicbox:eq.treble'); return v == null ? 0 : +v; } catch { return 0; }
+  });
+  const eqInputRef = useRef<GainNode | null>(null);
+  const eqBassRef = useRef<BiquadFilterNode | null>(null);
+  const eqMidRef = useRef<BiquadFilterNode | null>(null);
+  const eqTrebleRef = useRef<BiquadFilterNode | null>(null);
+  useEffect(() => { try { localStorage.setItem('musicbox:eq.bass', String(eqBass)); } catch {} }, [eqBass]);
+  useEffect(() => { try { localStorage.setItem('musicbox:eq.mid', String(eqMid)); } catch {} }, [eqMid]);
+  useEffect(() => { try { localStorage.setItem('musicbox:eq.treble', String(eqTreble)); } catch {} }, [eqTreble]);
+  // Push live slider values to the filter nodes whenever they change.
+  useEffect(() => { if (eqBassRef.current) eqBassRef.current.gain.value = eqBass; }, [eqBass]);
+  useEffect(() => { if (eqMidRef.current) eqMidRef.current.gain.value = eqMid; }, [eqMid]);
+  useEffect(() => { if (eqTrebleRef.current) eqTrebleRef.current.gain.value = eqTreble; }, [eqTreble]);
   // Scratch buffers reused every frame (avoid allocation)
   const scratchDb = useRef(new Float32Array(FREQ_BINS));
   const scratchMag = useRef(new Float32Array(FREQ_BINS));
@@ -419,6 +448,34 @@ export default function App() {
     const ctx = new ctor();
     const sr = ctx.sampleRate;
     barBinMapRef.current = buildBarBinMap(NUM_BARS, FREQ_BINS, sr);
+
+    // Build the master EQ chain BEFORE committing audioCtx state. That way
+    // when useStemAudioGraph sees the new audioCtx on the next render,
+    // eqInputRef.current is already populated and stems wire directly to
+    // the EQ input on their first connection — no late-rewiring needed.
+    const input = ctx.createGain();
+    const bass = ctx.createBiquadFilter();
+    bass.type = 'lowshelf';
+    bass.frequency.value = 200;
+    bass.gain.value = eqBass;
+    const mid = ctx.createBiquadFilter();
+    mid.type = 'peaking';
+    mid.frequency.value = 1000;
+    mid.Q.value = 0.7;
+    mid.gain.value = eqMid;
+    const treble = ctx.createBiquadFilter();
+    treble.type = 'highshelf';
+    treble.frequency.value = 4000;
+    treble.gain.value = eqTreble;
+    input.connect(bass);
+    bass.connect(mid);
+    mid.connect(treble);
+    treble.connect(ctx.destination);
+    eqInputRef.current = input;
+    eqBassRef.current = bass;
+    eqMidRef.current = mid;
+    eqTrebleRef.current = treble;
+
     setAudioCtx(ctx);
   }, [selected, audioCtx]);
 
@@ -776,6 +833,41 @@ export default function App() {
             className="text-[10px] font-mono px-3 py-1.5 border-t border-zinc-800 text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300"
           >clear queue</button>
         )}
+
+        {/* Master 3-band EQ — bass (200 Hz lowshelf) / mid (1 kHz peaking,
+            Q=0.7) / treble (4 kHz highshelf). Each slider ±15 dB. Applies
+            to all stems before they hit the speakers. Click a label to
+            reset that band to 0; click "EQ" to reset all three. */}
+        <div className="border-t border-zinc-800 px-3 py-2 space-y-1.5">
+          <div className="flex items-center justify-between">
+            <button
+              onClick={() => { setEqBass(0); setEqMid(0); setEqTreble(0); }}
+              className="text-[10px] uppercase tracking-wider text-zinc-500 hover:text-zinc-300 font-mono"
+              title="Reset all bands to 0 dB"
+            >EQ</button>
+            <span className="text-[9px] text-zinc-700 font-mono">±15 dB</span>
+          </div>
+          {([
+            { label: 'bass',   value: eqBass,   set: setEqBass   },
+            { label: 'mid',    value: eqMid,    set: setEqMid    },
+            { label: 'treble', value: eqTreble, set: setEqTreble },
+          ] as const).map((band) => (
+            <div key={band.label} className="flex items-center gap-2 text-[10px] font-mono">
+              <button
+                onClick={() => band.set(0)}
+                className="w-10 text-left text-zinc-500 hover:text-zinc-300"
+                title={`Reset ${band.label} to 0 dB`}
+              >{band.label}</button>
+              <input type="range" min={-15} max={15} step={0.5}
+                value={band.value}
+                onChange={(e) => band.set(+e.target.value)}
+                className="flex-1 accent-zinc-400" />
+              <span className={`w-9 text-right tabular-nums ${band.value === 0 ? 'text-zinc-600' : band.value > 0 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                {band.value > 0 ? '+' : ''}{band.value.toFixed(1)}
+              </span>
+            </div>
+          ))}
+        </div>
       </aside>
 
       <aside className="w-80 shrink-0 border-r border-zinc-800 flex flex-col">
@@ -863,6 +955,7 @@ export default function App() {
                 url={hasStems ? `/api/library/${selected.id}/stem/${stem}` : `/api/library/${selected.id}/audio`}
                 volume={stemGain[stem]}
                 audioCtx={audioCtx}
+                audioDest={eqInputRef.current}
                 // No auto-repeat — when a track ends and the queue is empty,
                 // playback just stops. Queue head advance still works.
                 loop={false}
@@ -1019,7 +1112,11 @@ const MEDIA_GRAPH = new WeakMap<
  */
 function useStemAudioGraph(
   audioEl: HTMLAudioElement | null,
-  audioCtx: AudioContext | null
+  audioCtx: AudioContext | null,
+  // Where the stem's gain output feeds. Pass the master-EQ input here so
+  // every stem's audio flows through the shared filter chain on its way to
+  // the speakers. If null/undefined, falls back to audioCtx.destination.
+  destination: AudioNode | null | undefined,
 ): { analyser: AnalyserNode | null; gain: GainNode | null } {
   const [nodes, setNodes] = useState<{ analyser: AnalyserNode | null; gain: GainNode | null }>({
     analyser: null, gain: null,
@@ -1028,6 +1125,7 @@ function useStemAudioGraph(
   useEffect(() => {
     if (!audioEl || !audioCtx) return;
     let entry = MEDIA_GRAPH.get(audioEl);
+    const dest = destination ?? audioCtx.destination;
     if (!entry) {
       try {
         const source = audioCtx.createMediaElementSource(audioEl);
@@ -1037,27 +1135,36 @@ function useStemAudioGraph(
         const gain = audioCtx.createGain();
         source.connect(analyser);
         analyser.connect(gain);
-        gain.connect(audioCtx.destination);
+        gain.connect(dest);
         entry = { source, analyser, gain };
         MEDIA_GRAPH.set(audioEl, entry);
       } catch (err) {
         console.error('useStemAudioGraph: setup failed', err);
         return;
       }
+    } else {
+      // Re-pointing the existing graph at a new destination (e.g. when the
+      // EQ chain is rebuilt). Disconnect prior wiring; reconnect to the
+      // new sink. Safe to call even if not previously connected.
+      try { entry.gain.disconnect(); } catch { /* ignore */ }
+      entry.gain.connect(dest);
     }
     setNodes({ analyser: entry.analyser, gain: entry.gain });
     return () => setNodes({ analyser: null, gain: null });
-  }, [audioEl, audioCtx]);
+  }, [audioEl, audioCtx, destination]);
 
   return nodes;
 }
 
 function StemTrack({
-  url, volume, audioCtx, onAudio, onAnalyser, onEnded, onSeeked, loop,
+  url, volume, audioCtx, audioDest, onAudio, onAnalyser, onEnded, onSeeked, loop,
 }: {
   url: string;
   volume: number;
   audioCtx: AudioContext | null;
+  // Shared master-EQ input node from App. Stems plug into this instead of
+  // audioCtx.destination so they pass through the bass/mid/treble filters.
+  audioDest: AudioNode | null;
   onAudio: (el: HTMLAudioElement | null) => void;
   onAnalyser: (a: AnalyserNode | null) => void;
   // Play/pause state is polled in the rAF tick (setPlaying ←
@@ -1069,7 +1176,7 @@ function StemTrack({
   loop?: boolean;
 }) {
   const [el, setEl] = useState<HTMLAudioElement | null>(null);
-  const { analyser, gain } = useStemAudioGraph(el, audioCtx);
+  const { analyser, gain } = useStemAudioGraph(el, audioCtx, audioDest);
 
   // Expose element and analyser upward. Refs are kept in sync via these.
   useEffect(() => { onAudio(el); }, [el, onAudio]);

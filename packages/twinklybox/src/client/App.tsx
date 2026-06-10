@@ -58,19 +58,12 @@ interface AudioState {
 
 interface SourceState {
   musicboxReachable: boolean;
-  manualOverride: boolean;
-  synthActive: boolean;
-  synth: { mode: SynthMode; hz: number; amplitude: number } | null;
   currentTrackId: string | null;
   trackName: string | null;
   cachedTracks: string[];
   inferredPosition: number;
   playing: boolean;
 }
-
-type SynthMode = 'sine' | 'pulse' | 'all-on' | 'all-sine';
-
-interface LibraryTrack { id: string; name: string; artists: string[]; duration_ms?: number; analyzed: boolean }
 
 async function api<T>(path: string, body?: unknown): Promise<T> {
   const r = await fetch(`/api${path}`, {
@@ -144,33 +137,15 @@ export default function App() {
   // Audio source state
   const [audio, setAudio] = useState<AudioState | null>(null);
   const [sourceState, setSourceState] = useState<SourceState | null>(null);
-  const [library, setLibrary] = useState<LibraryTrack[]>([]);
-  const [manualTrackId, setManualTrackId] = usePersistedState('manual.trackId', '');
-  const [manualPosition, setManualPosition] = useState(0);
-  const [manualPlaying, setManualPlaying] = useState(true);
-  // While the user is actively dragging the scrub bar, we ignore server-
-  // pushed position updates so the slider doesn't fight the drag. Off
-  // again on pointer-up.
-  const [scrubbing, setScrubbing] = useState(false);
-
-  // Synth source state
-  const [synthMode, setSynthMode] = usePersistedState<SynthMode>('synth.mode', 'pulse');
-  const [synthHz, setSynthHz] = usePersistedState('synth.hz', 1);
-  const [synthAmp, setSynthAmp] = usePersistedState('synth.amp', 1);
 
   // Audio-bus smoothing — split into attack (α applied when rising) and
-  // decay (when falling). Matches musicbox bindings.
+  // decay (when falling). Persisted in localStorage; the push-on-change
+  // effect below runs on mount with the persisted values, so the server
+  // picks them up at startup (server only holds smoothing in memory and
+  // resets to 0/0 on restart -- we don't want to round-trip and inherit
+  // its blank state).
   const [attackSmoothing, setAttackSmoothing] = usePersistedState('bus.attack', 0);
   const [decaySmoothing, setDecaySmoothing] = usePersistedState('bus.decay', 0);
-  // Hydrate from server on mount so the UI reflects what's actually applied
-  // (in case settings on disk differ from server defaults).
-  useEffect(() => {
-    api<{ attack: number; decay: number }>('/source/smoothing')
-      .then((r) => { setAttackSmoothing(r.attack); setDecaySmoothing(r.decay); })
-      .catch(() => {});
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  // Push to server whenever either changes.
   useEffect(() => {
     api('/source/smoothing', { attack: attackSmoothing, decay: decaySmoothing }).catch(() => {});
   }, [attackSmoothing, decaySmoothing]);
@@ -225,44 +200,6 @@ export default function App() {
     }, 500);
     return () => clearInterval(t);
   }, []);
-
-  // Fetch musicbox library so we can populate the manual-scrub track picker.
-  // Hits port 3002 directly since vite's /api proxy points at twinklybox.
-  useEffect(() => {
-    fetch('http://localhost:3002/api/library')
-      .then((r) => r.ok ? r.json() : [])
-      .then((rows: LibraryTrack[]) => setLibrary(rows.filter((r) => r.analyzed)))
-      .catch(() => {});
-  }, []);
-
-  const applyManual = (overrides?: Partial<{ trackId: string; position: number; playing: boolean }>) => {
-    const trackId = overrides?.trackId ?? manualTrackId;
-    if (!trackId) return;
-    const position = overrides?.position ?? manualPosition;
-    const playing = overrides?.playing ?? manualPlaying;
-    api('/source/manual', { trackId, position, playing }).catch(console.error);
-  };
-  const clearManual = () => {
-    api('/source/manual', { trackId: null }).catch(console.error);
-  };
-  const applySynth = (overrides?: Partial<{ mode: SynthMode; hz: number; amplitude: number }>) => {
-    const mode = overrides?.mode ?? synthMode;
-    const hz = overrides?.hz ?? synthHz;
-    const amplitude = overrides?.amplitude ?? synthAmp;
-    api('/source/synth', { mode, hz, amplitude }).catch(console.error);
-  };
-  const clearSynth = () => {
-    api('/source/synth', { mode: null }).catch(console.error);
-  };
-
-  // Mirror server-side playhead into the slider while the user isn't
-  // scrubbing. Without this the scrubber sits frozen at whatever the user
-  // last set, even though the server's inferred position keeps advancing.
-  useEffect(() => {
-    if (scrubbing) return;
-    if (!sourceState?.manualOverride) return;
-    if (audio?.position != null) setManualPosition(audio.position);
-  }, [audio?.position, scrubbing, sourceState?.manualOverride]);
 
   // Push pattern updates to the server whenever any param changes.
   useEffect(() => {
@@ -578,13 +515,9 @@ export default function App() {
         <div className="flex items-center justify-between text-xs font-mono">
           <span className="text-zinc-400">audio source</span>
           <span className="text-[10px] text-zinc-500">
-            {sourceState?.synthActive
-              ? <span className="text-cyan-400">synth · {sourceState.synth?.mode} @ {sourceState.synth?.hz}Hz</span>
-              : sourceState?.manualOverride
-                ? <span className="text-amber-400">manual override</span>
-                : sourceState?.musicboxReachable
-                  ? <span className="text-emerald-400">following musicbox</span>
-                  : <span className="text-zinc-600">no source</span>}
+            {sourceState?.musicboxReachable
+              ? <span className="text-emerald-400">following musicbox</span>
+              : <span className="text-zinc-600">no source</span>}
           </span>
         </div>
 
@@ -624,113 +557,6 @@ export default function App() {
           </div>
         )}
 
-        {/* Manual scrub: pick a library track + position to drive megadrome
-            without needing musicbox to be playing. Useful for testing. */}
-        <div className="pt-2 border-t border-zinc-800/50 space-y-1.5">
-          <div className="text-[10px] font-mono text-zinc-500">manual scrub (overrides musicbox follow)</div>
-          <div className="flex items-center gap-2 text-[10px] font-mono min-w-0">
-            <select
-              value={manualTrackId}
-              onChange={(e) => setManualTrackId(e.target.value)}
-              className="flex-1 min-w-0 max-w-full bg-zinc-800 rounded px-2 py-1 text-xs"
-            >
-              <option value="">— pick a track —</option>
-              {library.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.artists.join(', ')} — {t.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="flex items-center gap-2 text-[10px] font-mono">
-            <span className="w-16 text-zinc-400">position</span>
-            <input type="range" min={0}
-              max={Math.max(60, ((library.find((t) => t.id === manualTrackId)?.duration_ms ?? 600000) / 1000))}
-              step={0.1}
-              value={manualPosition}
-              onPointerDown={() => setScrubbing(true)}
-              onPointerUp={() => setScrubbing(false)}
-              onPointerCancel={() => setScrubbing(false)}
-              onChange={(e) => {
-                const v = +e.target.value;
-                setManualPosition(v);
-                if (manualTrackId) applyManual({ position: v });
-              }}
-              className="flex-1" />
-            <span className="w-12 text-right">{manualPosition.toFixed(1)}s</span>
-          </div>
-          <div className="flex gap-2">
-            <button
-              onClick={() => applyManual()}
-              disabled={!manualTrackId}
-              className="px-2 py-1 rounded text-[10px] font-mono bg-amber-600 hover:bg-amber-500 disabled:opacity-40"
-            >set as source</button>
-            <button
-              onClick={() => {
-                const next = !manualPlaying;
-                setManualPlaying(next);
-                if (sourceState?.manualOverride) applyManual({ playing: next });
-              }}
-              disabled={!sourceState?.manualOverride}
-              className={`px-2 py-1 rounded text-[10px] font-mono disabled:opacity-40 ${manualPlaying ? 'bg-zinc-700 hover:bg-zinc-600' : 'bg-emerald-700 hover:bg-emerald-600'}`}
-              title={manualPlaying ? 'Freeze the playhead (audio bus stops advancing)' : 'Resume playhead motion'}
-            >{manualPlaying ? '⏸ pause' : '▶ play'}</button>
-            <button
-              onClick={clearManual}
-              className="px-2 py-1 rounded text-[10px] font-mono bg-zinc-800 hover:bg-zinc-700"
-            >clear / follow musicbox</button>
-          </div>
-        </div>
-
-        {/* Synthetic source — fakes the audio bus with a known wave so
-            audio-reactive patterns can be diagnosed without real audio. */}
-        <div className="pt-2 border-t border-zinc-800/50 space-y-1.5">
-          <div className="text-[10px] font-mono text-zinc-500">synth source (overrides everything)</div>
-          <div className="flex items-center gap-2 text-[10px] font-mono">
-            <span className="w-16 text-zinc-400">mode</span>
-            <div className="flex flex-wrap gap-1">
-              {(['sine', 'pulse', 'all-on', 'all-sine'] as SynthMode[]).map((m) => (
-                <button
-                  key={m}
-                  onClick={() => { setSynthMode(m); applySynth({ mode: m }); }}
-                  className={`px-2 py-0.5 rounded text-[10px] ${synthMode === m && sourceState?.synthActive ? 'bg-cyan-600 text-white' : 'bg-zinc-800 hover:bg-zinc-700'}`}
-                  title={
-                    m === 'sine' ? 'Bass = sin(2πft). Others held at 0.1. Tests megadrome bass-radial pulse continuously.'
-                    : m === 'pulse' ? 'Bass spikes briefly each cycle (sharp attack, fast decay). Best diagnostic for the radial-pulse propagation.'
-                    : m === 'all-on' ? 'All stems pinned high. Tests max brightness / steady state.'
-                    : 'All stems oscillate together. Tests combined-energy brightness modulation.'
-                  }
-                >{m}</button>
-              ))}
-            </div>
-          </div>
-          <div className="flex items-center gap-2 text-[10px] font-mono">
-            <span className="w-16 text-zinc-400">hz</span>
-            <input type="range" min={0.1} max={5} step={0.05}
-              value={synthHz}
-              onChange={(e) => { const v = +e.target.value; setSynthHz(v); if (sourceState?.synthActive) applySynth({ hz: v }); }}
-              className="flex-1" />
-            <span className="w-12 text-right">{synthHz.toFixed(2)}</span>
-          </div>
-          <div className="flex items-center gap-2 text-[10px] font-mono">
-            <span className="w-16 text-zinc-400">amplitude</span>
-            <input type="range" min={0} max={1} step={0.01}
-              value={synthAmp}
-              onChange={(e) => { const v = +e.target.value; setSynthAmp(v); if (sourceState?.synthActive) applySynth({ amplitude: v }); }}
-              className="flex-1" />
-            <span className="w-12 text-right">{synthAmp.toFixed(2)}</span>
-          </div>
-          <div className="flex gap-2">
-            <button
-              onClick={() => applySynth()}
-              className="px-2 py-1 rounded text-[10px] font-mono bg-cyan-600 hover:bg-cyan-500"
-            >enable synth</button>
-            <button
-              onClick={clearSynth}
-              className="px-2 py-1 rounded text-[10px] font-mono bg-zinc-800 hover:bg-zinc-700"
-            >disable</button>
-          </div>
-        </div>
       </section>
 
       {/* 3D viewer — mirrors the LED frame going out the UDP wire. */}
