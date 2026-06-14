@@ -1,0 +1,8 @@
+# WLED source checkouts (cloned by setup, not vendored)
+WLED/
+WLED-0.15.3/
+# PlatformIO build output + toolchain
+.pio/
+.venv/
+# Firmware/config backups (binary, machine-specific)
+backups/

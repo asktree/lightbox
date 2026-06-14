@@ -21,9 +21,13 @@
 // couple seconds (its `arls_timeout` setting, typically ~2.5s).
 
 import { createSocket, Socket } from 'dgram';
+import { performance } from 'node:perf_hooks';
 import type { LedDriver, LedLayout, NormCoord } from './led-driver.js';
 
 const DDP_PORT = 4048;
+// Default port the timecode_buffer usermod listens on (separate from 4048 so
+// the firmware can run both the stock immediate path and the buffered path).
+const DDP_BUFFER_PORT = 4049;
 // 1440 bytes payload keeps each packet well under MTU 1500 once you add
 // IP (20) + UDP (8) + DDP (10) headers (= 38, total 1478). 1440 is the
 // de-facto standard chunk size in DDP installations.
@@ -31,6 +35,11 @@ const DDP_MAX_PAYLOAD = 1440;
 
 const DDP_FLAG_VER1 = 0x40;
 const DDP_FLAG_PUSH = 0x01;
+// Timecode-present flag. When set, 4 big-endian bytes follow the 10-byte
+// header (before pixel data) carrying a sender-clock millisecond value. Stock
+// WLED parses past these bytes and ignores them; our timecode_buffer usermod
+// uses them to schedule jitter-free playout.
+const DDP_FLAG_TIME = 0x10;
 const DDP_DATA_TYPE_RGB = 0x01;
 const DDP_OUTPUT_ID = 1;
 
@@ -57,6 +66,11 @@ export class WledDriver implements LedDriver {
   // DDP sequence number (1..15, wraps; 0 reserved per spec). Incremented
   // per frame so WLED can reject stale fragments.
   private ddpSeq = 0;
+  // Timecode buffer mode. When on, frames are sent to DDP_BUFFER_PORT with a
+  // per-frame timecode so the timecode_buffer usermod can absorb WiFi jitter
+  // by playing each frame out on a fixed delay. Off = stock immediate DDP.
+  private bufferMode = false;
+  private bufferPort = DDP_BUFFER_PORT;
   // Scratch buffer for the pixel payload — reused across frames to avoid
   // GC churn at high frame rates.
   private payloadScratch: Uint8Array | null = null;
@@ -85,6 +99,16 @@ export class WledDriver implements LedDriver {
   }
 
   getLayout(): LedLayout | null { return this.layout; }
+
+  // Toggle timecode buffering. `on` routes frames to the usermod's buffer port
+  // with per-frame timecodes; `off` reverts to stock immediate DDP on 4048.
+  // The 500ms-ish playout delay lives on the device, not here.
+  setBufferMode(on: boolean, opts?: { port?: number }): void {
+    this.bufferMode = on;
+    if (opts?.port) this.bufferPort = opts.port;
+  }
+
+  get isBuffered(): boolean { return this.bufferMode; }
 
   // WLED auto-detects realtime — no handshake. We just track the streaming
   // flag locally so the FrameLoop's gating is honored.
@@ -117,8 +141,18 @@ export class WledDriver implements LedDriver {
     }
 
     // Sequence rolls 1..15. Skipping 0 matches the DDP spec's "no
-    // sequence" reservation.
+    // sequence" reservation. All fragments of one frame share this value —
+    // the usermod groups fragments into a frame by sequence number.
     this.ddpSeq = (this.ddpSeq % 15) + 1;
+
+    // In buffer mode every fragment of this frame carries the SAME timecode:
+    // a monotonic sender-clock millisecond stamp, taken once per frame. The
+    // usermod schedules playout off this value. uint32 wraps after ~49 days;
+    // the usermod's comparisons are wrap-safe so that's harmless.
+    const buffered = this.bufferMode;
+    const timecode = buffered ? Math.round(performance.now()) >>> 0 : 0;
+    const destPort = buffered ? this.bufferPort : DDP_PORT;
+    const tcLen = buffered ? 4 : 0;
 
     // Fragment into chunks ≤ DDP_MAX_PAYLOAD. PUSH only on the last
     // fragment so WLED commits to LEDs atomically per frame.
@@ -127,16 +161,17 @@ export class WledDriver implements LedDriver {
       const offset = i * DDP_MAX_PAYLOAD;
       const len = Math.min(DDP_MAX_PAYLOAD, payloadLen - offset);
       const isLast = i === numChunks - 1;
-      const pkt = Buffer.alloc(10 + len);
-      pkt[0] = DDP_FLAG_VER1 | (isLast ? DDP_FLAG_PUSH : 0);
+      const pkt = Buffer.alloc(10 + tcLen + len);
+      pkt[0] = DDP_FLAG_VER1 | (buffered ? DDP_FLAG_TIME : 0) | (isLast ? DDP_FLAG_PUSH : 0);
       pkt[1] = this.ddpSeq;
       pkt[2] = DDP_DATA_TYPE_RGB;
       pkt[3] = DDP_OUTPUT_ID;
       pkt.writeUInt32BE(offset, 4);
       pkt.writeUInt16BE(len, 8);
-      // Copy this chunk's payload bytes in.
-      Buffer.from(payload.buffer, payload.byteOffset + offset, len).copy(pkt, 10);
-      this.socket.send(pkt, DDP_PORT, this.host);
+      if (buffered) pkt.writeUInt32BE(timecode, 10);
+      // Copy this chunk's payload bytes in (after the optional timecode).
+      Buffer.from(payload.buffer, payload.byteOffset + offset, len).copy(pkt, 10 + tcLen);
+      this.socket.send(pkt, destPort, this.host);
     }
   }
 
@@ -150,7 +185,9 @@ export class WledDriver implements LedDriver {
 // Map a W×H matrix into normalized 3D coords. Strand order is row-major
 // (linear index i → row=i/W, col=i%W). z=0 = flat plane. y is flipped so
 // row 0 is at the top of the layout (matches WLED's matrix convention).
-function wledMatrixLayout(w: number, h: number): LedLayout {
+// Exported so the serial (Adalight) driver can reuse it — same WLED, just
+// a different transport for the pixel bytes.
+export function wledMatrixLayout(w: number, h: number): LedLayout {
   const coords: NormCoord[] = [];
   for (let i = 0; i < w * h; i++) {
     const col = i % w;

@@ -1,0 +1,5 @@
+{
+  "name": "timecode_buffer",
+  "build": { "libArchive": false },
+  "dependencies": {}
+}

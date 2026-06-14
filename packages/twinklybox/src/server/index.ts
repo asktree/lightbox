@@ -4,11 +4,13 @@
 import express from 'express';
 import { TwinklyDevice } from './twinkly.js';
 import { WledDriver } from './wled.js';
+import { SerialDriver } from './serial.js';
 import type { LedDriver } from './led-driver.js';
 import { FrameLoop } from './frame-loop.js';
 import { type Pattern } from './patterns.js';
 import { startFollower, setManualPlayback, getFollowerState, setSynth, type SynthParams } from './musicbox-follower.js';
 import { audioBus, getSmoothing, setSmoothing } from './audio-bus.js';
+import { setMicActive, pushMicFrame, getMicStatus } from './mic-source.js';
 
 const PORT = 3010;
 
@@ -20,12 +22,19 @@ let loop: FrameLoop | null = null;
 let currentPattern: Pattern | null = null;
 
 // Known targets we might auto-connect to. First match wins on boot.
-const KNOWN_TARGETS: { kind: 'twinkly' | 'wled'; host: string }[] = [
-  { kind: 'wled', host: '192.168.0.220' },
+type TargetKind = 'twinkly' | 'wled' | 'serial';
+// Tried in order on boot; first reachable wins. `serial` is listed first so
+// that once the USB-C cable is plugged in it's preferred (wired = no WiFi
+// jitter); if no cable is present its connect() throws and we fall through
+// to the same WLED over DDP. host is the WLED's IP either way (serial still
+// uses HTTP for LED count + matrix metadata).
+const KNOWN_TARGETS: { kind: TargetKind; host: string }[] = [
+  { kind: 'serial', host: '192.168.20.243' },
+  { kind: 'wled', host: '192.168.20.243' },
   { kind: 'twinkly', host: '192.168.11.253' },
 ];
 
-async function connectDriver(kind: 'twinkly' | 'wled', host: string): Promise<LedDriver> {
+async function connectDriver(kind: TargetKind, host: string): Promise<LedDriver> {
   // If we're already on this exact target, return it; otherwise tear the
   // old one down before standing up the new one.
   if (driver && driver.kind === kind && driver.host === host && loop) return driver;
@@ -37,6 +46,8 @@ async function connectDriver(kind: 'twinkly' | 'wled', host: string): Promise<Le
   }
   const d: LedDriver = kind === 'wled'
     ? await WledDriver.connect(host)
+    : kind === 'serial'
+    ? await SerialDriver.connect(host)
     : await (async () => { const t = new TwinklyDevice(host); await t.connect(); return t; })();
   driver = d;
   loop = new FrameLoop(d);
@@ -81,7 +92,7 @@ app.get('/api/devices', async (_req, res) => {
 });
 
 app.post('/api/connect', async (req, res) => {
-  const kind = (req.body?.kind ?? 'twinkly') as 'twinkly' | 'wled';
+  const kind = (req.body?.kind ?? 'twinkly') as TargetKind;
   const host = (req.body?.host as string) ?? (req.body?.ip as string) ?? KNOWN_TARGETS.find((t) => t.kind === kind)?.host;
   if (!host) return res.status(400).json({ ok: false, error: 'host required' });
   try {
@@ -107,6 +118,20 @@ app.post('/api/stream/stop', async (_req, res) => {
 app.get('/api/stream/state', (_req, res) => {
   if (!loop) return res.json({ running: false, hz: 0, frameCount: 0, patternKind: null });
   res.json(loop.getStats());
+});
+
+// Toggle the WLED timecode buffer mode (jitter absorption via the
+// timecode_buffer usermod). No-op for non-WLED drivers. Body: { on, port? }.
+app.post('/api/buffer', (req, res) => {
+  if (!driver) return res.status(400).json({ error: 'not connected' });
+  if (!(driver instanceof WledDriver)) {
+    return res.status(400).json({ error: `buffer mode is WLED-only (driver is ${driver.kind})` });
+  }
+  const on = req.body?.on !== false; // default true
+  const port = typeof req.body?.port === 'number' ? req.body.port : undefined;
+  driver.setBufferMode(on, port ? { port } : undefined);
+  console.log(`[driver] timecode buffer mode ${on ? 'ON' : 'off'}${port ? ` (port ${port})` : ''}`);
+  res.json({ buffered: driver.isBuffered });
 });
 
 app.post('/api/pattern', (req, res) => {
@@ -211,6 +236,28 @@ app.post('/api/source/synth', (req, res) => {
   setSynth({ mode: body.mode, hz, amplitude: amp });
   res.json({ synthActive: true, mode: body.mode, hz, amplitude: amp });
 });
+
+// Live mic source. The browser client captures the machine's microphone,
+// FFTs it, and streams 12-band frames here. Toggle on/off with
+// POST /api/source/mic { active }; stream raw band frames to
+// POST /api/source/mic/frame { bands: number[12] } while active. Mic
+// overrides the musicbox follower (but not synth). Normalization is a 30s
+// rolling window — see mic-source.ts.
+app.post('/api/source/mic', (req, res) => {
+  const active = !!req.body?.active;
+  if (active) setSynth(null); // mic + synth are mutually exclusive overrides
+  setMicActive(active);
+  res.json({ micActive: active, ...getMicStatus() });
+});
+
+app.post('/api/source/mic/frame', (req, res) => {
+  const bands = req.body?.bands;
+  if (!Array.isArray(bands)) return res.status(400).json({ error: 'bands array required' });
+  pushMicFrame(bands.map(Number));
+  res.json({ ok: true });
+});
+
+app.get('/api/source/mic', (_req, res) => res.json(getMicStatus()));
 
 app.post('/api/source/manual', (req, res) => {
   const body = req.body ?? {};
