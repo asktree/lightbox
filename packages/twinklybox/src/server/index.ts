@@ -11,6 +11,7 @@ import { type Pattern } from './patterns.js';
 import { startFollower, setManualPlayback, getFollowerState, setSynth, type SynthParams } from './musicbox-follower.js';
 import { audioBus, getSmoothing, setSmoothing } from './audio-bus.js';
 import { setMicActive, pushMicFrame, getMicStatus } from './mic-source.js';
+import { startSyscap, stopSyscap, setSyscapDelay, getSyscapStatus } from './syscap-source.js';
 
 const PORT = 3010;
 
@@ -34,6 +35,17 @@ const KNOWN_TARGETS: { kind: TargetKind; host: string }[] = [
   { kind: 'twinkly', host: '192.168.11.253' },
 ];
 
+// Server-level buffer preference (NOT on the driver — drivers are rebuilt on
+// every reconnect/restart and would lose it). Re-applied to whatever WLED
+// driver is current via applyBufferPref().
+let bufferEnabled = false;
+let bufferPort: number | undefined;
+function applyBufferPref(): void {
+  if (driver instanceof WledDriver) {
+    driver.setBufferMode(bufferEnabled, bufferPort ? { port: bufferPort } : undefined);
+  }
+}
+
 async function connectDriver(kind: TargetKind, host: string): Promise<LedDriver> {
   // If we're already on this exact target, return it; otherwise tear the
   // old one down before standing up the new one.
@@ -54,6 +66,7 @@ async function connectDriver(kind: TargetKind, host: string): Promise<LedDriver>
   const layout = d.getLayout();
   console.log(`[driver] connected ${kind}@${host} — "${d.name}", ${d.numLeds} LEDs (${d.bytesPerLed === 4 ? 'RGBW' : 'RGB'}), layout=${layout ? `${layout.coords.length} pts (${layout.source})` : 'none'}`);
   if (currentPattern) loop.setPattern(currentPattern);
+  applyBufferPref(); // re-assert buffer mode on the freshly-built driver
   return d;
 }
 
@@ -122,16 +135,19 @@ app.get('/api/stream/state', (_req, res) => {
 
 // Toggle the WLED timecode buffer mode (jitter absorption via the
 // timecode_buffer usermod). No-op for non-WLED drivers. Body: { on, port? }.
+// The preference is server-level and re-applied on every WLED (re)connect via
+// applyBufferPref() in connectDriver — so it survives target switches and the
+// tsx-watch dev restarts that otherwise drop it.
 app.post('/api/buffer', (req, res) => {
-  if (!driver) return res.status(400).json({ error: 'not connected' });
-  if (!(driver instanceof WledDriver)) {
-    return res.status(400).json({ error: `buffer mode is WLED-only (driver is ${driver.kind})` });
-  }
-  const on = req.body?.on !== false; // default true
-  const port = typeof req.body?.port === 'number' ? req.body.port : undefined;
-  driver.setBufferMode(on, port ? { port } : undefined);
-  console.log(`[driver] timecode buffer mode ${on ? 'ON' : 'off'}${port ? ` (port ${port})` : ''}`);
-  res.json({ buffered: driver.isBuffered });
+  bufferEnabled = req.body?.on !== false; // default true
+  if (typeof req.body?.port === 'number') bufferPort = req.body.port;
+  applyBufferPref();
+  console.log(`[driver] timecode buffer mode ${bufferEnabled ? 'ON' : 'off'}${bufferPort ? ` (port ${bufferPort})` : ''}`);
+  res.json({ buffered: driver instanceof WledDriver ? driver.isBuffered : false, bufferEnabled, port: bufferPort ?? null });
+});
+
+app.get('/api/buffer', (_req, res) => {
+  res.json({ buffered: driver instanceof WledDriver ? driver.isBuffered : false, bufferEnabled, port: bufferPort ?? null });
 });
 
 app.post('/api/pattern', (req, res) => {
@@ -258,6 +274,26 @@ app.post('/api/source/mic/frame', (req, res) => {
 });
 
 app.get('/api/source/mic', (_req, res) => res.json(getMicStatus()));
+
+// Live system-audio source ("sync mode"). Captures the Mac's output mix via
+// the native ScreenCaptureKit helper and drives megadrome on a delay matched
+// to playback latency (AirPlay ~2s) so lights sync to what's heard.
+//   POST /api/source/syscap { active, delayMs? }  — start/stop + set delay
+//   GET  /api/source/syscap                        — status
+app.post('/api/source/syscap', (req, res) => {
+  const active = !!req.body?.active;
+  if (typeof req.body?.delayMs === 'number') setSyscapDelay(req.body.delayMs);
+  if (active) { setSynth(null); setMicActive(false); } // single live override
+  if (active) {
+    const r = startSyscap();
+    if (!r.ok) return res.status(500).json({ error: r.error ?? 'failed to start syscap helper' });
+  } else {
+    stopSyscap();
+  }
+  res.json(getSyscapStatus());
+});
+
+app.get('/api/source/syscap', (_req, res) => res.json(getSyscapStatus()));
 
 app.post('/api/source/manual', (req, res) => {
   const body = req.body ?? {};

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { DeviceViewer } from './components/DeviceViewer';
+import { useMicSource } from './useMicSource';
 
 // Persisted state — same shape as useState but writes to localStorage so
 // slider settings survive a refresh. Key is scoped to twinklybox so it
@@ -28,7 +29,7 @@ function usePersistedState<T>(key: string, initial: T): [T, React.Dispatch<React
 type PatternKind = 'solid' | 'gradient' | 'perlin' | 'planes' | 'strobe' | 'megadrome';
 type Axis = 'x' | 'y' | 'z' | 'index';
 
-type DriverKind = 'twinkly' | 'wled';
+type DriverKind = 'twinkly' | 'wled' | 'serial';
 interface DeviceInfo {
   kind: DriverKind;
   host: string;
@@ -63,6 +64,8 @@ interface SourceState {
   cachedTracks: string[];
   inferredPosition: number;
   playing: boolean;
+  micActive?: boolean;
+  micFresh?: boolean;
 }
 
 async function api<T>(path: string, body?: unknown): Promise<T> {
@@ -130,13 +133,42 @@ export default function App() {
   const [mdBaseline, setMdBaseline] = usePersistedState('md.baseline', 0);
   const [mdPropGain, setMdPropGain] = usePersistedState('md.propGain', 0);
   const [mdPropDeadzone, setMdPropDeadzone] = usePersistedState('md.propDeadzone', 0);
-  const [mdNormMode, setMdNormMode] = usePersistedState<'percentile' | 'robust-minmax'>('md.normMode', 'percentile');
+  const [mdNormMode, setMdNormMode] = usePersistedState<'percentile' | 'robust-minmax'>('md.normMode', 'robust-minmax');
   const [mdBandMode, setMdBandMode] = usePersistedState<'stems' | 'eq12'>('md.bandMode', 'stems');
   const [mdMinMaxGain, setMdMinMaxGain] = usePersistedState('md.minMaxGain', 1);
 
   // Audio source state
   const [audio, setAudio] = useState<AudioState | null>(null);
   const [sourceState, setSourceState] = useState<SourceState | null>(null);
+
+  // Live mic source. When on, the browser captures the machine's mic, FFTs
+  // it, and streams 12-band frames to the server (useMicSource). megadrome
+  // needs eq12 band mode to consume it (stems aren't recoverable from FFT),
+  // so flipping mic on also flips band mode to eq12.
+  const [micOn, setMicOn] = useState(false);
+  useMicSource(micOn);
+  const enableMic = (on: boolean) => {
+    setMicOn(on);
+    if (on) setMdBandMode('eq12');
+  };
+
+  // WLED timecode buffer (jitter absorption on-box). Persisted + re-asserted on
+  // load so it survives server restarts, which rebuild the driver buffer-off.
+  const [bufferOn, setBufferOn] = usePersistedState('wled.buffer', false);
+  useEffect(() => { api('/buffer', { on: bufferOn }).catch(() => {}); }, [bufferOn]);
+
+  // Live system-audio sync — captures the Mac output mix and drives megadrome
+  // on a delay matched to playback (AirPlay) latency. Needs eq12 like mic.
+  const [syscapOn, setSyscapOn] = useState(false);
+  const [syscapDelay, setSyscapDelay] = usePersistedState('syscap.delayMs', 1500);
+  const enableSyscap = (on: boolean) => {
+    setSyscapOn(on);
+    if (on) setMdBandMode('eq12');
+    api('/source/syscap', { active: on, delayMs: syscapDelay }).catch(() => {});
+  };
+  useEffect(() => {
+    if (syscapOn) api('/source/syscap', { active: true, delayMs: syscapDelay }).catch(() => {});
+  }, [syscapDelay]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Audio-bus smoothing — split into attack (α applied when rising) and
   // decay (when falling). Persisted in localStorage; the push-on-change
@@ -195,10 +227,13 @@ export default function App() {
     })();
     const t = setInterval(async () => {
       try { setStats(await api<StreamStats>('/stream/state')); } catch {}
-      try { setAudio(await api<AudioState>('/audio')); } catch {}
       try { setSourceState(await api<SourceState>('/source')); } catch {}
     }, 500);
-    return () => clearInterval(t);
+    // Audio bus polled faster so the 12-band meter stays lively.
+    const ta = setInterval(async () => {
+      try { setAudio(await api<AudioState>('/audio')); } catch {}
+    }, 100);
+    return () => { clearInterval(t); clearInterval(ta); };
   }, []);
 
   // Push pattern updates to the server whenever any param changes.
@@ -264,7 +299,7 @@ export default function App() {
       <section className="bg-zinc-900 rounded p-3 flex items-center gap-2 flex-wrap text-xs font-mono">
         <span className="text-zinc-400">target</span>
         <div className="flex gap-1">
-          {(['wled', 'twinkly'] as DriverKind[]).map((k) => (
+          {(['serial', 'wled', 'twinkly'] as DriverKind[]).map((k) => (
             <button key={k}
               onClick={() => setTargetKind(k)}
               className={`px-2 py-1 rounded ${targetKind === k ? 'bg-purple-600 text-white' : 'bg-zinc-800 hover:bg-zinc-700'}`}
@@ -515,11 +550,69 @@ export default function App() {
         <div className="flex items-center justify-between text-xs font-mono">
           <span className="text-zinc-400">audio source</span>
           <span className="text-[10px] text-zinc-500">
-            {sourceState?.musicboxReachable
-              ? <span className="text-emerald-400">following musicbox</span>
-              : <span className="text-zinc-600">no source</span>}
+            {sourceState?.micActive
+              ? (sourceState?.micFresh
+                  ? <span className="text-emerald-400">● mic input (live)</span>
+                  : <span className="text-amber-400">mic on — no signal</span>)
+              : sourceState?.musicboxReachable
+                ? <span className="text-emerald-400">following musicbox</span>
+                : <span className="text-zinc-600">no source</span>}
           </span>
         </div>
+
+        {/* Live mic toggle. Grabs the browser mic, FFTs in the client, and
+            streams 12-band frames to the server, which normalizes against a
+            30s rolling window. Overrides musicbox while on. */}
+        <div className="flex items-center gap-2 text-[11px] font-mono">
+          <button
+            onClick={() => enableMic(!micOn)}
+            className={`px-2 py-1 rounded ${micOn ? 'bg-rose-600 text-white' : 'bg-zinc-800 hover:bg-zinc-700'}`}
+            title="Use this computer's microphone as the audio source. megadrome runs in eq12 band mode on mic; normalization adapts over a rolling 30s window (give it ~30s to settle)."
+          >{micOn ? '🎤 mic on' : '🎤 mic off'}</button>
+          <span className="text-[10px] text-zinc-600">
+            {micOn
+              ? 'browser mic → eq12 bands · normalization warms up over ~30s'
+              : 'use the machine mic as the audio source (overrides musicbox)'}
+          </span>
+        </div>
+
+        {/* WLED timecode buffer — routes frames through the on-box 500ms jitter
+            buffer (timecode_buffer usermod, UDP 4049). Needs the usermod firmware. */}
+        <div className="flex items-center gap-2 text-[11px] font-mono">
+          <button
+            onClick={() => setBufferOn(!bufferOn)}
+            className={`px-2 py-1 rounded ${bufferOn ? 'bg-indigo-600 text-white' : 'bg-zinc-800 hover:bg-zinc-700'}`}
+            title="Route frames through the on-box 500ms jitter buffer (timecode_buffer usermod, UDP 4049). Smooths choppy WiFi. Only works on a box flashed with the usermod (Ubert)."
+          >{bufferOn ? '🪣 buffer on' : '🪣 buffer off'}</button>
+          <span className="text-[10px] text-zinc-600">
+            {bufferOn ? 'frames buffered 500ms on-box — jitter-free' : 'immediate DDP — no jitter buffer'}
+          </span>
+        </div>
+
+        {/* Live system-audio sync — captures the Mac output mix (ScreenCaptureKit)
+            and drives megadrome on a delay matched to playback latency. */}
+        <div className="flex flex-col gap-1 text-[11px] font-mono">
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => enableSyscap(!syscapOn)}
+              className={`px-2 py-1 rounded ${syscapOn ? 'bg-cyan-600 text-white' : 'bg-zinc-800 hover:bg-zinc-700'}`}
+              title="Capture this Mac's audio output and drive megadrome in sync with what you hear. ScreenCaptureKit; runs megadrome in eq12; works alongside AirPlay."
+            >{syscapOn ? '🔊 sync on' : '🔊 sync off'}</button>
+            <span className="text-[10px] text-zinc-600">
+              {syscapOn ? 'system audio → eq12, delayed to match output latency' : 'sync lights to computer audio output'}
+            </span>
+          </div>
+          <div className="flex items-center gap-2 text-[10px] text-zinc-500"
+            title="How long to hold light frames so they line up with delayed audio (AirPlay ~2s). Total light latency = this + 500ms box buffer. Raise if lights LEAD the sound; lower if they LAG.">
+            <span className="w-16">sync delay</span>
+            <input type="range" min={0} max={4000} step={50} value={syscapDelay}
+              onChange={(e) => setSyscapDelay(+e.target.value)} className="flex-1" />
+            <span className="w-16 text-right">{syscapDelay}ms</span>
+          </div>
+        </div>
+
+        {/* 12-band spectrum meter — live view of whatever source is active. */}
+        <BandMeter bands={audio?.bands} minMax={audio?.bandsMinMax} />
 
         {/* Audio-bus smoothing — asymmetric EMA (attack ≠ decay). */}
         <div className="flex items-center gap-2 text-[10px] text-zinc-500 font-mono"
@@ -570,6 +663,32 @@ export default function App() {
           origin={kind === 'megadrome' ? { x: mdOriginX, y: mdOriginY, z: mdOriginZ } : null}
         />
       </section>
+    </div>
+  );
+}
+
+// Compact always-on 12-band spectrum meter. Reads the audio bus's `bands`
+// (percentile, solid bar) with `bandsMinMax` (robust-minmax) faded behind.
+// Reflects whatever source is active — musicbox eq12, synth, or mic — since
+// every source populates these. Bars are hue-coded low→high.
+function BandMeter({ bands, minMax }: { bands?: number[]; minMax?: number[] }) {
+  const vals = bands && bands.length ? bands : new Array(12).fill(0);
+  const mm = minMax && minMax.length ? minMax : [];
+  return (
+    <div className="space-y-0.5">
+      <div className="flex items-end gap-0.5 h-10">
+        {vals.map((v, i) => (
+          <div key={i} className="relative flex-1 h-full bg-zinc-950 rounded-sm overflow-hidden" title={`band ${i}`}>
+            <div className="absolute bottom-0 inset-x-0 bg-zinc-700" style={{ height: `${(mm[i] ?? 0) * 100}%` }} />
+            <div className="absolute bottom-0 inset-x-0" style={{ height: `${(v ?? 0) * 100}%`, backgroundColor: `hsl(${(i / 12) * 280}, 75%, 55%)` }} />
+          </div>
+        ))}
+      </div>
+      <div className="flex justify-between text-[9px] text-zinc-600 font-mono">
+        <span>low</span>
+        <span>12-band · solid = percentile · faded = min-max</span>
+        <span>high</span>
+      </div>
     </div>
   );
 }

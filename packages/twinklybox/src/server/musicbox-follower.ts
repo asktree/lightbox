@@ -10,6 +10,8 @@
 //     hold zeros so patterns degrade to "no audio" gracefully.
 
 import { writeEnergy, writePlayback, type Stem, STEMS, NUM_BANDS } from './audio-bus.js';
+import { isMicActive, micFresh, getMicBands } from './mic-source.js';
+import { isSyscapActive, syscapFresh, getSyscapBands } from './syscap-source.js';
 
 const MUSICBOX_BASE = 'http://localhost:3002';
 const POLL_INTERVAL_MS = 100;
@@ -99,6 +101,8 @@ export function getFollowerState() {
     manualOverride: !!manualOverride,
     synthActive: !!synth,
     synth,
+    micActive: isMicActive(),
+    micFresh: micFresh(),
     currentTrackId: currentPlayback.trackId,
     trackName: currentPlayback.trackName ?? null,
     cachedTracks: [...envelopeCache.keys()],
@@ -244,6 +248,18 @@ export function startFollower() {
 const ZEROS = (): Record<Stem, number> => ({ drums: 0, bass: 0, vocals: 0, other: 0 });
 
 export function tickFollower() {
+  // System-audio "live sync" source — top priority. Captures the Mac's output
+  // mix (ScreenCaptureKit) and drives megadrome on a delay matched to the
+  // playback latency (AirPlay ~2s), so lights line up with what's heard. Only
+  // the 12 FFT bands are populated (run megadrome in eq12). Already normalized
+  // against a 30s rolling window in syscap-source.ts.
+  if (isSyscapActive()) {
+    const fresh = syscapFresh();
+    writePlayback({ trackId: null, trackName: fresh ? 'system audio' : 'system audio (no signal)', position: 0, playing: fresh });
+    const { bands, bandsMinMax } = getSyscapBands();
+    writeEnergy({ percentile: ZEROS(), minMax: ZEROS(), bands, bandsMinMax });
+    return;
+  }
   // Synth source takes priority — ignores musicbox + manual entirely.
   // Synth doesn't have a normalization concept; mirror its raw value into
   // both views so megadrome's normMode toggle is a no-op under synth.
@@ -256,6 +272,24 @@ export function tickFollower() {
     // bands at the synth's instantaneous level).
     const bands = new Array(NUM_BANDS).fill(v.bass);
     writeEnergy({ percentile: v, minMax: v, bands, bandsMinMax: bands });
+    return;
+  }
+  // Live mic source — next priority after synth, overrides musicbox. Only
+  // the 12 FFT bands are populated (stems aren't recoverable from raw FFT);
+  // megadrome should run in eq12 mode on mic. Values are already normalized
+  // against the 30s rolling window in mic-source.ts. When the mic is enabled
+  // but no frames are arriving (browser tab backgrounded / permission lost),
+  // hold zeros so the show degrades to "no audio" instead of freezing.
+  if (isMicActive()) {
+    const fresh = micFresh();
+    writePlayback({ trackId: null, trackName: fresh ? 'mic input' : 'mic (no signal)', position: 0, playing: fresh });
+    if (fresh) {
+      const { bands, bandsMinMax } = getMicBands();
+      writeEnergy({ percentile: ZEROS(), minMax: ZEROS(), bands, bandsMinMax });
+    } else {
+      const z = new Array(NUM_BANDS).fill(0);
+      writeEnergy({ percentile: ZEROS(), minMax: ZEROS(), bands: z, bandsMinMax: z });
+    }
     return;
   }
   const trackId = currentPlayback.trackId;
