@@ -2,8 +2,13 @@
 // Port 3010. Sibling of lightbox/musicbox — no shared imports.
 
 import express from 'express';
+import { lookup } from 'node:dns';
+import { promisify } from 'node:util';
 import { TwinklyDevice } from './twinkly.js';
+
+const dnsLookup = promisify(lookup);
 import { WledDriver } from './wled.js';
+import { CombinedWledDriver } from './combined-driver.js';
 import { SerialDriver } from './serial.js';
 import type { LedDriver } from './led-driver.js';
 import { FrameLoop } from './frame-loop.js';
@@ -23,14 +28,20 @@ let loop: FrameLoop | null = null;
 let currentPattern: Pattern | null = null;
 
 // Known targets we might auto-connect to. First match wins on boot.
-type TargetKind = 'twinkly' | 'wled' | 'serial';
+// 'stack' = both curtains as one tall display (Ubert on top, Doggert below).
+type TargetKind = 'twinkly' | 'wled' | 'serial' | 'stack';
+
+// The stacked display: two WLED boxes resolved by mDNS name (DHCP-proof).
+// top renders the upper rows. If only one is reachable, stack falls back to
+// driving that single box.
+const STACK = { top: 'wled-17a9ec.local', bottom: 'wled-fcac0c.local' }; // Ubert / Doggert
 // Tried in order on boot; first reachable wins. `serial` is listed first so
 // that once the USB-C cable is plugged in it's preferred (wired = no WiFi
 // jitter); if no cable is present its connect() throws and we fall through
 // to the same WLED over DDP. host is the WLED's IP either way (serial still
 // uses HTTP for LED count + matrix metadata).
 const KNOWN_TARGETS: { kind: TargetKind; host: string }[] = [
-  { kind: 'serial', host: '192.168.20.243' },
+  { kind: 'stack', host: 'stack' },        // both curtains as one display (default)
   { kind: 'wled', host: '192.168.20.243' },
   { kind: 'twinkly', host: '192.168.11.253' },
 ];
@@ -40,10 +51,34 @@ const KNOWN_TARGETS: { kind: TargetKind; host: string }[] = [
 // driver is current via applyBufferPref().
 let bufferEnabled = false;
 let bufferPort: number | undefined;
+// Both WledDriver and CombinedWledDriver expose setBufferMode — duck-type so
+// buffer mode applies to the stacked driver too.
+type Bufferable = { setBufferMode: (on: boolean, opts?: { port?: number }) => void; isBuffered: boolean };
+function asBufferable(d: LedDriver | null): Bufferable | null {
+  return d && typeof (d as unknown as Bufferable).setBufferMode === 'function' ? (d as unknown as Bufferable) : null;
+}
 function applyBufferPref(): void {
-  if (driver instanceof WledDriver) {
-    driver.setBufferMode(bufferEnabled, bufferPort ? { port: bufferPort } : undefined);
+  asBufferable(driver)?.setBufferMode(bufferEnabled, bufferPort ? { port: bufferPort } : undefined);
+}
+
+// Connect both stacked boxes. If only one is reachable, drive that one alone
+// ("if only one is plugged in it can just do the one"). Throws if neither is.
+async function connectStack(): Promise<LedDriver> {
+  // Resolve mDNS → IP first (cached) so a slow .local lookup doesn't drop a box
+  // out of the pair; the driver then connects/streams by IP.
+  const [topHost, bottomHost] = await Promise.all([resolveHost(STACK.top), resolveHost(STACK.bottom)]);
+  const results = await Promise.allSettled([
+    WledDriver.connect(topHost),
+    WledDriver.connect(bottomHost),
+  ]);
+  const [top, bottom] = results.map((r) => (r.status === 'fulfilled' ? r.value : null));
+  if (top && bottom) return CombinedWledDriver.fromPair(top, bottom);
+  const only = top ?? bottom;
+  if (only) {
+    console.warn(`[driver] stack: only ${only.name} reachable — driving it solo`);
+    return only;
   }
+  throw new Error('stack: neither box reachable');
 }
 
 async function connectDriver(kind: TargetKind, host: string): Promise<LedDriver> {
@@ -56,7 +91,9 @@ async function connectDriver(kind: TargetKind, host: string): Promise<LedDriver>
     driver = null;
     loop = null;
   }
-  const d: LedDriver = kind === 'wled'
+  const d: LedDriver = kind === 'stack'
+    ? await connectStack()
+    : kind === 'wled'
     ? await WledDriver.connect(host)
     : kind === 'serial'
     ? await SerialDriver.connect(host)
@@ -106,7 +143,10 @@ app.get('/api/devices', async (_req, res) => {
 
 app.post('/api/connect', async (req, res) => {
   const kind = (req.body?.kind ?? 'twinkly') as TargetKind;
-  const host = (req.body?.host as string) ?? (req.body?.ip as string) ?? KNOWN_TARGETS.find((t) => t.kind === kind)?.host;
+  // 'stack' resolves its own two hosts (STACK) — no host needed.
+  const host = kind === 'stack'
+    ? 'stack'
+    : (req.body?.host as string) ?? (req.body?.ip as string) ?? KNOWN_TARGETS.find((t) => t.kind === kind)?.host;
   if (!host) return res.status(400).json({ ok: false, error: 'host required' });
   try {
     const d = await connectDriver(kind, host);
@@ -143,11 +183,71 @@ app.post('/api/buffer', (req, res) => {
   if (typeof req.body?.port === 'number') bufferPort = req.body.port;
   applyBufferPref();
   console.log(`[driver] timecode buffer mode ${bufferEnabled ? 'ON' : 'off'}${bufferPort ? ` (port ${bufferPort})` : ''}`);
-  res.json({ buffered: driver instanceof WledDriver ? driver.isBuffered : false, bufferEnabled, port: bufferPort ?? null });
+  res.json({ buffered: asBufferable(driver)?.isBuffered ?? false, bufferEnabled, port: bufferPort ?? null });
 });
 
 app.get('/api/buffer', (_req, res) => {
-  res.json({ buffered: driver instanceof WledDriver ? driver.isBuffered : false, bufferEnabled, port: bufferPort ?? null });
+  res.json({ buffered: asBufferable(driver)?.isBuffered ?? false, bufferEnabled, port: bufferPort ?? null });
+});
+
+// Per-box network + buffer health for the UI diagnostics panel. Queries each
+// stacked box's /json/info: round-trip latency (a live jitter proxy), WiFi
+// RSSI, free heap, realtime-active flag, and the usermod's buffer depth +
+// played/dropped/lost counters (the directest read on whether jitter is
+// starving the buffer).
+// Cache mDNS .local → IP so health polling doesn't re-resolve every tick
+// (mDNS on this mesh is slow/flaky). Refreshed every 60s or after a failure.
+const ipCache = new Map<string, { ip: string; at: number }>();
+async function resolveHost(host: string): Promise<string> {
+  if (!host.endsWith('.local')) return host;
+  const c = ipCache.get(host);
+  if (c && Date.now() - c.at < 60_000) return c.ip;
+  try {
+    const { address } = await dnsLookup(host);
+    ipCache.set(host, { ip: address, at: Date.now() });
+    return address;
+  } catch {
+    return c?.ip ?? host; // fall back to stale IP, then the name itself
+  }
+}
+
+async function boxHealth(host: string, label: string) {
+  const t0 = Date.now();
+  try {
+    const addr = await resolveHost(host);
+    const r = await fetch(`http://${addr}/json/info`, { signal: AbortSignal.timeout(2500) });
+    const latencyMs = Date.now() - t0;
+    const info: any = await r.json();
+    const u = info.u ?? {};
+    const grab = (needle: string) => {
+      const key = Object.keys(u).find((k) => k.toLowerCase().includes(needle));
+      const v = key ? u[key] : undefined;
+      return Array.isArray(v) ? String(v[0]) : v != null ? String(v) : '';
+    };
+    const depthM = grab('timecode buffer').match(/(\d+)\/(\d+)/);
+    const cntM = grab('played').match(/(\d+)\s*\/\s*(\d+)\s*\/\s*(\d+)/);
+    return {
+      label, host, reachable: true, latencyMs,
+      rssi: info.wifi?.rssi ?? null,
+      heap: info.freeheap ?? null,
+      live: !!info.live,
+      bufDepth: depthM ? +depthM[1] : null,
+      bufCap: depthM ? +depthM[2] : null,
+      played: cntM ? +cntM[1] : null,
+      dropped: cntM ? +cntM[2] : null,
+      lost: cntM ? +cntM[3] : null,
+    };
+  } catch {
+    return { label, host, reachable: false, latencyMs: Date.now() - t0 };
+  }
+}
+
+app.get('/api/boxhealth', async (_req, res) => {
+  const [top, bottom] = await Promise.all([
+    boxHealth(STACK.top, 'Ubert (top)'),
+    boxHealth(STACK.bottom, 'Doggert (bottom)'),
+  ]);
+  res.json({ top, bottom });
 });
 
 app.post('/api/pattern', (req, res) => {

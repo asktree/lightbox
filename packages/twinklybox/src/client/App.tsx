@@ -29,7 +29,14 @@ function usePersistedState<T>(key: string, initial: T): [T, React.Dispatch<React
 type PatternKind = 'solid' | 'gradient' | 'perlin' | 'planes' | 'strobe' | 'megadrome';
 type Axis = 'x' | 'y' | 'z' | 'index';
 
-type DriverKind = 'twinkly' | 'wled' | 'serial';
+type DriverKind = 'twinkly' | 'wled' | 'serial' | 'stack';
+
+interface BoxStat {
+  label: string; host: string; reachable: boolean; latencyMs: number;
+  rssi?: number | null; heap?: number | null; live?: boolean;
+  bufDepth?: number | null; bufCap?: number | null;
+  played?: number | null; dropped?: number | null; lost?: number | null;
+}
 interface DeviceInfo {
   kind: DriverKind;
   host: string;
@@ -170,6 +177,17 @@ export default function App() {
     if (syscapOn) api('/source/syscap', { active: true, delayMs: syscapDelay }).catch(() => {});
   }, [syscapDelay]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Per-box network + buffer diagnostics (polled for the debug panel).
+  const [health, setHealth] = useState<{ top: BoxStat; bottom: BoxStat } | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const poll = () => api<{ top: BoxStat; bottom: BoxStat }>('/boxhealth')
+      .then((h) => { if (alive) setHealth(h); }).catch(() => {});
+    poll();
+    const id = setInterval(poll, 2500);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
   // Audio-bus smoothing — split into attack (α applied when rising) and
   // decay (when falling). Persisted in localStorage; the push-on-change
   // effect below runs on mount with the persisted values, so the server
@@ -196,7 +214,7 @@ export default function App() {
   // Target selector — what the server is driving. Server auto-connects on
   // boot to the first known target; the UI lets you switch to a different
   // kind+host without restarting.
-  const [targetKind, setTargetKind] = usePersistedState<DriverKind>('target.kind', 'wled');
+  const [targetKind, setTargetKind] = usePersistedState<DriverKind>('target.kind', 'stack');
   const [targetHost, setTargetHost] = usePersistedState('target.host', '192.168.0.220');
   const [connecting, setConnecting] = useState(false);
 
@@ -299,11 +317,12 @@ export default function App() {
       <section className="bg-zinc-900 rounded p-3 flex items-center gap-2 flex-wrap text-xs font-mono">
         <span className="text-zinc-400">target</span>
         <div className="flex gap-1">
-          {(['serial', 'wled', 'twinkly'] as DriverKind[]).map((k) => (
+          {(['stack', 'wled', 'twinkly', 'serial'] as DriverKind[]).map((k) => (
             <button key={k}
               onClick={() => setTargetKind(k)}
+              title={k === 'stack' ? 'Drive both curtains as one tall display (Ubert on top, Doggert below). No host needed.' : undefined}
               className={`px-2 py-1 rounded ${targetKind === k ? 'bg-purple-600 text-white' : 'bg-zinc-800 hover:bg-zinc-700'}`}
-            >{k}</button>
+            >{k === 'stack' ? '▦ stack' : k}</button>
           ))}
         </div>
         <input
@@ -322,6 +341,17 @@ export default function App() {
             ? <span className="text-emerald-400">● this is the active target</span>
             : <span className="text-zinc-500">○ not active — hit connect</span>}
         </span>
+      </section>
+
+      {/* Per-box network + buffer diagnostics. Latency is a live jitter proxy;
+          buffer depth shows how full each box's playout buffer is (low/blank =
+          the network is starving it). Polled every 2.5s. */}
+      <section className="bg-zinc-900 rounded p-3 text-[11px] font-mono">
+        <div className="text-zinc-400 mb-2">box health</div>
+        <div className="flex flex-col gap-2">
+          {health ? [health.top, health.bottom].map((b) => <BoxHealthRow key={b.host} b={b} />)
+            : <span className="text-zinc-600">polling…</span>}
+        </div>
       </section>
 
       <section className="flex items-center gap-3">
@@ -689,6 +719,40 @@ function BandMeter({ bands, minMax }: { bands?: number[]; minMax?: number[] }) {
         <span>12-band · solid = percentile · faded = min-max</span>
         <span>high</span>
       </div>
+    </div>
+  );
+}
+
+function BoxHealthRow({ b }: { b: BoxStat }) {
+  // Latency color: a live jitter/health proxy.
+  const latColor = !b.reachable ? 'text-rose-500'
+    : b.latencyMs < 80 ? 'text-emerald-400'
+    : b.latencyMs < 250 ? 'text-amber-400' : 'text-rose-400';
+  const depth = b.bufDepth ?? 0, cap = b.bufCap ?? 21;
+  const depthFrac = cap ? depth / cap : 0;
+  // Buffer fill color: low = starving (about to blank).
+  const bufColor = depth <= 2 ? 'bg-rose-500' : depth <= 6 ? 'bg-amber-500' : 'bg-emerald-500';
+  return (
+    <div className="flex items-center gap-2">
+      <span className="w-28 text-zinc-300 truncate">{b.label}</span>
+      {b.reachable ? (
+        <>
+          <span className={`w-16 ${latColor}`} title="round-trip latency (jitter proxy)">{b.latencyMs}ms</span>
+          {/* buffer fill bar */}
+          <div className="w-24 h-3 bg-zinc-950 rounded-sm overflow-hidden" title={`buffer ${depth}/${cap} frames`}>
+            <div className={`h-full ${bufColor}`} style={{ width: `${depthFrac * 100}%` }} />
+          </div>
+          <span className="w-12 text-zinc-500">{depth}/{cap}</span>
+          <span className="w-14 text-zinc-500" title="WiFi RSSI">{b.rssi ?? '–'}dBm</span>
+          <span className="w-16 text-zinc-600" title="free heap">{b.heap != null ? `${Math.round(b.heap / 1024)}k` : '–'}</span>
+          <span className="text-zinc-600" title="played / dropped / lost frames">
+            d:{b.dropped ?? '–'} l:{b.lost ?? '–'}
+          </span>
+          <span className={b.live ? 'text-emerald-500' : 'text-zinc-600'} title="realtime active">{b.live ? '●live' : '○idle'}</span>
+        </>
+      ) : (
+        <span className="text-rose-500">unreachable ({b.latencyMs}ms)</span>
+      )}
     </div>
   );
 }
