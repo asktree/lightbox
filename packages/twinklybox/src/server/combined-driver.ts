@@ -66,6 +66,11 @@ export class CombinedWledDriver implements LedDriver {
   }
   get isBuffered(): boolean { return this.top.isBuffered; }
 
+  setBrightness(bri: number): void {
+    this.top.setBrightness(bri);
+    this.bottom.setBrightness(bri);
+  }
+
   sendFrame(buf: Uint8Array): void {
     // Top rows are the first topBytes of the row-major frame; the rest is the
     // bottom box. subarray is a view (no copy).

@@ -61,6 +61,18 @@ function applyBufferPref(): void {
   asBufferable(driver)?.setBufferMode(bufferEnabled, bufferPort ? { port: bufferPort } : undefined);
 }
 
+// Global master brightness ("value") applied to the box(es) — scales physical
+// output only; the preview mirrors raw frames and ignores it. Server-level so
+// it survives reconnects, like the buffer pref. null = leave the box's bri be.
+let globalValue: number | null = null;
+type Dimmable = { setBrightness: (bri: number) => void };
+function asDimmable(d: LedDriver | null): Dimmable | null {
+  return d && typeof (d as unknown as Dimmable).setBrightness === 'function' ? (d as unknown as Dimmable) : null;
+}
+function applyValuePref(): void {
+  if (globalValue !== null) asDimmable(driver)?.setBrightness(globalValue);
+}
+
 // Connect both stacked boxes. If only one is reachable, drive that one alone
 // ("if only one is plugged in it can just do the one"). Throws if neither is.
 async function connectStack(): Promise<LedDriver> {
@@ -104,6 +116,7 @@ async function connectDriver(kind: TargetKind, host: string): Promise<LedDriver>
   console.log(`[driver] connected ${kind}@${host} — "${d.name}", ${d.numLeds} LEDs (${d.bytesPerLed === 4 ? 'RGBW' : 'RGB'}), layout=${layout ? `${layout.coords.length} pts (${layout.source})` : 'none'}`);
   if (currentPattern) loop.setPattern(currentPattern);
   applyBufferPref(); // re-assert buffer mode on the freshly-built driver
+  applyValuePref();  // re-assert global brightness
   return d;
 }
 
@@ -190,6 +203,17 @@ app.get('/api/buffer', (_req, res) => {
   res.json({ buffered: asBufferable(driver)?.isBuffered ?? false, bufferEnabled, port: bufferPort ?? null });
 });
 
+// Global master "value" / brightness (0..255). Dims the physical output via
+// WLED brightness; the preview ignores it. POST { value }.
+app.post('/api/brightness', (req, res) => {
+  const v = Number(req.body?.value);
+  if (!Number.isFinite(v)) return res.status(400).json({ error: 'value 0..255 required' });
+  globalValue = Math.max(0, Math.min(255, Math.round(v)));
+  asDimmable(driver)?.setBrightness(globalValue);
+  res.json({ value: globalValue });
+});
+app.get('/api/brightness', (_req, res) => res.json({ value: globalValue }));
+
 // Per-box network + buffer health for the UI diagnostics panel. Queries each
 // stacked box's /json/info: round-trip latency (a live jitter proxy), WiFi
 // RSSI, free heap, realtime-active flag, and the usermod's buffer depth +
@@ -224,7 +248,10 @@ async function boxHealth(host: string, label: string) {
       const v = key ? u[key] : undefined;
       return Array.isArray(v) ? String(v[0]) : v != null ? String(v) : '';
     };
-    const depthM = grab('timecode buffer').match(/(\d+)\/(\d+)/);
+    const tcStr = grab('timecode buffer');
+    const depthM = tcStr.match(/(\d+)\/(\d+)/);
+    const delayM = tcStr.match(/(\d+)\s*ms/);            // effective playout delay
+    const fpsM = tcStr.match(/([\d.]+)\s*fps/);          // measured fps (new fw only)
     const cntM = grab('played').match(/(\d+)\s*\/\s*(\d+)\s*\/\s*(\d+)/);
     return {
       label, host, reachable: true, latencyMs,
@@ -233,6 +260,8 @@ async function boxHealth(host: string, label: string) {
       live: !!info.live,
       bufDepth: depthM ? +depthM[1] : null,
       bufCap: depthM ? +depthM[2] : null,
+      bufDelayMs: delayM ? +delayM[1] : null,
+      bufFps: fpsM ? +fpsM[1] : null,
       played: cntM ? +cntM[1] : null,
       dropped: cntM ? +cntM[2] : null,
       lost: cntM ? +cntM[3] : null,
@@ -301,7 +330,10 @@ app.get('/api/audio', (_req, res) => {
 // driver's bytesPerLed. Used by the browser 3D viewer to mirror what's
 // going out the wire.
 app.get('/api/frame', (_req, res) => {
-  if (!loop || !driver) return res.status(503).send('not connected');
+  // 204 (not 503) when there's no driver yet: the preview polls this ~30Hz,
+  // and a 5xx makes the browser spam the console with failed-request traces
+  // during every reconnect. 204 is a normal "nothing to show" the client skips.
+  if (!loop || !driver) return res.status(204).end();
   const buf = loop.getFrame();
   res.setHeader('Content-Type', 'application/octet-stream');
   res.setHeader('X-Num-Leds', String(driver.numLeds));

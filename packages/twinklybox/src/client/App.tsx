@@ -35,8 +35,13 @@ interface BoxStat {
   label: string; host: string; reachable: boolean; latencyMs: number;
   rssi?: number | null; heap?: number | null; live?: boolean;
   bufDepth?: number | null; bufCap?: number | null;
+  bufDelayMs?: number | null; bufFps?: number | null;
   played?: number | null; dropped?: number | null; lost?: number | null;
 }
+
+// Fixed estimate for capture→bus latency: FFT window (~43ms) + overlap + the
+// 10Hz bus tick + helper pipe. Rough but stable; folds into the sync math.
+const ANALYSIS_MS = 150;
 interface DeviceInfo {
   kind: DriverKind;
   host: string;
@@ -91,6 +96,12 @@ export default function App() {
   const [kind, setKind] = usePersistedState<PatternKind>('kind', 'gradient');
   const [hz, setHz] = usePersistedState('hz', 25);
   const [gamma, setGamma] = usePersistedState('gamma', 2.2);
+
+  // Global master value (brightness): dims the physical LEDs via WLED master
+  // brightness. The preview mirrors raw frames, so it ignores this. Persisted +
+  // re-asserted on load (survives server restarts), like the buffer pref.
+  const [globalValue, setGlobalValue] = usePersistedState('global.value', 128);
+  useEffect(() => { api('/brightness', { value: globalValue }).catch(() => {}); }, [globalValue]);
 
   // Solid
   const [solidHue, setSolidHue] = usePersistedState('solid.hue', 0);
@@ -176,6 +187,11 @@ export default function App() {
   useEffect(() => {
     if (syscapOn) api('/source/syscap', { active: true, delayMs: syscapDelay }).catch(() => {});
   }, [syscapDelay]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Estimated audio (AirPlay/output) latency — the thing we sync the lights to.
+  // User-tunable; ~2s for AirPlay. The sync panel compares total light latency
+  // against this and suggests a syscap-delay that lines them up.
+  const [audioLatency, setAudioLatency] = usePersistedState('sync.audioLatencyMs', 2000);
 
   // Per-box network + buffer diagnostics (polled for the debug panel).
   const [health, setHealth] = useState<{ top: BoxStat; bottom: BoxStat } | null>(null);
@@ -310,6 +326,19 @@ export default function App() {
           )}
         </div>
       </header>
+
+      {/* Global master value (brightness). Scales the physical LED output via
+          WLED's master brightness — the preview ignores it (it mirrors the raw
+          rendered frames). */}
+      <section className="bg-zinc-900 rounded p-3 flex items-center gap-3 text-xs font-mono">
+        <span className="text-zinc-200 font-semibold w-12">value</span>
+        <input type="range" min={0} max={255} step={1} value={globalValue}
+          onChange={(e) => setGlobalValue(+e.target.value)}
+          className="flex-1 accent-amber-400"
+          title="Master brightness sent to the box(es). Dims the physical lights only — the preview below stays full-brightness." />
+        <span className="w-10 text-right text-zinc-300">{globalValue}</span>
+        <span className="text-[10px] text-zinc-600 w-40">physical only · preview ignores</span>
+      </section>
 
       {/* Driver target selector. Switching kind+host hot-swaps the LED
           target (server tears down the old driver and stands up a new
@@ -641,6 +670,18 @@ export default function App() {
           </div>
         </div>
 
+        {/* Sync diagnostics — makes the latency budget visible so the delay
+            slider isn't a blind knob. Lights should be as delayed as the audio
+            you hear (AirPlay ~2s). */}
+        <SyncPanel
+          syscapDelay={syscapDelay}
+          audioLatency={audioLatency}
+          setAudioLatency={setAudioLatency}
+          health={health}
+          bass={audio?.bands ? Math.max(audio.bands[0] ?? 0, audio.bands[1] ?? 0, audio.bands[2] ?? 0) : 0}
+          onSnap={(d) => setSyscapDelay(d)}
+        />
+
         {/* 12-band spectrum meter — live view of whatever source is active. */}
         <BandMeter bands={audio?.bands} minMax={audio?.bandsMinMax} />
 
@@ -718,6 +759,64 @@ function BandMeter({ bands, minMax }: { bands?: number[]; minMax?: number[] }) {
         <span>low</span>
         <span>12-band · solid = percentile · faded = min-max</span>
         <span>high</span>
+      </div>
+    </div>
+  );
+}
+
+function SyncPanel({ syscapDelay, audioLatency, setAudioLatency, health, bass, onSnap }: {
+  syscapDelay: number;
+  audioLatency: number;
+  setAudioLatency: (n: number) => void;
+  health: { top: BoxStat; bottom: BoxStat } | null;
+  bass: number;
+  onSnap: (delay: number) => void;
+}) {
+  // Average the boxes' reported buffer delay (falls back to 500ms = old fw).
+  const boxes = health ? [health.top, health.bottom].filter((b) => b.reachable && b.bufDelayMs != null) : [];
+  const boxDelay = boxes.length
+    ? Math.round(boxes.reduce((s, b) => s + (b.bufDelayMs ?? 0), 0) / boxes.length)
+    : 500;
+  const totalLight = syscapDelay + boxDelay + ANALYSIS_MS;
+  const gap = audioLatency - totalLight; // >0: lights lead the sound (raise delay)
+  // What syscap delay would make total == audioLatency.
+  const snapTo = Math.max(0, Math.min(4000, audioLatency - boxDelay - ANALYSIS_MS));
+  const synced = Math.abs(gap) <= 60;
+  const gapColor = synced ? 'text-emerald-400' : Math.abs(gap) < 200 ? 'text-amber-400' : 'text-rose-400';
+
+  return (
+    <div className="bg-zinc-950 rounded p-2 text-[10px] font-mono flex flex-col gap-1.5">
+      <div className="flex items-center gap-2">
+        <span className="text-zinc-400">sync</span>
+        {/* beat pulse — bass energy of the (delayed) audio driving the show */}
+        <div className="w-3 h-3 rounded-full" style={{ backgroundColor: `hsl(180,80%,${20 + bass * 50}%)`, transform: `scale(${0.7 + bass * 0.6})` }}
+          title="beat pulse — low-band energy of the audio the lights are reacting to right now" />
+        <span className={`ml-auto ${gapColor}`}>
+          {synced ? '● in sync (±60ms)' : gap > 0 ? `lights lead by ${gap}ms` : `lights lag by ${-gap}ms`}
+        </span>
+      </div>
+      {/* latency budget breakdown */}
+      <div className="flex items-center gap-1 text-zinc-500">
+        <span title="syscap delay (the slider)">syscap {syscapDelay}</span>
+        <span className="text-zinc-700">+</span>
+        <span title="box playout buffer (from box health)">box {boxDelay}</span>
+        <span className="text-zinc-700">+</span>
+        <span title="capture + analysis estimate">analysis {ANALYSIS_MS}</span>
+        <span className="text-zinc-700">=</span>
+        <span className="text-zinc-300">light {totalLight}ms</span>
+        <span className="text-zinc-700">vs</span>
+        <span className="text-zinc-300">audio {audioLatency}ms</span>
+      </div>
+      <div className="flex items-center gap-2">
+        <span className="text-zinc-500 w-20">audio latency</span>
+        <input type="range" min={500} max={3500} step={50} value={audioLatency}
+          onChange={(e) => setAudioLatency(+e.target.value)} className="flex-1 accent-cyan-500"
+          title="How long after playing does the sound reach your ear (AirPlay ~2s). Tune until the beat pulse matches what you hear." />
+        <span className="w-12 text-right text-zinc-400">{audioLatency}</span>
+        <button onClick={() => onSnap(snapTo)}
+          className="px-2 py-0.5 rounded bg-cyan-700 hover:bg-cyan-600 text-white"
+          title={`Set syscap delay to ${snapTo}ms so total light latency = audio latency`}
+        >snap →{snapTo}</button>
       </div>
     </div>
   );
