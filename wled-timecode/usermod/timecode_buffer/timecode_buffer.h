@@ -66,8 +66,8 @@ class TimecodeBufferUsermod : public Usermod {
     // ---- config (persisted to cfg.json) ----
     bool     enabled    = true;
     uint16_t udpPort    = 4049;   // separate from stock DDP (4048) to avoid bind clash
-    uint16_t bufferMs   = 500;    // playout latency added on top of network transit
-    uint8_t  maxFps     = 30;     // used to size the ring; safe to overestimate a little
+    uint16_t maxBufferMs = 2000;  // cap on the playout delay (AirPlay gives us ~2s)
+    uint16_t minBufferMs = 300;   // floor so a fast stream still gets some cushion
 
     // ---- runtime ----
     AsyncUDP  udp;
@@ -90,8 +90,17 @@ class TimecodeBufferUsermod : public Usermod {
     uint16_t  asmMaxLed    = 0;         // highest LED index written so far +1
     uint32_t  asmTimecode  = 0;
 
+    // Dynamic buffering: measure the incoming frame interval and size the
+    // playout delay to use almost the whole ring (more frames buffered = more
+    // jitter tolerance), capped at maxBufferMs. Lower sender fps → bigger delay.
+    uint16_t  bufferMs        = 500;    // current playout delay (computed)
+    uint32_t  frameIntervalMs = 33;     // EMA of sender frame spacing (ms)
+    uint32_t  lastPubTc       = 0;      // last published timecode (interval + jump detect)
+    bool      havePubTc       = false;
+
     // Playout state (loop-owned):
     bool      playing      = false;
+    volatile bool resyncRequested = false; // set by producer on a clock jump
     uint32_t  offset       = 0;         // localMs = timecode + offset
     uint32_t  lastDrift    = 0;
     uint32_t  lastRenderMs = 0;
@@ -153,13 +162,12 @@ class TimecodeBufferUsermod : public Usermod {
       }
 
       if (!slotOpen) {
-        // Open a fresh frame in the current head slot. If the ring is full
-        // (head would catch tail), drop the OLDEST frame to make room — live
-        // playback should favor the freshest data.
-        if (ringNext(head) == tail) {
-          tail = ringNext(tail);
-          framesDropped++;
-        }
+        // Race-free SPSC: the producer (this callback, on the async task) only
+        // ever writes `head`; the consumer (loop) only writes `tail`. So when
+        // the ring is full we DROP THE INCOMING frame rather than reaching over
+        // to advance tail (which used to corrupt the indices under load). The
+        // consumer is always draining, so fullness is transient.
+        if (ringNext(head) == tail) { framesDropped++; return; }
         slotOpen    = true;
         asmSeq      = seq;
         asmMaxLed   = 0;
@@ -178,11 +186,43 @@ class TimecodeBufferUsermod : public Usermod {
 
       // PUSH = last fragment of the frame. Publish the slot.
       if (flags & TCB_DDP_FLAG_PUSH) {
+        // Discontinuity: the sender's monotonic clock jumped backward (it
+        // restarted) or far forward. Re-seat playout instead of flailing until
+        // the buffer drains — kills the flicker on dev restarts.
+        if (havePubTc) {
+          int32_t d = (int32_t)(asmTimecode - lastPubTc);
+          if (d < -200 || d > 2000) {
+            resyncRequested = true;   // consumer re-inits offset on next loop()
+            havePubTc = false;
+          } else if (d > 2 && d < 200) {
+            // EMA of the frame interval (clamped to sane fps 5..200 Hz).
+            frameIntervalMs = (frameIntervalMs * 7 + (uint32_t)d) / 8;
+          }
+        }
+        lastPubTc = asmTimecode;
+        havePubTc = true;
         slotTimecode[head] = asmTimecode;
         slotLeds[head]     = asmMaxLed;
         head     = ringNext(head);   // publish (single writer)
         slotOpen = false;
       }
+    }
+
+    // How many frames we want queued ahead: ~75% of the ring (leaving 25%
+    // headroom for bursts), but clamped so the buffered TIME (frames × interval)
+    // stays within [minBufferMs, maxBufferMs]. At a lower sender fps the same
+    // frame count is more milliseconds — so the delay grows automatically,
+    // "using the buffer as much as we can" up to the 2s cap.
+    uint16_t targetFill() const {
+      if (slotCount < 4) return 1;
+      uint16_t byRing = (uint16_t)(((uint32_t)slotCount * 3) / 4);
+      uint16_t cap = frameIntervalMs ? (uint16_t)(maxBufferMs / frameIntervalMs) : byRing;
+      uint16_t flo = frameIntervalMs ? (uint16_t)(minBufferMs / frameIntervalMs) : 4;
+      uint16_t t = byRing < cap ? byRing : cap;
+      if (t < flo) t = flo;
+      if (t < 2) t = 2;
+      if (t > (uint16_t)(slotCount - 1)) t = slotCount - 1;
+      return t;
     }
 
     // ---- render one buffered slot to the strip ------------------------------
@@ -204,24 +244,6 @@ class TimecodeBufferUsermod : public Usermod {
       lastRenderMs = millis();
     }
 
-    // ---- slow clock-drift correction ---------------------------------------
-    // Keep the buffered lead time near bufferMs. If the sender's clock runs
-    // faster than ours the buffer fills (lead grows) -> nudge offset down to
-    // play a hair faster. If it runs slower the buffer drains -> nudge up.
-    void driftAdjust(uint32_t now) {
-      if (head == tail) return;
-      uint16_t newest = (head == 0 ? slotCount : head) - 1;
-      // How far ahead (in sender-time ms) is the freshest buffered frame vs the
-      // current playout point (now - offset)?
-      int32_t leadMs = (int32_t)(slotTimecode[newest] - (now - offset));
-      int32_t err    = leadMs - (int32_t)bufferMs;
-      if (now - lastDrift >= 250) {     // slew at most 1ms / 250ms ≈ imperceptible
-        if      (err >  40) offset -= 1;
-        else if (err < -40) offset += 1;
-        lastDrift = now;
-      }
-    }
-
     void startListening() {
       if (listening || !enabled) return;
       if (udp.listen(udpPort)) {
@@ -238,8 +260,14 @@ class TimecodeBufferUsermod : public Usermod {
       numLeds = strip.getLengthTotal();
       if (numLeds == 0) return false;
       bytesPerFrame = (size_t)numLeds * 3;
-      // Frames needed for bufferMs at maxFps, + margin for jitter bursts.
-      uint16_t need = (uint16_t)(((uint32_t)bufferMs * maxFps) / 1000) + 6;
+      // Size the ring to whatever heap we can spare (more frames = more buffer
+      // time we can dial up at low fps), keeping a reserve for WLED. Cap at 40
+      // frames — enough for a 2s delay even at 20fps. Back off if malloc fails.
+      const uint32_t reserve = 45000;
+      uint32_t freeHeap = ESP.getFreeHeap();
+      uint32_t budget = freeHeap > reserve ? freeHeap - reserve : 0;
+      uint16_t need = (uint16_t)(budget / bytesPerFrame);
+      if (need > 40) need = 40;
       if (need < 8) need = 8;
       // Try requested size, then back off if heap can't hold it.
       for (uint16_t sc = need; sc >= 8; sc = (sc > 12 ? sc - 4 : sc - 1)) {
@@ -287,25 +315,36 @@ class TimecodeBufferUsermod : public Usermod {
       uint32_t now = millis();
       uint16_t h = head;   // snapshot the volatile producer index once
 
+      // Sender clock jumped (restart/discontinuity): drop the stale-epoch
+      // buffer and re-prime cleanly. One brief blank instead of long flailing.
+      if (resyncRequested) {
+        resyncRequested = false;
+        tail = h;            // clear ring (consumer owns tail)
+        playing = false;
+        return;
+      }
+
       if (tail == h) {                     // buffer empty
         if (playing) {
           if (emptySince == 0) emptySince = now;
-          // If we've been dry long enough that realtime would have timed out,
-          // treat the stream as ended so the next frame re-seats the offset.
           else if (now - emptySince > 300) { playing = false; underruns++; }
         }
         return;
       }
       emptySince = 0;
 
-      if (!playing) {                      // first frame of a (re)started stream
-        offset  = now - slotTimecode[tail] + bufferMs;
+      if (!playing) {
+        // Prime: wait until the ring holds the target cushion before starting,
+        // so playout begins with a full buffer (and a measured frame interval).
+        if (ringDepth() < targetFill()) return;
+        offset  = now - slotTimecode[tail];  // oldest plays now; rest = cushion
         playing = true;
         lastDrift = now;
       }
 
-      // Render the earliest due frame. If we've fallen behind (the NEXT frame is
-      // also already due), drop the current one and advance — bounds latency.
+      // Render the earliest due frame. If we've fallen behind (NEXT is also due)
+      // drop the current one — a backstop; the fill control below normally
+      // keeps us from ever getting here.
       while (tail != h) {
         uint32_t playTime = slotTimecode[tail] + offset;
         if ((int32_t)(now - playTime) < 0) break;        // earliest not due yet
@@ -321,28 +360,39 @@ class TimecodeBufferUsermod : public Usermod {
         break;
       }
 
-      driftAdjust(now);
+      // Fill-targeting control (replaces fixed-delay + drift correction): nudge
+      // the playout offset to hold the ring near targetFill(). Buffer low → play
+      // later (accumulate); high → play a touch earlier (drain). This maximizes
+      // buffered time within the 2s cap AND absorbs clock drift in one place.
+      if (now - lastDrift >= 100) {
+        lastDrift = now;
+        uint16_t depth = (h >= tail) ? (h - tail) : (uint16_t)(slotCount - tail + h);
+        uint16_t target = targetFill();
+        if (depth < target) offset += 2;            // low — delay more
+        else if (depth > target + 1) offset -= 1;   // high — drain gently
+        bufferMs = (uint16_t)((uint32_t)depth * frameIntervalMs); // effective delay (reported)
+      }
     }
 
     // ---- config persistence -------------------------------------------------
     void addToConfig(JsonObject& root) override {
       JsonObject top = root.createNestedObject(FPSTR(_name));
-      top[F("enabled")]  = enabled;
-      top[F("port")]     = udpPort;
-      top[F("bufferMs")] = bufferMs;
-      top[F("maxFps")]   = maxFps;
+      top[F("enabled")]     = enabled;
+      top[F("port")]        = udpPort;
+      top[F("maxBufferMs")] = maxBufferMs;
+      top[F("minBufferMs")] = minBufferMs;
     }
 
     bool readFromConfig(JsonObject& root) override {
       JsonObject top = root[FPSTR(_name)];
       if (top.isNull()) return false;
       bool ok = true;
-      ok &= getJsonValue(top[F("enabled")],  enabled,  enabled);
-      ok &= getJsonValue(top[F("port")],     udpPort,  udpPort);
-      ok &= getJsonValue(top[F("bufferMs")], bufferMs, bufferMs);
-      ok &= getJsonValue(top[F("maxFps")],   maxFps,   maxFps);
-      if (bufferMs > 5000) bufferMs = 5000;   // sanity clamp
-      if (maxFps < 1) maxFps = 1; if (maxFps > 120) maxFps = 120;
+      ok &= getJsonValue(top[F("enabled")],     enabled,     enabled);
+      ok &= getJsonValue(top[F("port")],        udpPort,     udpPort);
+      ok &= getJsonValue(top[F("maxBufferMs")], maxBufferMs, maxBufferMs);
+      ok &= getJsonValue(top[F("minBufferMs")], minBufferMs, minBufferMs);
+      if (maxBufferMs > 5000) maxBufferMs = 5000;          // sanity clamp
+      if (minBufferMs > maxBufferMs) minBufferMs = maxBufferMs;
       return ok;
     }
 
@@ -352,9 +402,11 @@ class TimecodeBufferUsermod : public Usermod {
       JsonArray a = user.createNestedArray(F("Timecode Buffer"));
       if (!enabled)        { a.add(F("disabled")); return; }
       if (!listening)      { a.add(F("not listening")); return; }
-      char buf[48];
-      snprintf_P(buf, sizeof(buf), PSTR("%u/%u frames, %ums"),
-                 ringDepth(), slotCount, bufferMs);
+      char buf[64];
+      // depth/cap frames · current effective delay · measured fps
+      unsigned fpsX10 = frameIntervalMs ? (10000u / frameIntervalMs) : 0;
+      snprintf_P(buf, sizeof(buf), PSTR("%u/%u fr · %ums delay · %u.%ufps"),
+                 ringDepth(), slotCount, bufferMs, fpsX10 / 10, fpsX10 % 10);
       a.add(buf);
       JsonArray st = user.createNestedArray(F("TC played/drop/lost"));
       snprintf_P(buf, sizeof(buf), PSTR("%lu / %lu / %lu"),

@@ -49,16 +49,23 @@ const KNOWN_TARGETS: { kind: TargetKind; host: string }[] = [
 // Server-level buffer preference (NOT on the driver — drivers are rebuilt on
 // every reconnect/restart and would lose it). Re-applied to whatever WLED
 // driver is current via applyBufferPref().
-let bufferEnabled = false;
+// Per-box buffer preference (top = Ubert, bottom = Doggert). For a single
+// (non-stack) WLED driver, bufferTop is the one flag. Server-level so it
+// survives reconnects/restarts; re-applied via applyBufferPref().
+let bufferTop = false;
+let bufferBottom = false;
 let bufferPort: number | undefined;
-// Both WledDriver and CombinedWledDriver expose setBufferMode — duck-type so
-// buffer mode applies to the stacked driver too.
 type Bufferable = { setBufferMode: (on: boolean, opts?: { port?: number }) => void; isBuffered: boolean };
 function asBufferable(d: LedDriver | null): Bufferable | null {
   return d && typeof (d as unknown as Bufferable).setBufferMode === 'function' ? (d as unknown as Bufferable) : null;
 }
 function applyBufferPref(): void {
-  asBufferable(driver)?.setBufferMode(bufferEnabled, bufferPort ? { port: bufferPort } : undefined);
+  const opts = bufferPort ? { port: bufferPort } : undefined;
+  if (driver instanceof CombinedWledDriver) {
+    driver.setBufferModeEach(bufferTop, bufferBottom, opts);
+  } else {
+    asBufferable(driver)?.setBufferMode(bufferTop, opts);
+  }
 }
 
 // Global master brightness ("value") applied to the box(es) — scales physical
@@ -192,15 +199,18 @@ app.get('/api/stream/state', (_req, res) => {
 // applyBufferPref() in connectDriver — so it survives target switches and the
 // tsx-watch dev restarts that otherwise drop it.
 app.post('/api/buffer', (req, res) => {
-  bufferEnabled = req.body?.on !== false; // default true
   if (typeof req.body?.port === 'number') bufferPort = req.body.port;
+  // { on } sets both; { top, bottom } set each independently.
+  if (typeof req.body?.on === 'boolean') { bufferTop = req.body.on; bufferBottom = req.body.on; }
+  if (typeof req.body?.top === 'boolean') bufferTop = req.body.top;
+  if (typeof req.body?.bottom === 'boolean') bufferBottom = req.body.bottom;
   applyBufferPref();
-  console.log(`[driver] timecode buffer mode ${bufferEnabled ? 'ON' : 'off'}${bufferPort ? ` (port ${bufferPort})` : ''}`);
-  res.json({ buffered: asBufferable(driver)?.isBuffered ?? false, bufferEnabled, port: bufferPort ?? null });
+  console.log(`[driver] buffer top(Ubert)=${bufferTop} bottom(Doggert)=${bufferBottom}`);
+  res.json({ top: bufferTop, bottom: bufferBottom, port: bufferPort ?? null });
 });
 
 app.get('/api/buffer', (_req, res) => {
-  res.json({ buffered: asBufferable(driver)?.isBuffered ?? false, bufferEnabled, port: bufferPort ?? null });
+  res.json({ top: bufferTop, bottom: bufferBottom, port: bufferPort ?? null });
 });
 
 // Global master "value" / brightness (0..255). Dims the physical output via

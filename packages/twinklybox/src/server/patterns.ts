@@ -181,31 +181,58 @@ function valueNoise3(x: number, y: number, z: number): number {
 export interface PerlinParams {
   kind: 'perlin';
   scale: number;   // spatial frequency (higher = finer detail)
-  speed: number;   // time evolution (cycles/sec through the noise field)
+  speed: number;   // in-place "boil" rate (field morphs without moving)
+  // Directional drift: the whole field floats across the display.
+  floatSpeed?: number; // drift rate (normalized units/sec)
+  floatDir?: number;   // drift heading, degrees (0 = +x / right)
+  // Slow rotation of the field around the display center.
+  spinSpeed?: number;  // revolutions/sec
   hueRange: number; // span of hues to paint, in degrees (e.g. 60 for analogous, 360 for rainbow)
   hueCenter: number; // base hue
   sat: number;
   val: number;
 }
+
+// Accumulated "distance moved" for perlin — boil phase, drift offset, and spin
+// angle integrate the slider rates over real elapsed time. Because we
+// accumulate (rather than compute speed×tSec), changing a slider just changes
+// the RATE from here on, so the field never jumps. Module-level so it persists
+// across frames (only one pattern runs at a time).
+let pnLastT = 0;
+let pnBoil = 0, pnDriftX = 0, pnDriftY = 0, pnSpin = 0;
+// Same accumulators for megadrome (separate so switching patterns doesn't share
+// drift state).
+let mdLastT = 0;
+let mdDriftX = 0, mdDriftY = 0, mdSpin = 0, mdDScroll = 0;
+
 export function renderPerlin(out: Uint8Array, ctx: PatternContext, p: PerlinParams) {
-  const t = ctx.tSec * p.speed;
+  // Advance accumulators by the real frame delta. Guard against the first
+  // frame, stream restarts (tSec resets → negative), and long pauses.
+  let dt = ctx.tSec - pnLastT;
+  pnLastT = ctx.tSec;
+  if (!(dt > 0) || dt > 0.5) dt = 0;
+  const dirRad = ((p.floatDir ?? 0) * Math.PI) / 180;
+  pnBoil   += (p.speed ?? 0) * dt;
+  pnDriftX += Math.cos(dirRad) * (p.floatSpeed ?? 0) * dt;
+  pnDriftY += Math.sin(dirRad) * (p.floatSpeed ?? 0) * dt;
+  pnSpin    = (pnSpin + (p.spinSpeed ?? 0) * dt * 2 * Math.PI) % (2 * Math.PI);
+
+  const cx = 0.5, cy = 0.5;            // spin/drift origin = display center
+  const cs = Math.cos(pnSpin), sn = Math.sin(pnSpin);
   for (let i = 0; i < ctx.numLeds; i++) {
-    let x: number, y: number, z: number;
+    let bx: number, by: number, bz: number;
     if (ctx.coords) {
       const c = ctx.coords[i];
-      x = c.x * p.scale;
-      y = c.y * p.scale;
-      z = c.z * p.scale;
+      bx = c.x; by = c.y; bz = c.z;
     } else {
-      // Fallback: 1D walk along strand.
-      x = (i / Math.max(1, ctx.numLeds - 1)) * p.scale;
-      y = 0;
-      z = 0;
+      bx = i / Math.max(1, ctx.numLeds - 1); by = 0; bz = 0;
     }
-    // Animate via the y axis with a positive offset: at time t each LED
-    // samples noise(x, y+t, z), so the pattern visible at any given y is
-    // "what was above a moment ago" — i.e., the field drifts downward.
-    const n = valueNoise3(x, y + t, z);
+    // Rotate the sample point around the center, then translate by the drift.
+    const ox = bx - cx, oy = by - cy;
+    const x = (cx + ox * cs - oy * sn + pnDriftX) * p.scale;
+    const y = (cy + ox * sn + oy * cs + pnDriftY) * p.scale;
+    const z = bz * p.scale + pnBoil;   // boil = walk through the field's z
+    const n = valueNoise3(x, y, z);
     const h = p.hueCenter + (n - 0.5) * p.hueRange;
     const [r, g, b] = hsvToRgb(h, p.sat, p.val);
     writePixel(out, i, ctx.bytesPerLed, r, g, b);
@@ -384,6 +411,13 @@ export interface MegadromeParams {
   // to [0,1]. Default 1.0. Use > 1 to push more LEDs into bright regions,
   // < 1 to keep the show more subdued.
   minMaxGain: number;
+  // Spatial motion (megadrome is otherwise static — only the audio pulse moves
+  // it). Directional drift + slow spin around the origin, accumulated so slider
+  // changes adjust the rate without jumping the field.
+  floatSpeed?: number; // drift rate (normalized units/sec)
+  floatDir?: number;   // drift heading, degrees (0 = +x / right)
+  spinSpeed?: number;  // revolutions/sec around the origin
+  dSpeed?: number;     // radial-distance scroll rate (units/sec, +/- = out/in)
 }
 
 const MD_NUM_BANDS = 4;     // drums, bass, vocals, other
@@ -418,7 +452,19 @@ export function renderMegadrome(out: Uint8Array, ctx: PatternContext, p: Megadro
       Math.min(1, src.vocals * g),
       Math.min(1, src.other  * g),
     ];
-    bassPulse = bandEnergies[1] * p.pulseSize; // bass stem only
+    // Bass pulse normally rides the bass stem. But for a track with no
+    // stems (stems zero-filled — e.g. a no-Demucs download), the bass stem
+    // is always 0 and the pulse would die. When all stems read silent, fall
+    // back to the low FFT bands (same weighting eq12 uses) so the radial
+    // pulse still works off the bass frequencies. ctx.audio.bands is always
+    // populated regardless of bandMode.
+    const stemsSilent = bandEnergies.every((e) => e < 1e-4);
+    if (stemsSilent) {
+      const bb = ctx.audio.bands;
+      bassPulse = (bb[0] * 0.1 + bb[1] * 0.4 + bb[2] * 0.6 + bb[3] * 0.4 + bb[4] * 0.1) * p.pulseSize;
+    } else {
+      bassPulse = bandEnergies[1] * p.pulseSize; // bass stem
+    }
   }
   const N = bandEnergies.length;
 
@@ -445,8 +491,24 @@ export function renderMegadrome(out: Uint8Array, ctx: PatternContext, p: Megadro
   // Per-band hue — same megadrome formula `(octave+1)/N` × hueRange.
   const bandHues = new Array<number>(N);
   for (let b = 0; b < N; b++) {
-    bandHues[b] = ((p.hueOffset + ((b + 1) / N) * p.hueRange) % 360 + 360) % 360;
+    // band 0 (lowest freq / bass in eq12) sits exactly at hueOffset; higher
+    // bands fan out across hueRange from there.
+    bandHues[b] = ((p.hueOffset + (b / N) * p.hueRange) % 360 + 360) % 360;
   }
+
+  // Advance spatial-motion accumulators by real elapsed dt so changing a slider
+  // adjusts the rate without jumping the field. Guard first frame / reset / pause.
+  {
+    let dt = ctx.tSec - mdLastT;
+    mdLastT = ctx.tSec;
+    if (!(dt > 0) || dt > 0.5) dt = 0;
+    const dirRad = ((p.floatDir ?? 0) * Math.PI) / 180;
+    mdDriftX += Math.cos(dirRad) * (p.floatSpeed ?? 0) * dt;
+    mdDriftY += Math.sin(dirRad) * (p.floatSpeed ?? 0) * dt;
+    mdSpin = (mdSpin + (p.spinSpeed ?? 0) * dt * 2 * Math.PI) % (2 * Math.PI);
+    mdDScroll += (p.dSpeed ?? 0) * dt;
+  }
+  const mdCos = Math.cos(mdSpin), mdSin = Math.sin(mdSpin);
 
   for (let i = 0; i < ctx.numLeds; i++) {
     let cx: number, cy: number, cz: number;
@@ -461,16 +523,18 @@ export function renderMegadrome(out: Uint8Array, ctx: PatternContext, p: Megadro
       cy = 0.5 - p.originY;
       cz = 0.5 - p.originZ;
     }
+    // Spin around the origin (radial is invariant), then drift the field.
+    { const rx = cx * mdCos - cy * mdSin; const ry = cx * mdSin + cy * mdCos; cx = rx + mdDriftX; cy = ry + mdDriftY; }
     const radial = Math.sqrt(cx * cx + cy * cy + cz * cz);
 
     const inner = valueNoise3(
       cx * p.noise2PosScalar,
       cy * p.noise2PosScalar,
-      radial * p.d2Scalar - bassPulse,
+      radial * p.d2Scalar - bassPulse + mdDScroll,
     );
     const cum = valueNoise4(
       cx * p.rotationScalar,
-      radial * p.dScalar - bassPulse,
+      radial * p.dScalar - bassPulse + mdDScroll,
       cy * p.rotationScalar,
       inner * p.noise2Scalar,
     );
@@ -506,9 +570,46 @@ export function renderStrobe(out: Uint8Array, ctx: PatternContext, p: StrobePara
   for (let i = 0; i < ctx.numLeds; i++) writePixel(out, i, ctx.bytesPerLed, r, g, b);
 }
 
+// Orientation debug: lights a single distinct-colored pixel in each corner of
+// each vertical half of the display (so a stacked rig shows both boxes). The
+// corner color scheme is fixed — TL=red, TR=green, BL=blue, BR=yellow — so you
+// can read off any flip/rotation by comparing the physical curtain to the
+// preview (which shows the true, pre-driver orientation).
+export interface DebugCornersParams { kind: 'debugcorners' }
+export function renderDebugCorners(out: Uint8Array, ctx: PatternContext, _p: DebugCornersParams) {
+  const bpl = ctx.bytesPerLed;
+  const N = ctx.numLeds;
+  for (let i = 0; i < N; i++) writePixel(out, i, bpl, 0, 0, 0); // black field
+
+  const coords = ctx.coords;
+  if (!coords || N === 0) return;
+  // Recover matrix width: row-major, so y is constant within a row; W = run
+  // length of the first row. H falls out of N/W.
+  let W = 1;
+  while (W < N && coords[W].y === coords[0].y) W++;
+  const H = Math.floor(N / W);
+  if (W < 2 || H < 2) return;
+
+  // Two stacked halves (top = Ubert rows, bottom = Doggert rows). For a single
+  // box H/2 still works — you just get two banded sets of corners.
+  const halfH = Math.floor(H / 2);
+  const mark = (row: number, col: number, r: number, g: number, b: number) => {
+    const i = row * W + col;
+    if (i >= 0 && i < N) writePixel(out, i, bpl, r, g, b);
+  };
+  const halves: [number, number][] = [[0, halfH - 1], [halfH, H - 1]];
+  for (const [top, bot] of halves) {
+    mark(top, 0, 255, 0, 0);       // TL red
+    mark(top, W - 1, 0, 255, 0);   // TR green
+    mark(bot, 0, 0, 0, 255);       // BL blue
+    mark(bot, W - 1, 255, 255, 0); // BR yellow
+  }
+}
+
 // Union for dispatch
 export type Pattern =
-  | SolidParams | GradientParams | PerlinParams | PlanesParams | StrobeParams | MegadromeParams;
+  | SolidParams | GradientParams | PerlinParams | PlanesParams | StrobeParams | MegadromeParams
+  | DebugCornersParams;
 
 export function render(out: Uint8Array, ctx: PatternContext, p: Pattern) {
   switch (p.kind) {
@@ -518,5 +619,6 @@ export function render(out: Uint8Array, ctx: PatternContext, p: Pattern) {
     case 'planes':    return renderPlanes(out, ctx, p);
     case 'strobe':    return renderStrobe(out, ctx, p);
     case 'megadrome': return renderMegadrome(out, ctx, p);
+    case 'debugcorners': return renderDebugCorners(out, ctx, p);
   }
 }

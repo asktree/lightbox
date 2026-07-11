@@ -895,9 +895,8 @@ export default function App() {
                   ${t.analyzed ? 'text-zinc-200' : 'text-zinc-600'}`}
               >
                 <button
-                  onClick={() => t.analyzed && setSelected(t)}
-                  disabled={!t.analyzed}
-                  className={`w-full text-left px-3 py-2 pr-10 ${t.analyzed ? '' : 'cursor-not-allowed'}`}
+                  onClick={() => setSelected(t)}
+                  className="w-full text-left px-3 py-2 pr-10"
                 >
                   <div className="truncate font-medium">{t.name}</div>
                   <div className="truncate text-zinc-500 text-[10px]">
@@ -905,7 +904,7 @@ export default function App() {
                     {t.analyzed && t.bpm != null && (
                       <> · {Math.round(t.bpm)} BPM · {t.key}{t.mode === 'minor' ? 'm' : ''}</>
                     )}
-                    {!t.analyzed && ' · not analyzed'}
+                    {!t.analyzed && ' · full mix (no stems)'}
                   </div>
                 </button>
                 {t.analyzed && (
@@ -934,8 +933,57 @@ export default function App() {
         <div className="flex-1 flex flex-col min-h-0">
         {!selected ? (
           <div className="flex-1 flex items-center justify-center text-zinc-500">Select a track</div>
-        ) : loading || !analysis ? (
+        ) : loading ? (
           <div className="flex-1 flex items-center justify-center text-zinc-500">Loading…</div>
+        ) : !analysis ? (
+          // No-stem (un-analyzed) track: play the full mix straight from
+          // audio.ogg. We register the single full-mix element as the
+          // master (`drums`) so togglePlay, the master clock, position
+          // tracking, and the /api/playback push all work unchanged — which
+          // is what keeps twinklybox's envelope-driven megadrome in sync.
+          // Skips every analysis-dependent visualizer.
+          <>
+            <header className="flex items-center justify-between px-4 py-2 border-b border-zinc-800 shrink-0">
+              <div className="min-w-0">
+                <div className="text-sm font-semibold truncate">{selected.name}</div>
+                <div className="text-xs text-zinc-500 truncate">{selected.artists.join(', ')}</div>
+              </div>
+              <span className="text-[10px] text-amber-400 font-mono shrink-0 ml-4">full mix · no stems</span>
+            </header>
+
+            <StemTrack
+              key="fullmix"
+              url={`/api/library/${selected.id}/audio`}
+              volume={1}
+              audioCtx={audioCtx}
+              audioDest={eqInputRef.current}
+              loop={false}
+              onAudio={(el) => { audioElsRef.current.drums = el ?? undefined; }}
+              onAnalyser={(a) => { analyzersRef.current.drums = a ?? undefined; }}
+              onEnded={() => {
+                const next = queueRef.current[0];
+                if (!next) return;
+                autoPlayNextRef.current = true;
+                setSelected(next);
+                apiRemoveAt(0);
+              }}
+              onSeeked={(t) => {
+                const effOffMs = effectiveOffsetMsRef.current ?? 0;
+                pushPlayback({ position: Math.max(0, t - effOffMs / 1000), playing });
+              }}
+            />
+
+            <div className="flex-1 flex items-center justify-center text-zinc-600 text-xs font-mono px-6 text-center leading-relaxed">
+              no stem separation for this track — playing the full mix.<br />
+              the 12-band envelope still drives twinklybox (megadrome · eq12 mode).
+            </div>
+
+            <Scrubber
+              position={position}
+              duration={(selected.duration_ms ?? 0) / 1000}
+              onSeek={(t) => { const el = audioElsRef.current.drums; if (el) el.currentTime = t; }}
+            />
+          </>
         ) : (
           <>
             <header className="flex items-center justify-between px-4 py-2 border-b border-zinc-800 shrink-0">

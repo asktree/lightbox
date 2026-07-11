@@ -222,8 +222,25 @@ function computeBandsEnvelope(
 async function computeEnvelope(trackId: string): Promise<EnvelopePack> {
   if (!/^[a-zA-Z0-9_-]+$/.test(trackId)) throw new Error('invalid trackId');
   const stemsDir = join(TRACKS_DIR, trackId, 'stems');
-  if (!existsSync(stemsDir)) throw new Error(`no stems for ${trackId}`);
-  // Decode all four in parallel — ffmpeg is single-threaded per stem, but
+  const haveStems = existsSync(stemsDir) && STEMS.every((s) => existsSync(join(stemsDir, `${s}.ogg`)));
+
+  // No-stem fallback. Tracks downloaded without Demucs have only audio.ogg.
+  // The 12-band envelope is just an FFT of the full mix — and the full mix
+  // *is* the equal-weighted sum of stems — so we can compute the bands
+  // straight from audio.ogg. Per-stem energies aren't recoverable without
+  // separation, so we zero them; megadrome's eq12 mode only reads `bands`.
+  if (!haveStems) {
+    const audioPath = join(TRACKS_DIR, trackId, 'audio.ogg');
+    if (!existsSync(audioPath)) throw new Error(`no stems and no audio.ogg for ${trackId}`);
+    const combined = await decodeStemToMonoF32(audioPath); // generic ffmpeg decode → mono f32
+    const numSamples = computeRMSEnvelope(combined, DECODE_SR, ENVELOPE_HZ).samples.length;
+    const stems = {} as Record<Stem, StemEnvelope>;
+    for (const s of STEMS) stems[s] = { samples: new Float32Array(numSamples), max: 0 };
+    const bands = computeBandsEnvelope(combined, DECODE_SR, ENVELOPE_HZ);
+    return { trackId, sr: ENVELOPE_HZ, numSamples, stems, bands };
+  }
+
+  // Stems present: decode all four in parallel — ffmpeg is single-threaded per stem, but
   // four subprocesses cut wall time roughly 4x on a multi-core machine.
   // Keep the raw PCM around (alongside the per-stem RMS) so we can sum
   // for the band-FFT below.

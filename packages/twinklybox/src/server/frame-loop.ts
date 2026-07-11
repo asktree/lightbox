@@ -54,7 +54,7 @@ export class FrameLoop {
     }
   }
   setGamma(g: number) {
-    this.gamma = Math.max(0.1, Math.min(10, g));
+    this.gamma = Math.max(0.1, Math.min(30, g));
     this.rebuildGammaLut();
   }
   getGamma() { return this.gamma; }

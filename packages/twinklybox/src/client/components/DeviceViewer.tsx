@@ -12,6 +12,39 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 interface Coord { x: number; y: number; z: number }
 const FRAME_HZ = 30;
 
+// Rolling delay buffer for preview frames. The preview polls the server's
+// *current* rendered frame, which reflects the audio already delayed by
+// syscapDelay (the bus holds captured audio before release). The actual lights
+// get that same frame but additionally held ~500ms (Doggert's on-box buffer /
+// Ubert's matching software delay). So to make preview == lights == the music
+// you hear, we hold preview frames by that same box delay and no more.
+class FrameDelay {
+  private q: { t: number; buf: Uint8Array }[] = [];
+  push(buf: Uint8Array, now: number) { this.q.push({ t: now, buf }); }
+  // Returns the newest frame at least delayMs old (real-time delayed playout),
+  // keeping it as the queue head so a tick with nothing newer holds it steady.
+  // delayMs<=0 → pass-through latest (buffer off = live preview).
+  take(delayMs: number, now: number): Uint8Array | null {
+    if (delayMs <= 0) {
+      const last = this.q.length ? this.q[this.q.length - 1].buf : null;
+      this.q.length = 0;
+      return last;
+    }
+    let idx = -1;
+    for (let i = 0; i < this.q.length; i++) {
+      if (now - this.q[i].t >= delayMs) idx = i; else break;
+    }
+    if (idx < 0) {
+      // Nothing aged enough yet (startup / just raised delay). Trim runaway.
+      while (this.q.length > 2 && now - this.q[0].t > delayMs + 1000) this.q.shift();
+      return null;
+    }
+    const buf = this.q[idx].buf;
+    if (idx > 0) this.q.splice(0, idx); // drop the consumed older frames
+    return buf;
+  }
+}
+
 interface LayoutResp {
   numLeds: number;
   bytesPerLed: number;
@@ -23,12 +56,16 @@ interface LayoutResp {
 export function DeviceViewer({
   height = 360,
   origin = null,
+  delayMs = 0,
 }: {
   height?: number;
   // Pattern origin in normalized [0,1]^3 coords (for megadrome). The
   // viewer paints a small marker so you can see where the radial pulse
   // emanates from. Pass null to hide.
   origin?: { x: number; y: number; z: number } | null;
+  // Hold preview frames this long (ms) so the preview lines up with the
+  // box-delayed lights / the music you hear. Typically the box buffer (~500ms).
+  delayMs?: number;
 }) {
   const [layout, setLayout] = useState<LayoutResp | null>(null);
 
@@ -49,9 +86,9 @@ export function DeviceViewer({
     );
   }
   if (layout.matrix) {
-    return <Viewer2D height={height} matrix={layout.matrix} bytesPerLed={layout.bytesPerLed} origin={origin} />;
+    return <Viewer2D height={height} matrix={layout.matrix} bytesPerLed={layout.bytesPerLed} origin={origin} delayMs={delayMs} />;
   }
-  return <Viewer3D height={height} origin={origin} />;
+  return <Viewer3D height={height} origin={origin} delayMs={delayMs} />;
 }
 
 // ---- 2D canvas viewer (matrix layouts) ----
@@ -64,15 +101,20 @@ function Viewer2D({
   matrix,
   bytesPerLed,
   origin,
+  delayMs,
 }: {
   height: number;
   matrix: { w: number; h: number };
   bytesPerLed: number;
   origin: { x: number; y: number; z: number } | null;
+  delayMs: number;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const originRef = useRef<typeof origin>(origin);
   useEffect(() => { originRef.current = origin; }, [origin]);
+  // Read the delay via ref so toggling buffer doesn't tear down the canvas.
+  const delayRef = useRef(delayMs);
+  useEffect(() => { delayRef.current = delayMs; }, [delayMs]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -107,12 +149,17 @@ function Viewer2D({
     if (canvas.parentElement) ro.observe(canvas.parentElement);
 
     let cancelled = false;
+    const frameDelay = new FrameDelay();
     async function tick() {
       if (cancelled) return;
       try {
         const r = await fetch('/api/frame');
         if (!r.ok) return;
-        const buf = new Uint8Array(await r.arrayBuffer());
+        const incoming = new Uint8Array(await r.arrayBuffer());
+        // Hold frames by the box delay so the preview matches the lights.
+        frameDelay.push(incoming, performance.now());
+        const buf = frameDelay.take(delayRef.current, performance.now());
+        if (!buf) return; // nothing aged enough yet — keep last drawn frame
         const stride = bytesPerLed;
         // RGBW: byte order is W,R,G,B per LED in our driver. RGB: R,G,B.
         const rOff = stride === 4 ? 1 : 0;
@@ -173,13 +220,17 @@ function Viewer2D({
 function Viewer3D({
   height,
   origin,
+  delayMs,
 }: {
   height: number;
   origin: { x: number; y: number; z: number } | null;
+  delayMs: number;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const originRef = useRef<typeof origin>(origin);
   useEffect(() => { originRef.current = origin; }, [origin]);
+  const delayRef = useRef(delayMs);
+  useEffect(() => { delayRef.current = delayMs; }, [delayMs]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -266,12 +317,16 @@ function Viewer3D({
     }).catch(console.error);
 
     let cancelled = false;
+    const frameDelay = new FrameDelay();
     async function pullFrame() {
       if (cancelled || !points || !colors) return;
       try {
         const r = await fetch('/api/frame');
         if (!r.ok) return;
-        const buf = new Uint8Array(await r.arrayBuffer());
+        const incoming = new Uint8Array(await r.arrayBuffer());
+        frameDelay.push(incoming, performance.now());
+        const buf = frameDelay.take(delayRef.current, performance.now());
+        if (!buf) return;
         const stride = bytesPerLed;
         const rOff = stride === 4 ? 1 : 0;
         const gOff = stride === 4 ? 2 : 1;

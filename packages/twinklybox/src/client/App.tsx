@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import type React from 'react';
 import { DeviceViewer } from './components/DeviceViewer';
 import { useMicSource } from './useMicSource';
 
@@ -118,6 +119,9 @@ export default function App() {
   // Perlin
   const [perlinScale, setPerlinScale] = usePersistedState('perlin.scale', 3);
   const [perlinSpeed, setPerlinSpeed] = usePersistedState('perlin.speed', 0.3);
+  const [perlinFloatSpeed, setPerlinFloatSpeed] = usePersistedState('perlin.floatSpeed', 0);
+  const [perlinFloatDir, setPerlinFloatDir] = usePersistedState('perlin.floatDir', 0);
+  const [perlinSpinSpeed, setPerlinSpinSpeed] = usePersistedState('perlin.spinSpeed', 0);
   const [perlinHueRange, setPerlinHueRange] = usePersistedState('perlin.hueRange', 120);
   const [perlinHueCenter, setPerlinHueCenter] = usePersistedState('perlin.hueCenter', 200);
   const [perlinVal, setPerlinVal] = usePersistedState('perlin.val', 0.8);
@@ -154,6 +158,12 @@ export default function App() {
   const [mdNormMode, setMdNormMode] = usePersistedState<'percentile' | 'robust-minmax'>('md.normMode', 'robust-minmax');
   const [mdBandMode, setMdBandMode] = usePersistedState<'stems' | 'eq12'>('md.bandMode', 'stems');
   const [mdMinMaxGain, setMdMinMaxGain] = usePersistedState('md.minMaxGain', 1);
+  const [mdFloatSpeed, setMdFloatSpeed] = usePersistedState('md.floatSpeed', 0);
+  const [mdFloatDir, setMdFloatDir] = usePersistedState('md.floatDir', 0);
+  const [mdSpinSpeed, setMdSpinSpeed] = usePersistedState('md.spinSpeed', 0);
+  // Radial-distance scroll speed — animates the noise along the radial axis
+  // (a manual tunnel/zoom). Bipolar: +/- for outward/inward.
+  const [mdDSpeed, setMdDSpeed] = usePersistedState('md.dSpeed', 0);
 
   // Audio source state
   const [audio, setAudio] = useState<AudioState | null>(null);
@@ -172,8 +182,11 @@ export default function App() {
 
   // WLED timecode buffer (jitter absorption on-box). Persisted + re-asserted on
   // load so it survives server restarts, which rebuild the driver buffer-off.
-  const [bufferOn, setBufferOn] = usePersistedState('wled.buffer', false);
-  useEffect(() => { api('/buffer', { on: bufferOn }).catch(() => {}); }, [bufferOn]);
+  // Per-box buffer: top = Ubert, bottom = Doggert. Doggert defaults ON (its
+  // usermod works); Ubert OFF (stock firmware). Re-asserted on load.
+  const [bufferTop, setBufferTop] = usePersistedState('wled.bufferTop', false);
+  const [bufferBottom, setBufferBottom] = usePersistedState('wled.bufferBottom', true);
+  useEffect(() => { api('/buffer', { top: bufferTop, bottom: bufferBottom }).catch(() => {}); }, [bufferTop, bufferBottom]);
 
   // Live system-audio sync — captures the Mac output mix and drives megadrome
   // on a delay matched to playback (AirPlay) latency. Needs eq12 like mic.
@@ -270,17 +283,23 @@ export default function App() {
     return () => { clearInterval(t); clearInterval(ta); };
   }, []);
 
+  // Orientation debug — when on, override the pattern with a corner-color test
+  // (TL=red TR=green BL=blue BR=yellow, per stacked half). Not persisted so it
+  // never survives a reload during a show.
+  const [debugCorners, setDebugCorners] = useState(false);
+
   // Push pattern updates to the server whenever any param changes.
   useEffect(() => {
-    const p = buildPattern();
+    const p = debugCorners ? { kind: 'debugcorners' } : buildPattern();
     api('/pattern', p).catch(console.error);
   }, [
+    debugCorners,
     kind,
     solidHue, solidSat, solidVal,
     gradAxis, gradHueStart, gradHueEnd, gradSpeed, gradVal,
-    perlinScale, perlinSpeed, perlinHueRange, perlinHueCenter, perlinVal,
+    perlinScale, perlinSpeed, perlinFloatSpeed, perlinFloatDir, perlinSpinSpeed, perlinHueRange, perlinHueCenter, perlinVal,
     planesDirection, planesHue, planesVal, planesSpeed, planesSpawnRate, planesThickness, planesSoftness,
-    mdOriginX, mdOriginY, mdOriginZ, mdRotation, mdD, mdD2, mdNoise2Pos, mdNoise2, mdPulse, mdHueOffset, mdHueRange, mdSat, mdVal, mdBaseline, mdPropGain, mdPropDeadzone, mdNormMode, mdMinMaxGain, mdBandMode,
+    mdOriginX, mdOriginY, mdOriginZ, mdRotation, mdD, mdD2, mdNoise2Pos, mdNoise2, mdPulse, mdHueOffset, mdHueRange, mdSat, mdVal, mdBaseline, mdPropGain, mdPropDeadzone, mdNormMode, mdMinMaxGain, mdBandMode, mdFloatSpeed, mdFloatDir, mdSpinSpeed, mdDSpeed,
     strobeHue, strobeHzVal, strobeDuty, strobeVal,
   ]);
 
@@ -288,7 +307,7 @@ export default function App() {
     switch (kind) {
       case 'solid':    return { kind, hue: solidHue, sat: solidSat, val: solidVal };
       case 'gradient': return { kind, axis: gradAxis, hueStart: gradHueStart, hueEnd: gradHueEnd, sat: 1, val: gradVal, speed: gradSpeed };
-      case 'perlin':   return { kind, scale: perlinScale, speed: perlinSpeed, hueRange: perlinHueRange, hueCenter: perlinHueCenter, sat: 1, val: perlinVal };
+      case 'perlin':   return { kind, scale: perlinScale, speed: perlinSpeed, floatSpeed: perlinFloatSpeed, floatDir: perlinFloatDir, spinSpeed: perlinSpinSpeed, hueRange: perlinHueRange, hueCenter: perlinHueCenter, sat: 1, val: perlinVal };
       case 'planes':    return { kind, direction: planesDirection, hue: planesHue, sat: 1, val: planesVal, speed: planesSpeed, spawnRate: planesSpawnRate, thickness: planesThickness, softness: planesSoftness };
       case 'megadrome': return {
         kind, originX: mdOriginX, originY: mdOriginY, originZ: mdOriginZ,
@@ -298,6 +317,7 @@ export default function App() {
         sat: mdSat, val: mdVal, baseline: mdBaseline,
         propGain: mdPropGain, propDeadzone: mdPropDeadzone, normMode: mdNormMode, bandMode: mdBandMode,
         minMaxGain: mdMinMaxGain,
+        floatSpeed: mdFloatSpeed, floatDir: mdFloatDir, spinSpeed: mdSpinSpeed, dSpeed: mdDSpeed,
       };
       case 'strobe':    return { kind, hue: strobeHue, sat: 1, val: strobeVal, hz: strobeHzVal, duty: strobeDuty };
     }
@@ -396,7 +416,7 @@ export default function App() {
         <label className="ml-auto text-xs text-zinc-500 font-mono flex items-center gap-2"
           title="Perceptual gamma applied to every output byte. ~2.2 ≈ sRGB; lower lifts dim values, higher crushes them. Helps when the LEDs look 'binary' (mostly off or full bright).">
           γ
-          <input type="range" min={1} max={10} step={0.05} value={gamma} onChange={(e) => setGamma(+e.target.value)} className="w-24" />
+          <input type="range" min={1} max={30} step={0.05} value={gamma} onChange={(e) => setGamma(+e.target.value)} className="w-24" />
           <span className="w-8 text-right">{gamma.toFixed(2)}</span>
         </label>
         <label className="text-xs text-zinc-500 font-mono flex items-center gap-2">
@@ -415,7 +435,18 @@ export default function App() {
               className={`px-3 py-1.5 rounded text-xs font-mono ${kind === k ? 'bg-purple-600' : 'bg-zinc-800 hover:bg-zinc-700'}`}
             >{k}</button>
           ))}
+          <label className="ml-auto flex items-center gap-1.5 text-[11px] font-mono text-zinc-400 cursor-pointer select-none"
+            title="Orientation test: lights one pixel in each corner of each stacked half — TL red, TR green, BL blue, BR yellow. Compare the physical curtain to the preview to read off any flip/rotation.">
+            <input type="checkbox" checked={debugCorners} onChange={(e) => setDebugCorners(e.target.checked)} />
+            debug corners
+          </label>
         </div>
+
+        {debugCorners && (
+          <div className="text-[10px] font-mono text-zinc-500 pt-1">
+            corner test active · <span className="text-red-400">TL red</span> · <span className="text-green-400">TR green</span> · <span className="text-blue-400">BL blue</span> · <span className="text-yellow-400">BR yellow</span> — per stacked half. Compare curtain ↔ preview.
+          </div>
+        )}
 
         {kind === 'solid' && (
           <div className="space-y-2 pt-2">
@@ -452,7 +483,13 @@ export default function App() {
               <div className="text-amber-400 text-[10px] font-mono">no layout — perlin falls back to 1D along strand</div>
             )}
             <Slider label="scale" min={0.5} max={10} step={0.1} value={perlinScale} onChange={setPerlinScale} />
-            <Slider label="speed" min={0} max={2} step={0.01} value={perlinSpeed} onChange={setPerlinSpeed} />
+            <Slider label="speed (boil)" min={0} max={2} step={0.01} value={perlinSpeed} onChange={setPerlinSpeed} />
+            {/* Directional drift: float speed slider + direction knob. */}
+            <div className="flex items-center gap-3">
+              <div className="flex-1"><Slider label="float speed" min={0} max={1} step={0.005} value={perlinFloatSpeed} onChange={setPerlinFloatSpeed} /></div>
+              <DirKnob value={perlinFloatDir} onChange={setPerlinFloatDir} />
+            </div>
+            <Slider label="spin (rev/s)" min={-0.5} max={0.5} step={0.005} value={perlinSpinSpeed} onChange={setPerlinSpinSpeed} />
             <Slider label="hue range" min={0} max={360} step={1} value={perlinHueRange} onChange={setPerlinHueRange} />
             <Slider label="hue center" min={0} max={360} step={1} value={perlinHueCenter} onChange={setPerlinHueCenter} accentHue={perlinHueCenter} />
             <Slider label="val" min={0} max={1} step={0.01} value={perlinVal} onChange={setPerlinVal} />
@@ -590,7 +627,14 @@ export default function App() {
             <Slider label="val" min={0} max={1} step={0.01} value={mdVal} onChange={setMdVal} />
             <Slider label="baseline" min={0} max={0.5} step={0.01} value={mdBaseline} onChange={setMdBaseline} />
             <Slider label="prop gain" min={-1} max={1} step={0.01} value={mdPropGain} onChange={setMdPropGain} />
-            <Slider label="deadzone" min={0} max={2} step={0.01} value={mdPropDeadzone} onChange={setMdPropDeadzone} />
+            <Slider label="deadzone" min={0} max={20} step={0.05} value={mdPropDeadzone} onChange={setMdPropDeadzone} />
+            {/* Spatial motion: directional float (speed + direction knob) + spin. */}
+            <div className="flex items-center gap-3 pt-1">
+              <div className="flex-1"><Slider label="float speed" min={0} max={1} step={0.005} value={mdFloatSpeed} onChange={setMdFloatSpeed} onZero={() => setMdFloatSpeed(0)} /></div>
+              <DirKnob value={mdFloatDir} onChange={setMdFloatDir} />
+            </div>
+            <Slider label="spin (rev/s)" min={-0.5} max={0.5} step={0.005} value={mdSpinSpeed} onChange={setMdSpinSpeed} onZero={() => setMdSpinSpeed(0)} />
+            <Slider label="d speed" min={-5} max={5} step={0.02} value={mdDSpeed} onChange={setMdDSpeed} onZero={() => setMdDSpeed(0)} />
           </div>
         )}
 
@@ -635,17 +679,22 @@ export default function App() {
           </span>
         </div>
 
-        {/* WLED timecode buffer — routes frames through the on-box 500ms jitter
-            buffer (timecode_buffer usermod, UDP 4049). Needs the usermod firmware. */}
+        {/* Per-box timecode buffer (on-box 500ms jitter buffer, UDP 4049).
+            Each box independently: only works on a box whose usermod is loaded
+            (Doggert). Ubert runs stock, so its buffer does nothing. */}
         <div className="flex items-center gap-2 text-[11px] font-mono">
+          <span className="text-zinc-500">🪣 buffer</span>
           <button
-            onClick={() => setBufferOn(!bufferOn)}
-            className={`px-2 py-1 rounded ${bufferOn ? 'bg-indigo-600 text-white' : 'bg-zinc-800 hover:bg-zinc-700'}`}
-            title="Route frames through the on-box 500ms jitter buffer (timecode_buffer usermod, UDP 4049). Smooths choppy WiFi. Only works on a box flashed with the usermod (Ubert)."
-          >{bufferOn ? '🪣 buffer on' : '🪣 buffer off'}</button>
-          <span className="text-[10px] text-zinc-600">
-            {bufferOn ? 'frames buffered 500ms on-box — jitter-free' : 'immediate DDP — no jitter buffer'}
-          </span>
+            onClick={() => setBufferTop(!bufferTop)}
+            className={`px-2 py-1 rounded ${bufferTop ? 'bg-indigo-600 text-white' : 'bg-zinc-800 hover:bg-zinc-700'}`}
+            title="Buffer Ubert (top). Ubert is on stock firmware, so this currently has no effect until its usermod is reflashed."
+          >Ubert {bufferTop ? 'on' : 'off'}</button>
+          <button
+            onClick={() => setBufferBottom(!bufferBottom)}
+            className={`px-2 py-1 rounded ${bufferBottom ? 'bg-indigo-600 text-white' : 'bg-zinc-800 hover:bg-zinc-700'}`}
+            title="Buffer Doggert (bottom). Its usermod is loaded, so this gives jitter-free playback."
+          >Doggert {bufferBottom ? 'on' : 'off'}</button>
+          <span className="text-[10px] text-zinc-600">per-box · 500ms on-box jitter buffer</span>
         </div>
 
         {/* Live system-audio sync — captures the Mac output mix (ScreenCaptureKit)
@@ -683,7 +732,7 @@ export default function App() {
         />
 
         {/* 12-band spectrum meter — live view of whatever source is active. */}
-        <BandMeter bands={audio?.bands} minMax={audio?.bandsMinMax} />
+        <BandMeter bands={audio?.bands} minMax={audio?.bandsMinMax} hueOffset={mdHueOffset} hueRange={mdHueRange} />
 
         {/* Audio-bus smoothing — asymmetric EMA (attack ≠ decay). */}
         <div className="flex items-center gap-2 text-[10px] text-zinc-500 font-mono"
@@ -732,6 +781,10 @@ export default function App() {
         <DeviceViewer
           height={420}
           origin={kind === 'megadrome' ? { x: mdOriginX, y: mdOriginY, z: mdOriginZ } : null}
+          // Hold the preview by the box buffer so preview == lights == music.
+          // syscapDelay is already baked into the rendered frame (the audio bus
+          // releases captured audio late), so only the box delay remains.
+          delayMs={(bufferTop || bufferBottom) ? 500 : 0}
         />
       </section>
     </div>
@@ -742,16 +795,19 @@ export default function App() {
 // (percentile, solid bar) with `bandsMinMax` (robust-minmax) faded behind.
 // Reflects whatever source is active — musicbox eq12, synth, or mic — since
 // every source populates these. Bars are hue-coded low→high.
-function BandMeter({ bands, minMax }: { bands?: number[]; minMax?: number[] }) {
+function BandMeter({ bands, minMax, hueOffset = 0, hueRange = 280 }: { bands?: number[]; minMax?: number[]; hueOffset?: number; hueRange?: number }) {
   const vals = bands && bands.length ? bands : new Array(12).fill(0);
   const mm = minMax && minMax.length ? minMax : [];
+  const N = vals.length;
+  // Match megadrome's per-band hue: hue = hueOffset + (b/N)·hueRange.
+  const barHue = (i: number) => (((hueOffset + (i / N) * hueRange) % 360) + 360) % 360;
   return (
     <div className="space-y-0.5">
       <div className="flex items-end gap-0.5 h-10">
         {vals.map((v, i) => (
           <div key={i} className="relative flex-1 h-full bg-zinc-950 rounded-sm overflow-hidden" title={`band ${i}`}>
             <div className="absolute bottom-0 inset-x-0 bg-zinc-700" style={{ height: `${(mm[i] ?? 0) * 100}%` }} />
-            <div className="absolute bottom-0 inset-x-0" style={{ height: `${(v ?? 0) * 100}%`, backgroundColor: `hsl(${(i / 12) * 280}, 75%, 55%)` }} />
+            <div className="absolute bottom-0 inset-x-0" style={{ height: `${(v ?? 0) * 100}%`, backgroundColor: `hsl(${barHue(i)}, 75%, 55%)` }} />
           </div>
         ))}
       </div>
@@ -809,7 +865,7 @@ function SyncPanel({ syscapDelay, audioLatency, setAudioLatency, health, bass, o
       </div>
       <div className="flex items-center gap-2">
         <span className="text-zinc-500 w-20">audio latency</span>
-        <input type="range" min={500} max={3500} step={50} value={audioLatency}
+        <input type="range" min={0} max={3500} step={50} value={audioLatency}
           onChange={(e) => setAudioLatency(+e.target.value)} className="flex-1 accent-cyan-500"
           title="How long after playing does the sound reach your ear (AirPlay ~2s). Tune until the beat pulse matches what you hear." />
         <span className="w-12 text-right text-zinc-400">{audioLatency}</span>
@@ -818,6 +874,39 @@ function SyncPanel({ syscapDelay, audioLatency, setAudioLatency, health, bass, o
           title={`Set syscap delay to ${snapTo}ms so total light latency = audio latency`}
         >snap →{snapTo}</button>
       </div>
+    </div>
+  );
+}
+
+// Rotary knob for an angle (degrees, 0 = right / +x, increasing counter-clockwise
+// in math terms but we render 0 pointing right). Drag anywhere on it to aim.
+function DirKnob({ value, onChange }: { value: number; onChange: (deg: number) => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const aim = (e: { clientX: number; clientY: number }) => {
+    const r = ref.current!.getBoundingClientRect();
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    let deg = (Math.atan2(e.clientY - cy, e.clientX - cx) * 180) / Math.PI; // 0 = right
+    onChange((deg + 360) % 360);
+  };
+  const start = (e: React.PointerEvent) => {
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    aim(e);
+    const move = (ev: PointerEvent) => aim(ev);
+    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
+  };
+  const rad = (value * Math.PI) / 180;
+  const px = 50 + 38 * Math.cos(rad), py = 50 + 38 * Math.sin(rad);
+  return (
+    <div className="flex flex-col items-center gap-0.5">
+      <div ref={ref} onPointerDown={start} title={`drift direction ${Math.round(value)}°`}
+        className="w-12 h-12 rounded-full bg-zinc-950 border border-zinc-700 cursor-pointer touch-none relative">
+        <svg viewBox="0 0 100 100" className="w-full h-full">
+          <line x1="50" y1="50" x2={px} y2={py} stroke="#22d3ee" strokeWidth="6" strokeLinecap="round" />
+          <circle cx="50" cy="50" r="6" fill="#3f3f46" />
+        </svg>
+      </div>
+      <span className="text-[9px] text-zinc-500 font-mono">{Math.round(value)}°</span>
     </div>
   );
 }
@@ -856,12 +945,15 @@ function BoxHealthRow({ b }: { b: BoxStat }) {
   );
 }
 
-function Slider({ label, min, max, step, value, onChange, accentHue }: {
+function Slider({ label, min, max, step, value, onChange, accentHue, onZero }: {
   label: string; min: number; max: number; step: number; value: number;
   onChange: (n: number) => void;
   // When set, the label and the native slider track/thumb tint to this
   // hue. Used so the "hue center" knob shows you the color you're picking.
   accentHue?: number;
+  // When set, renders a "0" button that snaps the value to zero. Handy for
+  // bipolar speed sliders where center = stop.
+  onZero?: () => void;
 }) {
   const labelColor = accentHue != null ? `hsl(${accentHue}, 80%, 60%)` : undefined;
   const accentColor = accentHue != null ? `hsl(${accentHue}, 80%, 50%)` : undefined;
@@ -873,6 +965,11 @@ function Slider({ label, min, max, step, value, onChange, accentHue }: {
         className="flex-1"
         style={accentColor ? { accentColor } : undefined} />
       <span className="w-14 text-right">{typeof value === 'number' ? value.toFixed(step < 1 ? 2 : 0) : ''}</span>
+      {onZero && (
+        <button onClick={onZero}
+          className={`px-1.5 rounded text-[10px] ${value === 0 ? 'bg-zinc-800 text-zinc-600' : 'bg-zinc-700 hover:bg-zinc-600 text-zinc-300'}`}
+          title="set to 0">0</button>
+      )}
     </div>
   );
 }

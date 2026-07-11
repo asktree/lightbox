@@ -16,7 +16,7 @@ export interface LedLayout {
 
 export interface LedDriver {
   // Identity for the UI.
-  readonly kind: 'twinkly' | 'wled';
+  readonly kind: 'twinkly' | 'wled' | 'serial';
   readonly name: string;
   readonly host: string; // ip/hostname for display
   // Strand shape.
