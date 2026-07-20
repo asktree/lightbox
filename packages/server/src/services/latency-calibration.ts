@@ -87,6 +87,17 @@ export function getLatencyRegistry(): LatencyRegistry {
   return registry;
 }
 
+// The per-light playhead correction, in ms of playhead to subtract: a light
+// rendering pos − offset shows photons that coincide with what the ear hears.
+// Positive when audio is slower than the light (the usual case). Null until
+// both sides have been measured — callers fall back to their own default.
+export function getPlayheadOffsetMs(rid: string): number | null {
+  const a = registry.audio;
+  const l = registry.lights[rid];
+  if (!a || !l) return null;
+  return Math.round(a.latencyMs - l.latencyMs);
+}
+
 export function setManualLightLatency(rid: string, name: string, latencyMs: number): void {
   registry.lights[rid] = {
     name, latencyMs, jitterMs: 0, samples: [], measuredAt: Date.now(), source: 'manual',

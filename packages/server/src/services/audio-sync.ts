@@ -31,6 +31,7 @@ import {
   type LightSnapshot,
 } from '../drivers/hue-rest-pulse.js';
 import { getSharedEntertainmentDriver, type HueEntertainmentDriver } from '../drivers/hue-entertainment.js';
+import { getPlayheadOffsetMs } from './latency-calibration.js';
 import type { PaletteAnimator } from '../lib/palette-animator.js';
 
 // Optional palette-animator hookup: while sync is active we exclude the
@@ -125,8 +126,12 @@ let lastReleaseAt = 0;
 let lastError: string | null = null;
 const runtime: Record<ChannelName, ChannelRuntime> = { low: freshRuntime(), high: freshRuntime() };
 
-// Delay queue of raw 12-band frames awaiting playout.
-const queue: { t: number; bands: number[] }[] = [];
+// History of already-normalized frames. Each light samples this at its own
+// playout delay (now − perLightDelay), so lights with different measured
+// latencies each line up with the ear independently. Normalization happens
+// at arrival — the rolling window describes the signal, not the playout.
+interface NormFrame { t: number; pct: number[]; minmax: number[]; frozen: number[] }
+const history: NormFrame[] = [];
 
 // --- per-band rolling-window normalizer (mirrors twinklybox syscap-source.ts) ---
 const tsBuf: number[] = [];
@@ -187,7 +192,7 @@ export function freezeAudioSyncNorm(): { ok: boolean; error?: string; bounds?: {
 }
 
 function reset(): void {
-  queue.length = 0;
+  history.length = 0;
   tsBuf.length = 0;
   for (const a of bandBuf) a.length = 0;
   normPct.fill(0);
@@ -198,31 +203,40 @@ function reset(): void {
   runtime.high = freshRuntime();
 }
 
-function releaseFrames(now: number): void {
-  const releaseBefore = now - config.delayMs;
-  while (queue.length && queue[0].t <= releaseBefore) {
-    const f = queue.shift()!;
-    ingest(f.bands, now);
-    lastReleaseAt = now;
+// Newest frame at or before the target playout time (linear scan from the
+// tail — the target is always near the end at ~30Hz).
+function frameAt(playoutT: number): NormFrame | null {
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i].t <= playoutT) return history[i];
   }
+  return null;
+}
+
+// A light's playout delay: measured audio-out latency minus its measured
+// command→photon latency (live capture can only delay, never anticipate, so
+// negative corrections clamp to 0). Falls back to the manual config.delayMs
+// for unmeasured lights.
+function perLightDelayMs(rt: ChannelRuntime): number {
+  const measured = rt.rid ? getPlayheadOffsetMs(rt.rid) : null;
+  return Math.max(0, measured ?? config.delayMs);
 }
 
 function tick(): void {
   const driver = getSharedEntertainmentDriver();
   if (!driver.active) return;
   const now = Date.now();
-  releaseFrames(now);
-  const norm = config.normMode === 'minmax' ? normMinMax
-    : config.normMode === 'frozen' ? normFrozen
-    : normPct;
-  const fresh = now - lastReleaseAt < FRESH_MS;
   for (const c of CHANNELS) {
     const rt = runtime[c];
     if (rt.streamChannelId === null) continue;
+    const playoutT = now - perLightDelayMs(rt);
+    const frame = frameAt(playoutT);
     // Average the normalized bands for this half. If audio goes silent or
     // stale, ease down to the floor rather than freeze.
     let target = 0;
-    if (fresh) {
+    if (frame && playoutT - frame.t < FRESH_MS) {
+      const norm = config.normMode === 'minmax' ? frame.minmax
+        : config.normMode === 'frozen' ? frame.frozen
+        : frame.pct;
       const [b0, b1] = BAND_RANGE[c];
       for (let b = b0; b < b1; b++) target += norm[b];
       target /= b1 - b0;
@@ -317,8 +331,11 @@ export async function startAudioSync(): Promise<{ ok: boolean; error?: string }>
       try {
         const f = JSON.parse(line) as { t: number; bands: number[] };
         if (Array.isArray(f.bands) && f.bands.length >= NUM_BANDS) {
-          queue.push({ t: typeof f.t === 'number' ? f.t : Date.now(), bands: f.bands });
-          if (queue.length > MAX_QUEUE) queue.shift();
+          const t = typeof f.t === 'number' ? f.t : Date.now();
+          ingest(f.bands, t);
+          history.push({ t, pct: [...normPct], minmax: [...normMinMax], frozen: [...normFrozen] });
+          if (history.length > MAX_QUEUE) history.shift();
+          lastReleaseAt = t;
         }
       } catch { /* partial/garbage line — skip */ }
     }
@@ -410,7 +427,8 @@ export function getAudioSyncStatus() {
     startedStream,
     fresh: active && Date.now() - lastReleaseAt < FRESH_MS,
     config,
-    queued: queue.length,
+    queued: history.length,
+    perLightDelayMs: Object.fromEntries(CHANNELS.map((c) => [c, perLightDelayMs(runtime[c])])),
     windowSamples: tsBuf.length,
     frozen: !!frozenBounds,
     frameHz: driver?.getFrameHz() ?? null,

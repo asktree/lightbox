@@ -26,6 +26,7 @@ import {
   type LightSnapshot,
 } from '../drivers/hue-rest-pulse.js';
 import { getSharedEntertainmentDriver } from '../drivers/hue-entertainment.js';
+import { getPlayheadOffsetMs } from './latency-calibration.js';
 import type { PaletteAnimator } from '../lib/palette-animator.js';
 
 const AUTOPILOT_STATE = '/tmp/lightbox-autopilot.json';
@@ -245,11 +246,17 @@ function tick(): void {
   }
 
   const env = envelope && envelope.trackId === ph.trackId ? envelope : null;
-  const posS = ph.posS - config.offsetMs / 1000;
-  const idx = env ? Math.max(0, Math.min(env.numSamples - 1, Math.floor(posS * env.sr))) : 0;
 
   for (const rt of runtimes) {
     if (rt.streamChannelId === null) continue;
+    // Per-light playhead perspective: render the moment this light's photons
+    // will coincide with the sound at the ear. Measured offsets (audio-out
+    // latency minus this light's command→photon latency) come from the
+    // calibration registry; config.offsetMs is only a fallback for
+    // unmeasured lights.
+    const offMs = getPlayheadOffsetMs(rt.binding.rid) ?? config.offsetMs;
+    const posS = ph.posS - offMs / 1000;
+    const idx = env ? Math.max(0, Math.min(env.numSamples - 1, Math.floor(posS * env.sr))) : 0;
     let target = 0;
     if (env && ph.playing && rt.binding.stems.length > 0) {
       for (const s of rt.binding.stems) {
@@ -438,6 +445,7 @@ export function getStemSyncStatus() {
       rid: rt.binding.rid,
       light: rt.resolvedName,
       stems: rt.binding.stems,
+      effectiveOffsetMs: getPlayheadOffsetMs(rt.binding.rid) ?? config.offsetMs,
       streamChannelId: rt.streamChannelId,
       value: Number(rt.value.toFixed(3)),
       level: Number(rt.level.toFixed(3)),
