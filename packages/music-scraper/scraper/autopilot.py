@@ -118,6 +118,9 @@ def main():
     ap.add_argument("--decay-ms", type=int, default=300)
     ap.add_argument("--auto-ingest", action="store_true",
                     help="Spawn download+analyze+madmom subprocess for unknown tracks")
+    ap.add_argument("--prefetch", type=int, default=2,
+                    help="Also pre-ingest the next N tracks from the Spotify play queue "
+                         "so they're ready before they start (0 = off; needs --auto-ingest)")
     args = ap.parse_args()
 
     src, det = split_source(args.source)
@@ -172,9 +175,28 @@ def main():
     poll_backoff_s = POLL_INTERVAL_S
     ingesting: dict[str, subprocess.Popen] = {}
     blacklist: set[str] = set()
+    # Queue prefetch: polled on its own (slower) cadence — the queue rarely
+    # changes and each poll is an extra Web API request.
+    QUEUE_POLL_INTERVAL_S = 10.0
+    MAX_CONCURRENT_INGESTS = 2  # demucs is heavy; current track + one prefetch
+    last_queue_poll_s = 0.0
 
     def maybe_reload_peaks(tid: str) -> list[float]:
         return load_peaks(cfg.tracks_dir, tid, src, det)
+
+    def spawn_ingest(tid: str, why: str) -> None:
+        if not tid or tid in ingesting or tid in blacklist:
+            return
+        if (cfg.tracks_dir / tid / "madmom_onsets.json").exists():
+            return
+        print(f"  [ingest start] {tid} ({why})")
+        pkg_root = Path(__file__).resolve().parents[1]
+        ingesting[tid] = subprocess.Popen(
+            [sys.executable, "-m", "scraper", "ingest", tid, "--fast"],
+            cwd=str(pkg_root),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
     def write_state() -> None:
         state = {
@@ -220,6 +242,27 @@ def main():
                 output_device_name = dev
             except Exception as e:
                 print(f"  latency probe err: {e}", file=sys.stderr)
+
+        # Queue prefetch: pre-ingest what's coming next so stems/onsets are
+        # ready before the track starts. Demucs takes ~1-2min; a 3min track
+        # of head start is usually enough for next-up.
+        if (args.auto_ingest and args.prefetch > 0
+                and now_s - last_queue_poll_s >= QUEUE_POLL_INTERVAL_S):
+            last_queue_poll_s = now_s
+            try:
+                upcoming = (sp.queue().get("queue") or [])[: args.prefetch]
+                for t in upcoming:
+                    if len(ingesting) >= MAX_CONCURRENT_INGESTS:
+                        break
+                    spawn_ingest(t.get("id"), "up next")
+            except Exception as e:
+                # Queue endpoint hiccups (404 when nothing plays, 429 rate
+                # limits) are non-fatal; try again next interval.
+                msg = str(e)
+                if "429" in msg or "rate" in msg.lower():
+                    last_queue_poll_s = now_s + 60.0  # extra-long backoff
+                elif "404" not in msg:
+                    print(f"  queue poll err: {e}", file=sys.stderr)
 
         # Reap finished ingest subprocesses so we can restart if needed.
         for done_tid in [t for t, p in ingesting.items() if p.poll() is not None]:
@@ -270,18 +313,11 @@ def main():
                     artists = ", ".join(current_track_artists)
                     print(f"→ {artists} — {name} ({tid}) peaks={len(peaks)}")
 
-                    # If unknown (no peaks file) and auto-ingest, kick off subprocess.
-                    madmom_path = cfg.tracks_dir / tid / "madmom_onsets.json"
-                    if (args.auto_ingest and tid and not madmom_path.exists()
-                            and tid not in ingesting and tid not in blacklist):
-                        print(f"  [ingest start] {tid}")
-                        pkg_root = Path(__file__).resolve().parents[1]
-                        ingesting[tid] = subprocess.Popen(
-                            [sys.executable, "-m", "scraper", "ingest", tid, "--fast"],
-                            cwd=str(pkg_root),
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                        )
+                    # If unknown (no peaks file) and auto-ingest, kick off
+                    # subprocess. Current track ignores the concurrency cap —
+                    # it's what's audible right now.
+                    if args.auto_ingest:
+                        spawn_ingest(tid, "now playing")
                 elif not peaks:
                     # Same track; if ingest just completed, pick up the peaks.
                     madmom_path = cfg.tracks_dir / tid / "madmom_onsets.json"
