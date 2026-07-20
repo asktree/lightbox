@@ -450,6 +450,16 @@ export class HueEntertainmentDriver {
   }
 }
 
+// Shared singleton — the bridge only allows one active entertainment stream,
+// so every in-process consumer (hue-stream routes, audio-sync service) must
+// drive the same driver instance. Lazily constructed so a missing hue-config
+// doesn't break server startup.
+let sharedDriver: HueEntertainmentDriver | null = null;
+export function getSharedEntertainmentDriver(): HueEntertainmentDriver {
+  if (!sharedDriver) sharedDriver = new HueEntertainmentDriver();
+  return sharedDriver;
+}
+
 function clamp16(v: number): number {
   return Math.max(0, Math.min(65535, Math.round(v)));
 }

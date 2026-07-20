@@ -1,12 +1,13 @@
 import { Router } from 'express';
-import { HueEntertainmentDriver } from '../drivers/hue-entertainment.js';
+import { HueEntertainmentDriver, getSharedEntertainmentDriver } from '../drivers/hue-entertainment.js';
 import { restFadedPulse, getRestLights, getMusicGroupRid, getMusicGroupLightNames, setRestMaxSockets, getRestMaxSockets, ridToLmId, getBridgeRttMs, getLightSnapshot, restoreLightSnapshot, type LightSnapshot } from '../drivers/hue-rest-pulse.js';
 import type { PaletteAnimator } from '../lib/palette-animator.js';
 
 // Lazily constructed so a missing hue-config doesn't break server startup.
+// Shared with the audio-sync service (one bridge = one stream).
 let driver: HueEntertainmentDriver | null = null;
 function getDriver(): HueEntertainmentDriver {
-  if (!driver) driver = new HueEntertainmentDriver();
+  if (!driver) driver = getSharedEntertainmentDriver();
   return driver;
 }
 
@@ -25,12 +26,12 @@ export function createHueStreamRouter(paletteAnimator?: PaletteAnimator): Router
   const STREAM_HEARTBEAT_TIMEOUT_MS = 60_000;
   setInterval(async () => {
     try {
-      if (!driver?.active) return;
+      if (!getDriver().active) return;
       if (lastStreamHeartbeatMs === 0) return; // no client has ever heartbeated; nothing to expire
       if (Date.now() - lastStreamHeartbeatMs < STREAM_HEARTBEAT_TIMEOUT_MS) return;
       console.log('[hue-stream] watchdog: no heartbeat for', STREAM_HEARTBEAT_TIMEOUT_MS / 1000, 's, stopping stream');
       lastStreamHeartbeatMs = 0;
-      await driver.stop();
+      await getDriver().stop();
     } catch { /* ignore */ }
   }, 2000);
 
@@ -61,12 +62,13 @@ export function createHueStreamRouter(paletteAnimator?: PaletteAnimator): Router
   // 180 fn calls/sec — trivial.
   setInterval(() => {
     try {
-      if (!driver?.active || !paletteAnimator || !cachedRestLightsByName) return;
-      for (const ch of driver.getChannels()) {
+      const d = getDriver();
+      if (!d.active || !paletteAnimator || !cachedRestLightsByName) return;
+      for (const ch of d.getChannels()) {
         const lm = cachedRestLightsByName.get(ch.lightName.trim().toLowerCase());
         if (!lm) continue;
         const color = paletteAnimator.getPaletteColorForLight(lm.lmId);
-        if (color) driver.setChannel(ch.id, color.r, color.g, color.b);
+        if (color) d.setChannel(ch.id, color.r, color.g, color.b);
       }
     } catch { /* ignore */ }
   }, 22);
