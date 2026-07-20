@@ -47,6 +47,11 @@ export interface EnvelopePack {
   trackId: string;
   sr: number;        // envelope Hz
   numSamples: number; // per stem (all stems padded to same length)
+  // True when this pack was computed from audio.ogg because stems weren't
+  // on disk (per-stem envelopes zeroed). Such packs are re-checked on every
+  // request and recomputed once stems appear — otherwise a request racing
+  // an in-flight ingest would poison the cache forever.
+  stemless?: boolean;
   stems: Record<Stem, StemEnvelope>;
   // 12-band FFT envelope of the equal-weighted sum of all stems. Used by
   // megadrome's eq12 band mode (the original megadrome algorithm with
@@ -57,16 +62,29 @@ export interface EnvelopePack {
 // Promise cache so concurrent first-time requests share one decode.
 const cache = new Map<string, Promise<EnvelopePack>>();
 
+function stemsComplete(trackId: string): boolean {
+  const stemsDir = join(TRACKS_DIR, trackId, 'stems');
+  return STEMS.every((s) => existsSync(join(stemsDir, `${s}.ogg`)));
+}
+
+function computeAndCache(trackId: string): Promise<EnvelopePack> {
+  const p = computeEnvelope(trackId);
+  cache.set(trackId, p);
+  // Drop on failure so next request retries instead of returning a
+  // permanently-rejected promise.
+  p.catch(() => { cache.delete(trackId); });
+  return p;
+}
+
 export function getEnvelope(trackId: string): Promise<EnvelopePack> {
-  let cached = cache.get(trackId);
-  if (!cached) {
-    cached = computeEnvelope(trackId);
-    cache.set(trackId, cached);
-    // Drop on failure so next request retries instead of returning a
-    // permanently-rejected promise.
-    cached.catch(() => { cache.delete(trackId); });
-  }
-  return cached;
+  const cached = cache.get(trackId);
+  if (!cached) return computeAndCache(trackId);
+  return cached.then((pack) => {
+    // Stemless pack but stems have since landed (ingest finished):
+    // recompute so consumers get real per-stem envelopes.
+    if (pack.stemless && stemsComplete(trackId)) return computeAndCache(trackId);
+    return pack;
+  });
 }
 
 export function envelopeStats() {
@@ -237,7 +255,7 @@ async function computeEnvelope(trackId: string): Promise<EnvelopePack> {
     const stems = {} as Record<Stem, StemEnvelope>;
     for (const s of STEMS) stems[s] = { samples: new Float32Array(numSamples), max: 0 };
     const bands = computeBandsEnvelope(combined, DECODE_SR, ENVELOPE_HZ);
-    return { trackId, sr: ENVELOPE_HZ, numSamples, stems, bands };
+    return { trackId, sr: ENVELOPE_HZ, numSamples, stems, bands, stemless: true };
   }
 
   // Stems present: decode all four in parallel — ffmpeg is single-threaded per stem, but

@@ -15,7 +15,7 @@ import { useEffect, useState } from 'react';
 // Both are best-effort polls — when either is unmeasured, the bar
 // degrades to a manual slider with a hardcoded default.
 
-const LIGHTBOX_URL = 'http://localhost:3001';
+const LIGHTBOX_URL = `http://${window.location.hostname}:3001`;
 const STORAGE_KEY = 'lightbox:offsetMs';
 const LEGACY_AUTOPILOT_KEY = 'autopilot:offsetMs'; // migrate from old key
 const BRIDGE_RTT_DEFAULT_MS = 150;

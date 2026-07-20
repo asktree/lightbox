@@ -5,6 +5,7 @@ export default defineConfig({
   plugins: [react()],
   root: '.',
   server: {
+    host: true, // expose on LAN/Tailscale, not just localhost
     port: 5174,
     proxy: {
       '/api': 'http://localhost:3002',

@@ -1,0 +1,7 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Musicbox v2 commits to dark — it's a console for a dark room. */
+html, body, #root { height: 100%; }
+body { @apply bg-zinc-950 text-zinc-100 antialiased; }

@@ -14,6 +14,7 @@ import { existsSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import type { DebugLogEntry } from '@lightbox/shared';
+import { isHiddenLightName } from '../lib/hidden-lights.js';
 
 // Emits DebugLogEntry objects so the server can broadcast them over WS,
 // just like the REST HueDriver does. Used to instrument timing of the two
@@ -193,6 +194,7 @@ export async function getRestLights(): Promise<RestLight[]> {
   }
   cachedRestLights = (lightsRes.data || [])
     .filter((l: any) => l?.color)
+    .filter((l: any) => !isHiddenLightName(deviceName.get(l.owner?.rid) || l.metadata?.name))
     .map((l: any) => {
       // id_v1 looks like "/lights/7" — extract "7".
       const v1 = typeof l.id_v1 === 'string' ? l.id_v1.replace('/lights/', '') : '';

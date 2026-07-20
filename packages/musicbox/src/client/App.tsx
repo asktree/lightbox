@@ -23,6 +23,7 @@ interface LibraryTrack {
   album?: string;
   duration_ms?: number;
   analyzed: boolean;
+  hasStems?: boolean;
   bpm?: number;
   key?: string;
   mode?: string;
@@ -398,7 +399,7 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     let inFlight = false;
-    const LIGHTBOX = 'http://localhost:3001';
+    const LIGHTBOX = `http://${window.location.hostname}:3001`;
     const tick = async () => {
       if (inFlight) return;
       inFlight = true;
@@ -548,6 +549,98 @@ export default function App() {
 
   // (mute is applied inside <StemTrack>)
 
+  // ---- Follow Spotify (autopilot) ----
+  // When Spotify drives playback (autopilot running), mirror it read-only:
+  // auto-select the playing track and follow its playhead while local audio
+  // is paused. No light driving happens here — stem-sync does that
+  // server-side; this is purely a view. We do mirror position into
+  // /api/playback so twinklybox's envelope drive follows Spotify too.
+  const [followSpotify, setFollowSpotify] = useState<boolean>(
+    () => localStorage.getItem('musicbox:followSpotify') !== '0');
+  useEffect(() => { localStorage.setItem('musicbox:followSpotify', followSpotify ? '1' : '0'); }, [followSpotify]);
+  // Legacy browser-side light drive (LightPulseBindings). Default OFF —
+  // stem-sync owns the lights server-side.
+  const [feDrive, setFeDrive] = useState<boolean>(
+    () => localStorage.getItem('musicbox:feDrive') === '1');
+  useEffect(() => { localStorage.setItem('musicbox:feDrive', feDrive ? '1' : '0'); }, [feDrive]);
+  interface ApFollowState {
+    running?: boolean; track_id?: string | null; playing?: boolean;
+    position_s?: number; track_name?: string; artists?: string[];
+  }
+  const [apState, setApState] = useState<ApFollowState>({});
+  const apReceivedAt = useRef(0);
+  // True while the follow interval owns position updates; the rAF loop
+  // yields to it so a paused <audio> element doesn't pin the playhead at
+  // its own currentTime.
+  const followDrivingRef = useRef(false);
+  const lastFollowPushRef = useRef(0);
+  const prevFollowingRef = useRef(false);
+  const missingIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    let inFlight = false;
+    const LIGHTBOX = `http://${window.location.hostname}:3001`;
+    const tick = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const r = await fetch(`${LIGHTBOX}/api/autopilot/state`);
+        if (cancelled) return;
+        setApState(await r.json());
+        apReceivedAt.current = Date.now();
+      } catch { /* ignore */ }
+      finally { inFlight = false; }
+    };
+    tick();
+    const t = window.setInterval(tick, 1000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, []);
+  // Auto-select the Spotify track once it exists in the library. Refetch the
+  // library once per unknown id — autopilot may have just ingested it.
+  useEffect(() => {
+    if (!followSpotify || !apState.running || !apState.track_id) return;
+    const master = audioElsRef.current.drums;
+    if (master && !master.paused) return; // local playback wins
+    const t = library.find((x) => x.id === apState.track_id);
+    if (t) {
+      if (selected?.id !== t.id) setSelected(t);
+    } else if (missingIdRef.current !== apState.track_id) {
+      missingIdRef.current = apState.track_id;
+      fetch('/api/library').then(r => r.json()).then(setLibrary).catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [followSpotify, apState.track_id, apState.running, library]);
+  // Playhead mirror at 4Hz (autopilot state itself updates at 2Hz).
+  useEffect(() => {
+    const t = window.setInterval(() => {
+      const master = audioElsRef.current.drums;
+      const localActive = !!master && !master.paused;
+      const following = followSpotify && !!apState.running && !!apState.playing &&
+        !!apState.track_id && selected?.id === apState.track_id && !localActive;
+      followDrivingRef.current = following;
+      if (following) {
+        const pos = (apState.position_s ?? 0) + (Date.now() - apReceivedAt.current) / 1000;
+        positionRef.current = pos;
+        setPosition(pos);
+        if (Date.now() - lastFollowPushRef.current > 1000) {
+          lastFollowPushRef.current = Date.now();
+          fetch('/api/playback', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ trackId: apState.track_id, position: pos, playing: true }),
+          }).catch(() => {});
+        }
+      } else if (prevFollowingRef.current) {
+        fetch('/api/playback', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ playing: false }),
+        }).catch(() => {});
+      }
+      prevFollowingRef.current = following;
+    }, 250);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [followSpotify, apState, selected?.id]);
+
   // ---- rAF render loop ----
 
   useEffect(() => {
@@ -569,10 +662,17 @@ export default function App() {
         // OnsetTimeline / Scrubber. firePositionRef = master − offset,
         // matches autopilot's pos_s semantics so peak crossings fire at
         // the right moment for the slider's chosen offset.
-        const posSec = Math.max(0, master.currentTime - outputLatencyMsRef.current / 1000);
-        positionRef.current = posSec;
-        setPosition(posSec);
-        firePositionRef.current = Math.max(0, master.currentTime - effOffMs / 1000);
+        // While follow-Spotify owns the playhead (local audio paused), don't
+        // let the idle <audio> element pin position at its own currentTime.
+        if (!followDrivingRef.current) {
+          positionRef.current = Math.max(0, master.currentTime - outputLatencyMsRef.current / 1000);
+          setPosition(positionRef.current);
+          firePositionRef.current = Math.max(0, master.currentTime - effOffMs / 1000);
+        }
+        // Effective playhead for trigger crossings — the follow interval owns
+        // positionRef when Spotify is driving, so SpectrumPulse glows track
+        // Spotify playback too.
+        const posSec = positionRef.current;
 
         // Keep the play/pause button in sync with reality. The event-based
         // approach (onPlay/onPause on <audio>) misses cases like a track
@@ -760,7 +860,10 @@ export default function App() {
   };
 
   const analyzedCount = library.filter(t => t.analyzed).length;
-  const hasStems = analysis != null && analysis.version >= 3;
+  // Stems can exist without analysis.json (stems-only ingest) — the server
+  // reports disk truth. Fall back to the old analysis-version heuristic for
+  // stale library payloads.
+  const hasStems = selected?.hasStems ?? (analysis != null && analysis.version >= 3);
 
   return (
     <div className="h-screen bg-zinc-950 text-white flex flex-col overflow-hidden">
@@ -904,7 +1007,7 @@ export default function App() {
                     {t.analyzed && t.bpm != null && (
                       <> · {Math.round(t.bpm)} BPM · {t.key}{t.mode === 'minor' ? 'm' : ''}</>
                     )}
-                    {!t.analyzed && ' · full mix (no stems)'}
+                    {!(t.hasStems ?? t.analyzed) && ' · full mix (no stems)'}
                   </div>
                 </button>
                 {t.analyzed && (
@@ -935,7 +1038,7 @@ export default function App() {
           <div className="flex-1 flex items-center justify-center text-zinc-500">Select a track</div>
         ) : loading ? (
           <div className="flex-1 flex items-center justify-center text-zinc-500">Loading…</div>
-        ) : !analysis ? (
+        ) : !analysis && !hasStems ? (
           // No-stem (un-analyzed) track: play the full mix straight from
           // audio.ogg. We register the single full-mix element as the
           // master (`drums`) so togglePlay, the master clock, position
@@ -992,8 +1095,14 @@ export default function App() {
                 <div className="text-xs text-zinc-500 truncate">{selected.artists.join(', ')}</div>
               </div>
               <div className="flex items-center gap-3 text-xs text-zinc-400 shrink-0 ml-4">
-                <span className="font-mono">{Math.round(analysis.bpm)} BPM</span>
-                <span className="font-mono">{analysis.key}{analysis.mode === 'minor' ? 'm' : ''}</span>
+                {analysis ? (
+                  <>
+                    <span className="font-mono">{Math.round(analysis.bpm)} BPM</span>
+                    <span className="font-mono">{analysis.key}{analysis.mode === 'minor' ? 'm' : ''}</span>
+                  </>
+                ) : (
+                  <span className="font-mono text-zinc-600" title="stems-only ingest — no BPM/key analysis">stems only</span>
+                )}
               </div>
             </header>
 
@@ -1052,7 +1161,7 @@ export default function App() {
                   compete with the onset rows for the same vertical budget. */}
               <div className="flex-[2] min-h-0 border-t border-zinc-800/50">
                 {madmom ? (
-                  <OnsetTimeline data={madmom} positionRef={positionRef} beats={analysis.beats} />
+                  <OnsetTimeline data={madmom} positionRef={positionRef} beats={analysis?.beats ?? []} />
                 ) : (
                   <div className="h-full flex items-center justify-center text-[11px] text-zinc-600 font-mono">
                     no madmom_onsets.json for this track
@@ -1084,7 +1193,7 @@ export default function App() {
 
             <Scrubber
               position={position}
-              duration={analysis.duration}
+              duration={analysis?.duration ?? (selected.duration_ms ?? 0) / 1000}
               onSeek={(t) => {
                 for (const stem of STEMS) {
                   const el = audioElsRef.current[stem];
@@ -1095,16 +1204,52 @@ export default function App() {
           </>
         )}
         </div>
-        {/* Always-rendered so binding state (mode, sources, sliders) survives
-            track changes, loading transitions, and "no track selected". */}
-        <LightPulseBindings
-          data={madmom}
-          firePositionRef={firePositionRef}
-          playing={playing}
-          stemEnergyRef={stemEnergyRef}
-          stemEnergyMinMaxRef={stemEnergyMinMaxRef}
-          stemChromaRef={stemChromaRef}
-        />
+        {/* Follow-Spotify + legacy-FE-drive controls. The FE drive (browser
+            rAF posting light levels/pulses) is OFF by default and should
+            stay off — stem-sync drives lights server-side over the
+            entertainment stream. */}
+        <div className="shrink-0 border-t border-zinc-800 px-3 py-1.5 flex items-center gap-4 text-[10px] font-mono text-zinc-500">
+          <label className="flex items-center gap-1.5 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={followSpotify}
+              onChange={(e) => setFollowSpotify(e.target.checked)}
+              className="accent-green-500"
+            />
+            follow spotify
+          </label>
+          {followSpotify && apState.running && apState.track_id && selected?.id === apState.track_id && (
+            <span className="text-green-400">
+              following · {apState.playing ? '▶' : '⏸'} spotify (read-only)
+            </span>
+          )}
+          {followSpotify && apState.running && apState.track_id && selected?.id !== apState.track_id && (
+            <span className="text-amber-400/80">spotify track not in library yet</span>
+          )}
+          <div className="flex-1" />
+          <label
+            className="flex items-center gap-1.5 cursor-pointer select-none"
+            title="legacy browser-side light driving — keep OFF; stem-sync drives lights server-side"
+          >
+            <input
+              type="checkbox"
+              checked={feDrive}
+              onChange={(e) => setFeDrive(e.target.checked)}
+              className="accent-red-500"
+            />
+            FE light drive (legacy)
+          </label>
+        </div>
+        {feDrive && (
+          <LightPulseBindings
+            data={madmom}
+            firePositionRef={firePositionRef}
+            playing={playing}
+            stemEnergyRef={stemEnergyRef}
+            stemEnergyMinMaxRef={stemEnergyMinMaxRef}
+            stemChromaRef={stemChromaRef}
+          />
+        )}
       </main>
     </div>
     </div>

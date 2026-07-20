@@ -2,13 +2,14 @@ import { Router } from 'express';
 import type { LightManager } from '../lib/light-manager.js';
 import type { PaletteAnimator } from '../lib/palette-animator.js';
 import type { SetLightStateRequest, SetLightSettingsRequest } from '@lightbox/shared';
+import { isHiddenLightName } from '../lib/hidden-lights.js';
 
 export function createLightsRouter(lightManager: LightManager, paletteAnimator?: PaletteAnimator): Router {
   const router = Router();
 
-  // List all lights
+  // List all lights (minus hidden ones — roommates' lights never surface)
   router.get('/', (req, res) => {
-    res.json(lightManager.getAllLights());
+    res.json(lightManager.getAllLights().filter((l) => !isHiddenLightName(l.name)));
   });
 
   // Get single light

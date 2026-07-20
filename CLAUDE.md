@@ -19,6 +19,7 @@ pnpm redev      # Kill and restart dev (named `redev` to avoid pnpm's `restart`
 Server: http://localhost:3001
 Client: http://localhost:5173
 Musicbox: http://localhost:5174
+Musicbox2: http://localhost:5175 (Spotify-driven console; see packages/musicbox2 + design doc)
 WebSocket: ws://localhost:3001/ws
 
 ## Dev Server Management (for Claude)

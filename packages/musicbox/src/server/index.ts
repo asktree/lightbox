@@ -24,6 +24,14 @@ interface LibraryEntry extends TrackMeta {
   key?: string;
   mode?: string;
   analyzed: boolean;
+  // All four demucs stems on disk. Independent of `analyzed` — the
+  // stems-only ingest path produces stems without analysis.json.
+  hasStems: boolean;
+}
+
+const STEM_NAMES = ['drums', 'bass', 'vocals', 'other'];
+function stemsOnDisk(dir: string): boolean {
+  return STEM_NAMES.every((s) => existsSync(join(dir, 'stems', `${s}.ogg`)));
 }
 
 function readTrackMeta(id: string): LibraryEntry | null {
@@ -43,7 +51,7 @@ function readTrackMeta(id: string): LibraryEntry | null {
         bpm = a.bpm; key = a.key; mode = a.mode;
       } catch {}
     }
-    return { ...meta, analyzed, bpm, key, mode };
+    return { ...meta, analyzed, hasStems: stemsOnDisk(dir), bpm, key, mode };
   } catch {
     return null;
   }
@@ -72,7 +80,7 @@ function listLibrary(): LibraryEntry[] {
           mode = a.mode;
         } catch {}
       }
-      entries.push({ ...meta, analyzed, bpm, key, mode });
+      entries.push({ ...meta, analyzed, hasStems: stemsOnDisk(dir), bpm, key, mode });
     } catch {}
   }
   // Sort alphabetically by artist then name

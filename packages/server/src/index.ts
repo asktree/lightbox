@@ -32,6 +32,9 @@ import { createAutopilotRouter, ensureAutopilotRunning } from './routes/autopilo
 import { hueRestPulseEvents } from './drivers/hue-rest-pulse.js';
 import { createStreamingRouter } from './routes/streaming.js';
 import { createAudioSyncRouter } from './routes/audio-sync.js';
+import { createStemSyncRouter } from './routes/stem-sync.js';
+import { resumeStemSync } from './services/stem-sync.js';
+import { createLatencyCalRouter } from './routes/latency-calibration.js';
 
 const PORT = process.env.PORT || 3001;
 
@@ -137,9 +140,11 @@ app.use('/api/hue-stream', createHueStreamRouter(paletteAnimator));
 app.use('/api/wiz', createWizRouter(() => lightManager.getDriverByBrand<WizDriver>('wiz')));
 app.use('/api/tuya', createTuyaRouter(() => lightManager.getDriverByBrand<TuyaDriver>('tuya')));
 app.use('/api/audio-latency', createAudioLatencyRouter());
+app.use('/api/latency-cal', createLatencyCalRouter(paletteAnimator));
 app.use('/api/autopilot', createAutopilotRouter());
 app.use('/api/streaming', createStreamingRouter());
 app.use('/api/audio-sync', createAudioSyncRouter(paletteAnimator));
+app.use('/api/stem-sync', createStemSyncRouter(paletteAnimator));
 
 // Pipe REST-pulse timing logs into the shared debug log broadcast.
 hueRestPulseEvents.on('debug', (entry) => {
@@ -174,6 +179,11 @@ async function start() {
     // to restore that behavior.
     // ensureAutopilotRunning();
     void ensureAutopilotRunning;
+
+    // Stem-sync survives tsx-watch restarts: if it was active when the
+    // previous process died, resume with the persisted bindings once the
+    // Hue side has had a moment to settle.
+    setTimeout(() => resumeStemSync(), 2000);
 
     // Broadcast updated state to all connected clients now that initialization is complete
     wss.clients.forEach((client) => {

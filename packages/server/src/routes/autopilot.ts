@@ -48,6 +48,16 @@ function readState(): AutopilotState {
     const age = Date.now() / 1000 - (raw.updated_at ?? 0);
     raw.stale = age > 5; // if no update for 5s+, probably dead
     raw.running = !raw.stale;
+    // Age-correct the playhead at read time. The state file is written at
+    // 2Hz, so position_s is up to ~500ms stale when a client polls — and
+    // this process shares a clock with the autopilot, so the correction
+    // here is exact. Clients extrapolate from position_live using only
+    // their own receive time (network latency ≈ ms on LAN).
+    if (raw.playing && typeof raw.position_s === 'number' && !raw.stale) {
+      raw.position_live = raw.position_s + Math.max(0, age);
+    } else {
+      raw.position_live = raw.position_s ?? 0;
+    }
     return raw;
   } catch {
     return { running: false };
@@ -58,41 +68,13 @@ function isPidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
-function spawnAutopilot(opts: {
-  lightRids: string[];
-  source?: string;
-  offsetMs?: number;
-  peak?: number;
-  floor?: number;
-  decayMs?: number;
-  autoIngest?: boolean;
-}): number | undefined {
-  const {
-    lightRids,
-    source = 'drums_low_strict.superflux',
-    offsetMs = 300,
-    peak = 100,
-    floor = 5,
-    decayMs = 300,
-    autoIngest = true,
-  } = opts;
+// Autopilot is the Spotify playhead + auto-ingest brain; it drives no
+// lights (that's stem-sync). See GRAVESTONE.md for the dead pulse-firing
+// options this spawn used to carry.
+function spawnAutopilot(opts: { autoIngest?: boolean; prefetch?: number }): number | undefined {
+  const { autoIngest = true, prefetch = 2 } = opts;
 
-  // Seed the lights file so the Python can pick up the right set on tick 1.
-  writeFileSync(LIGHTS_FILE, JSON.stringify({ lightRids }));
-
-  const args = [
-    '-m', 'scraper.autopilot',
-    '--source', source,
-    '--offset-ms', String(offsetMs),
-    '--peak', String(peak),
-    '--floor', String(floor),
-    '--decay-ms', String(decayMs),
-  ];
-  // Only pass --light-rids when non-empty. With an empty string argparse
-  // swallows the next arg as the value, confusing everything downstream.
-  if (lightRids.length > 0) {
-    args.splice(2, 0, '--light-rids', lightRids.join(','));
-  }
+  const args = ['-m', 'scraper.autopilot', '--prefetch', String(prefetch)];
   if (autoIngest) args.push('--auto-ingest');
 
   // Redirect child stdout/stderr to a log file so we can post-mortem when
@@ -117,8 +99,8 @@ export function ensureAutopilotRunning(): void {
     console.log(`[autopilot] already running pid=${state.pid}`);
     return;
   }
-  const pid = spawnAutopilot({ lightRids: [] });
-  console.log(`[autopilot] drift-only daemon spawned pid=${pid}`);
+  const pid = spawnAutopilot({});
+  console.log(`[autopilot] daemon spawned pid=${pid}`);
 }
 
 export function createAutopilotRouter(): Router {
@@ -148,13 +130,10 @@ export function createAutopilotRouter(): Router {
     });
   });
 
-  // Self-test: spawn a short-lived autopilot subprocess, wait for it to
-  // write its first state, then assert that drift_ms will populate given
-  // synthetic inputs. Doesn't require Spotify playback — runs a small
-  // Python one-liner that exercises the drift math path directly.
+  // Self-test: assert the drift math with synthetic inputs. Doesn't
+  // require Spotify playback.
   r.post('/self-test', (_req, res) => {
     const script = `
-from scraper.autopilot import split_source
 # Minimal drift math reproduction — same formula as the loop
 def compute_drift(prev_anchor_mono_ms, prev_anchor_spotify_s, now_ms, reported_ms):
     predicted_s = prev_anchor_spotify_s + (now_ms - prev_anchor_mono_ms) / 1000.0
@@ -202,30 +181,15 @@ print("OK")
     });
   });
 
-  // Body: { lightRid?, lightRids?, source?, offsetMs?, peak?, floor?, decayMs?, autoIngest? }
+  // Body: { autoIngest?, prefetch? } (legacy light/source fields ignored)
   r.post('/start', (req, res) => {
     const current = readState();
     if (current.pid && isPidAlive(current.pid)) {
       return res.status(409).json({ error: 'autopilot already running', state: current });
     }
-    const {
-      lightRid,
-      lightRids,
-      source = 'drums_low_strict.superflux',
-      offsetMs = 300,
-      peak = 100,
-      floor = 5,
-      decayMs = 300,
-      autoIngest = true,
-    } = req.body ?? {};
-
-    // Normalize to an array. Accept single lightRid for backwards compat.
-    const rids: string[] = Array.isArray(lightRids)
-      ? lightRids.filter((x) => typeof x === 'string')
-      : typeof lightRid === 'string' ? [lightRid] : [];
-
-    const pid = spawnAutopilot({ lightRids: rids, source, offsetMs, peak, floor, decayMs, autoIngest });
-    console.log(`[autopilot] spawned pid=${pid} rids=${rids.join(',')}`);
+    const { autoIngest = true, prefetch = 2 } = req.body ?? {};
+    const pid = spawnAutopilot({ autoIngest, prefetch });
+    console.log(`[autopilot] spawned pid=${pid}`);
     res.json({ ok: true, pid });
   });
 

@@ -9,6 +9,7 @@
     "client": "pnpm --filter @lightbox/client dev",
     "mcp": "pnpm --filter @lightbox/mcp dev",
     "musicbox": "pnpm --filter @lightbox/musicbox dev",
+    "musicbox2": "pnpm --filter @lightbox/musicbox2 dev",
     "kill": "pkill -f 'tsx watch src/index' ; pkill -f 'vite' ; true",
     "redev": "pnpm kill && sleep 1 && pnpm dev"
   },

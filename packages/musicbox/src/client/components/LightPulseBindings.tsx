@@ -10,7 +10,7 @@ import type { MadmomOnsets } from './OnsetTimeline';
 // binding; when a light needs to participate in the stream, its name is
 // added to the dedicated entertainment configuration.
 
-const LIGHTBOX_URL = 'http://localhost:3001';
+const LIGHTBOX_URL = `http://${window.location.hostname}:3001`;
 
 // Only surface these lights in the UI. Non-Hue lights (WiZ, Tuya) are
 // loaded separately and joined into the same list. Energy bindings dispatch

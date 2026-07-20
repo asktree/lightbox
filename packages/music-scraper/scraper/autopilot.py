@@ -1,18 +1,17 @@
-"""Spotify → Hue autopilot.
+"""Spotify playhead + auto-ingest brain.
 
-Polls Spotify's currently-playing endpoint, reads the corresponding
-madmom_onsets.json from the local library, and fires REST pulses to the
-lightbox server every time the playhead crosses a peak in the configured
-onset source.
+Polls Spotify's currently-playing endpoint and writes an interpolated,
+drift-corrected playhead to /tmp/lightbox-autopilot.json every ~500ms.
+Unknown tracks (and the next few queue entries) are auto-ingested
+(download → demucs stems) so their energy envelopes are ready by the time
+they play.
+
+Autopilot drives NO lights. The lightbox server's stem-sync service reads
+the state file and drives the Hue entertainment stream from stem energy.
+(The original onset-pulse firing half is dead — see GRAVESTONE.md.)
 
 Usage:
-    python -m scraper.autopilot \
-        --light-rid 85b9455f-e2a2-4461-a6fe-6d8760eecf46 \
-        --source drums_low_strict.superflux \
-        --offset-ms 0
-
-The light rid is the CLIP v2 UUID (not "hue:7"). Get it from:
-    curl -s http://localhost:3001/api/hue-stream/rest-lights
+    python -m scraper.autopilot --auto-ingest --prefetch 2
 """
 from __future__ import annotations
 
@@ -24,200 +23,144 @@ import sys
 import time
 from pathlib import Path
 
-import requests
-
 from .config import load_config
 from .spotify_api import make_client
 
 
-LIGHTBOX = "http://localhost:3001"
-TICK_HZ = 50
 POLL_INTERVAL_S = 2.0  # Spotify rate-limits; 2s/poll is a safe cadence
-MIN_GAP_MS = 150      # don't re-fire within this window (onset density guard)
 STATE_FILE = Path("/tmp/lightbox-autopilot.json")
-# Re-read every Spotify poll so UI checkbox changes take effect live
-# without restarting the process. If absent, falls back to --light-rids
-# from the command line.
-LIGHTS_FILE = Path("/tmp/lightbox-autopilot-lights.json")
-# Touched every spotify poll and every fire. UI reads this.
 STATE_WRITE_INTERVAL_S = 0.5
-
-# Parse "drums_low_strict.superflux" → ("drums_low_strict", "superflux").
-# Matches the UI's source key format.
-def split_source(key: str) -> tuple[str, str]:
-    if "." not in key:
-        raise SystemExit(f"source must be FORM: 'drums_low.cnn' etc., got {key!r}")
-    src, det = key.split(".", 1)
-    if det in ("sf", "superflux"):
-        det = "superflux"
-    elif det in ("cnn",):
-        det = "cnn"
-    else:
-        raise SystemExit(f"detector must be 'cnn' or 'superflux'/'sf', got {det!r}")
-    return src, det
-
-
-def load_peaks(tracks_dir: Path, track_id: str, src: str, det: str) -> list[float]:
-    p = tracks_dir / track_id / "madmom_onsets.json"
-    if not p.exists():
-        return []
-    try:
-        data = json.loads(p.read_text())
-    except Exception:
-        return []
-    entry = data.get(src) or {}
-    arr = entry.get(det) or []
-    return [float(x) for x in arr if isinstance(x, (int, float))]
-
-
-def fire_pulse(session: requests.Session, light_rid: str, peak: int, floor: int, decay_ms: int) -> Optional[float]:
-    """Returns round-trip ms, or None on failure. The RTT is roughly
-    (HTTP to lightbox + HTTPS to bridge + bridge processing time) — a
-    useful proxy for how long after fire() the bulb actually lights up."""
-    t0 = time.monotonic()
-    try:
-        session.post(
-            f"{LIGHTBOX}/api/hue-stream/rest-pulse",
-            json={
-                "lightId": light_rid,
-                "brightness": peak,
-                "floor": floor,
-                "decayMs": decay_ms,
-            },
-            timeout=2,
-        )
-        return (time.monotonic() - t0) * 1000.0
-    except Exception as e:
-        print(f"  fire err: {e}", file=sys.stderr)
-        return None
-
-
-def read_config_file() -> dict | None:
-    """Live-updatable config from the UI. Shape: {lightRids: [...], offsetMs: N}.
-    Returns the parsed dict or None on missing/malformed."""
-    if not LIGHTS_FILE.exists():
-        return None
-    try:
-        return json.loads(LIGHTS_FILE.read_text())
-    except Exception:
-        return None
 
 
 def main():
     ap = argparse.ArgumentParser(prog="scraper.autopilot")
-    # One or both accepted. --light-rids wins (comma-separated). --light-rid
-    # retained for backwards-compat with earlier CLI invocations.
-    ap.add_argument("--light-rid", default=None, help="CLIP v2 UUID of a single Hue light")
-    ap.add_argument("--light-rids", default=None, help="Comma-separated CLIP v2 UUIDs of multiple lights")
-    ap.add_argument("--source", default="drums_low_strict.superflux",
-                    help="Onset source (default: drums_low_strict.superflux)")
-    ap.add_argument("--offset-ms", type=int, default=0,
-                    help="Delay light events by this many ms to align with audio latency (e.g. Sonos)")
-    ap.add_argument("--peak", type=int, default=100)
-    ap.add_argument("--floor", type=int, default=5)
-    ap.add_argument("--decay-ms", type=int, default=300)
     ap.add_argument("--auto-ingest", action="store_true",
-                    help="Spawn download+analyze+madmom subprocess for unknown tracks")
+                    help="Spawn download+demucs subprocess for unknown tracks")
     ap.add_argument("--prefetch", type=int, default=2,
                     help="Also pre-ingest the next N tracks from the Spotify play queue "
                          "so they're ready before they start (0 = off; needs --auto-ingest)")
     args = ap.parse_args()
 
-    src, det = split_source(args.source)
     cfg = load_config()
     sp = make_client(cfg)
-    session = requests.Session()
-
-    # Initial light set from CLI; live updates come from the lights file.
-    # Empty is allowed — autopilot runs in "drift-only" mode: polls Spotify,
-    # measures drift, but fires no pulses until a light is enabled via
-    # /tmp/lightbox-autopilot-lights.json (UI checkboxes).
-    initial_rids: list[str] = []
-    if args.light_rids:
-        initial_rids = [x.strip() for x in args.light_rids.split(",") if x.strip()]
-    elif args.light_rid:
-        initial_rids = [args.light_rid]
-    selected_rids: list[str] = list(initial_rids)
-    print(f"Autopilot: lights={[r[:8] for r in selected_rids] or '(drift-only)'} source={src}.{det} offset={args.offset_ms}ms auto_ingest={args.auto_ingest}")
+    print(f"Autopilot: playhead+ingest brain · auto_ingest={args.auto_ingest} prefetch={args.prefetch}")
 
     current_track_id: str | None = None
     current_track_name = ""
     current_track_artists: list[str] = []
-    peaks: list[float] = []
-    cursor_idx = -1
+    current_album = ""
+    current_art_url: str | None = None
+    current_duration_s: float | None = None
     anchor_monotonic_ms = 0.0
     anchor_spotify_s = 0.0
     playing = False
     last_poll_s = 0.0
-    last_fire_ms = 0.0
-    fires_total = 0
     last_state_write_s = 0.0
     last_error: str | None = None
     # Drift measurement: each poll compares our interpolated position against
     # Spotify's fresh reported position. drift_ms > 0 = Spotify is AHEAD of
-    # our clock (our clock ran slow / Spotify skipped ahead / network delay
-    # on the response). EMA-smoothed for display stability.
+    # our clock. EMA-smoothed for display stability.
     drift_ms_smoothed: float | None = None
     DRIFT_EMA_ALPHA = 0.6
-    # System audio output latency — polled infrequently since system_profiler
-    # is slow (~1-2s per call). Covers: AirPlay/Sonos ≈ 2000ms, built-in ≈ 30ms.
+    # System audio output latency — polled infrequently since the probe is
+    # slow. Covers: AirPlay/Sonos ≈ 2000ms, built-in ≈ 30ms.
     output_latency_ms: int | None = None
     output_device_name: str | None = None
     last_latency_check_s = 0.0
     LATENCY_CHECK_INTERVAL_S = 15.0
-    # Bridge RTT: time from fire_pulse() call to HTTP response (includes the
-    # full pulse: attack PUT + decay PUT to the Hue bridge). Used to suggest
-    # an offset that accounts for how late the light actually flashes relative
-    # to when we decide to flash it. EMA-smoothed.
-    bridge_rtt_ms_smoothed: float | None = None
-    BRIDGE_RTT_EMA_ALPHA = 0.3
-    offset_s = args.offset_ms / 1000.0
     poll_backoff_s = POLL_INTERVAL_S
     ingesting: dict[str, subprocess.Popen] = {}
     blacklist: set[str] = set()
+    # Transient failures (zotify hiccups) deserve one retry; blacklist only
+    # after two strikes.
+    fail_counts: dict[str, int] = {}
     # Queue prefetch: polled on its own (slower) cadence — the queue rarely
     # changes and each poll is an extra Web API request.
     QUEUE_POLL_INTERVAL_S = 10.0
     MAX_CONCURRENT_INGESTS = 2  # demucs is heavy; current track + one prefetch
+    QUEUE_VIEW_N = 8            # how many up-next tracks the UI shows
     last_queue_poll_s = 0.0
+    queue_view: list[dict] = []
+    ingest_started: dict[str, float] = {}
+    ingest_history: list[dict] = []
 
-    def maybe_reload_peaks(tid: str) -> list[float]:
-        return load_peaks(cfg.tracks_dir, tid, src, det)
+    def art_url(item: dict) -> str | None:
+        """Mid-size (300px) album art URL from a Spotify track object."""
+        imgs = ((item.get("album") or {}).get("images") or [])
+        if not imgs:
+            return None
+        return (imgs[1] if len(imgs) > 1 else imgs[0]).get("url")
+
+    def has_stems(tid: str) -> bool:
+        d = cfg.tracks_dir / tid / "stems"
+        return all((d / f"{s}.ogg").exists() for s in ("drums", "bass", "vocals", "other"))
+
+    # "ready" = stems on disk (what the energy drive needs). Stems on disk
+    # win over a blacklist entry — a track that failed and later got
+    # ingested some other way (manual CLI run) is ready, not failed.
+    def track_status(tid: str | None) -> str:
+        if not tid:
+            return "unknown"
+        if tid in ingesting:
+            return "ingesting"
+        if has_stems(tid):
+            return "ready"
+        if tid in blacklist:
+            return "failed"
+        return "pending"
+
+    def read_ingest_progress(tid: str) -> dict | None:
+        p = cfg.tracks_dir / tid / "ingest-progress.json"
+        try:
+            return json.loads(p.read_text())
+        except Exception:
+            return None
 
     def spawn_ingest(tid: str, why: str) -> None:
         if not tid or tid in ingesting or tid in blacklist:
             return
-        if (cfg.tracks_dir / tid / "madmom_onsets.json").exists():
+        if has_stems(tid):
             return
         print(f"  [ingest start] {tid} ({why})")
         pkg_root = Path(__file__).resolve().parents[1]
+        ingest_started[tid] = time.time()
+        # Shared append log — transient zotify/demucs failures are otherwise
+        # undiagnosable (the progress file only captures the exit code).
+        log_f = open("/tmp/lightbox-ingest.log", "ab")
         ingesting[tid] = subprocess.Popen(
-            [sys.executable, "-m", "scraper", "ingest", tid, "--fast"],
+            [sys.executable, "-m", "scraper", "ingest", tid],
             cwd=str(pkg_root),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log_f,
+            stderr=log_f,
         )
+        log_f.close()  # child holds its own fd
 
     def write_state() -> None:
+        progress = {t: read_ingest_progress(t) for t in ingesting}
+        if current_track_id and current_track_id not in progress and current_track_id in blacklist:
+            progress[current_track_id] = read_ingest_progress(current_track_id)
         state = {
             "running": True,
             "pid": os.getpid(),
             "track_id": current_track_id,
             "track_name": current_track_name,
             "artists": current_track_artists,
+            "album": current_album,
+            "art_url": current_art_url,
+            "duration_s": current_duration_s,
+            "track_status": track_status(current_track_id),
             "playing": playing,
             "position_s": round(anchor_spotify_s + (time.monotonic() * 1000 - anchor_monotonic_ms) / 1000.0, 2) if playing else 0,
-            "peaks_total": len(peaks),
-            "cursor_idx": cursor_idx,
-            "fires_total": fires_total,
-            "source": f"{src}.{det}",
-            "offset_ms": int(round(offset_s * 1000)),
-            "light_rids": list(selected_rids),
             "drift_ms": round(drift_ms_smoothed, 1) if drift_ms_smoothed is not None else None,
             "output_latency_ms": output_latency_ms,
             "output_device_name": output_device_name,
-            "bridge_rtt_ms": round(bridge_rtt_ms_smoothed, 1) if bridge_rtt_ms_smoothed is not None else None,
             "ingesting": list(ingesting.keys()),
+            "ingest_started": dict(ingest_started),
+            "ingest_progress": progress,
+            "ingest_history": ingest_history[:10],
+            "queue": [{**q, "status": track_status(q.get("id"))} for q in queue_view],
+            "auto_ingest": args.auto_ingest,
+            "prefetch": args.prefetch,
             "blacklist": list(blacklist),
             "last_error": last_error,
             "updated_at": time.time(),
@@ -231,8 +174,7 @@ def main():
         now_s = time.monotonic()
         now_ms = now_s * 1000.0
 
-        # Refresh audio output latency occasionally. Uses system_profiler so
-        # we space it out — the output device rarely changes.
+        # Refresh audio output latency occasionally.
         if now_s - last_latency_check_s > LATENCY_CHECK_INTERVAL_S:
             last_latency_check_s = now_s
             try:
@@ -243,18 +185,26 @@ def main():
             except Exception as e:
                 print(f"  latency probe err: {e}", file=sys.stderr)
 
-        # Queue prefetch: pre-ingest what's coming next so stems/onsets are
-        # ready before the track starts. Demucs takes ~1-2min; a 3min track
-        # of head start is usually enough for next-up.
-        if (args.auto_ingest and args.prefetch > 0
-                and now_s - last_queue_poll_s >= QUEUE_POLL_INTERVAL_S):
+        # Queue view + prefetch: pre-ingest what's coming next so stems are
+        # ready before the track starts. Demucs takes well under a minute;
+        # a few minutes of head start is plenty.
+        if now_s - last_queue_poll_s >= QUEUE_POLL_INTERVAL_S:
             last_queue_poll_s = now_s
             try:
-                upcoming = (sp.queue().get("queue") or [])[: args.prefetch]
-                for t in upcoming:
-                    if len(ingesting) >= MAX_CONCURRENT_INGESTS:
-                        break
-                    spawn_ingest(t.get("id"), "up next")
+                upcoming = (sp.queue().get("queue") or [])[:QUEUE_VIEW_N]
+                queue_view = [{
+                    "id": t.get("id"),
+                    "name": t.get("name", "?"),
+                    "artists": [a.get("name", "") for a in (t.get("artists") or [])],
+                    "album": (t.get("album") or {}).get("name", ""),
+                    "duration_s": round((t.get("duration_ms") or 0) / 1000.0, 1),
+                    "art_url": art_url(t),
+                } for t in upcoming]
+                if args.auto_ingest and args.prefetch > 0:
+                    for t in upcoming[: args.prefetch]:
+                        if len(ingesting) >= MAX_CONCURRENT_INGESTS:
+                            break
+                        spawn_ingest(t.get("id"), "up next")
             except Exception as e:
                 # Queue endpoint hiccups (404 when nothing plays, 429 rate
                 # limits) are non-fatal; try again next interval.
@@ -264,27 +214,33 @@ def main():
                 elif "404" not in msg:
                     print(f"  queue poll err: {e}", file=sys.stderr)
 
-        # Reap finished ingest subprocesses so we can restart if needed.
+        # Reap finished ingest subprocesses.
         for done_tid in [t for t, p in ingesting.items() if p.poll() is not None]:
             proc = ingesting.pop(done_tid)
+            secs = round(time.time() - ingest_started.pop(done_tid, time.time()), 1)
+            meta = next((q for q in queue_view if q.get("id") == done_tid), None)
+            ingest_history.insert(0, {
+                "id": done_tid,
+                "name": (meta or {}).get("name") or (current_track_name if done_tid == current_track_id else None),
+                "artists": (meta or {}).get("artists") or (current_track_artists if done_tid == current_track_id else []),
+                "ok": proc.returncode == 0,
+                "rc": proc.returncode,
+                "secs": secs,
+                "at": time.time(),
+            })
+            del ingest_history[20:]
             if proc.returncode == 0:
                 print(f"  [ingest done] {done_tid}")
             else:
-                print(f"  [ingest FAILED] {done_tid} (rc={proc.returncode})")
-                blacklist.add(done_tid)
+                fail_counts[done_tid] = fail_counts.get(done_tid, 0) + 1
+                if fail_counts[done_tid] >= 2:
+                    print(f"  [ingest FAILED] {done_tid} (rc={proc.returncode}) — blacklisted")
+                    blacklist.add(done_tid)
+                else:
+                    print(f"  [ingest failed] {done_tid} (rc={proc.returncode}) — will retry once")
 
         if now_s - last_poll_s >= poll_backoff_s:
             last_poll_s = now_s
-            # Live-update config (light rids + offset) from the UI's file.
-            cfg_file = read_config_file()
-            if cfg_file is not None:
-                rids = cfg_file.get("lightRids")
-                if isinstance(rids, list):
-                    selected_rids = [str(x) for x in rids if isinstance(x, str)]
-                off = cfg_file.get("offsetMs")
-                if isinstance(off, (int, float)):
-                    offset_s = float(off) / 1000.0
-
             try:
                 cp = sp.currently_playing()
                 poll_backoff_s = POLL_INTERVAL_S
@@ -308,33 +264,28 @@ def main():
                     current_track_id = tid
                     current_track_name = item.get("name", "?")
                     current_track_artists = [a.get("name", "") for a in (item.get("artists") or [])]
-                    peaks = maybe_reload_peaks(tid) if tid else []
-                    name = current_track_name
+                    current_album = (item.get("album") or {}).get("name", "")
+                    current_art_url = art_url(item)
+                    dur_ms = item.get("duration_ms")
+                    current_duration_s = round(dur_ms / 1000.0, 1) if dur_ms else None
                     artists = ", ".join(current_track_artists)
-                    print(f"→ {artists} — {name} ({tid}) peaks={len(peaks)}")
+                    print(f"→ {artists} — {current_track_name} ({tid}) {track_status(tid)}")
 
-                    # If unknown (no peaks file) and auto-ingest, kick off
-                    # subprocess. Current track ignores the concurrency cap —
-                    # it's what's audible right now.
-                    if args.auto_ingest:
-                        spawn_ingest(tid, "now playing")
-                elif not peaks:
-                    # Same track; if ingest just completed, pick up the peaks.
-                    madmom_path = cfg.tracks_dir / tid / "madmom_onsets.json"
-                    if madmom_path.exists():
-                        peaks = maybe_reload_peaks(tid)
-                        if peaks:
-                            print(f"  [peaks loaded] {tid} n={len(peaks)}")
+                # (Re-)attempt ingest for the current track while it's not
+                # ready — covers both first sight and the retry after a
+                # transient download failure. spawn_ingest guards
+                # ingesting/blacklist/already-done, so this is idempotent.
+                # Current track ignores the concurrency cap — it's what's
+                # audible right now.
+                if args.auto_ingest and tid:
+                    spawn_ingest(tid, "now playing")
 
-                # Measure drift BEFORE reseating the anchor — compare what
-                # we thought the position would be vs. what Spotify reports.
-                # Only meaningful when we have a valid prior anchor AND the
-                # track didn't just change (no jump).
+                # Measure drift BEFORE reseating the anchor.
                 if playing and anchor_monotonic_ms > 0 and tid == current_track_id:
                     predicted_s = anchor_spotify_s + (now_ms - anchor_monotonic_ms) / 1000.0
                     reported_s = progress_ms / 1000.0
                     inst_drift_ms = (reported_s - predicted_s) * 1000.0
-                    # Guard against large jumps (seek / track change) — ignore anything > 5s
+                    # Guard against large jumps (seek / track change)
                     if abs(inst_drift_ms) < 5000:
                         if drift_ms_smoothed is None:
                             drift_ms_smoothed = inst_drift_ms
@@ -344,58 +295,15 @@ def main():
                 anchor_monotonic_ms = now_ms
                 anchor_spotify_s = progress_ms / 1000.0
                 playing = True
-
-                # Re-seat cursor to just-before current effective position.
-                eff_pos = anchor_spotify_s - offset_s
-                idx = -1
-                for i, t in enumerate(peaks):
-                    if t <= eff_pos:
-                        idx = i
-                    else:
-                        break
-                cursor_idx = idx
             else:
                 playing = False
 
-        # Always write state — even in drift-only / paused / no-peaks modes —
-        # so the UI always has something to display.
+        # Always write state — even paused — so the UI has something to show.
         if now_s - last_state_write_s > STATE_WRITE_INTERVAL_S:
             last_state_write_s = now_s
             write_state()
 
-        if not playing or not peaks:
-            time.sleep(0.05)
-            continue
-
-        # Interpolate playhead since last poll using monotonic clock.
-        elapsed_s = (now_ms - anchor_monotonic_ms) / 1000.0
-        pos_s = anchor_spotify_s + elapsed_s - offset_s
-
-        # Detect crossings since last tick.
-        fired = False
-        while cursor_idx + 1 < len(peaks) and peaks[cursor_idx + 1] <= pos_s:
-            cursor_idx += 1
-            fired = True
-
-        if fired and (now_ms - last_fire_ms) > MIN_GAP_MS:
-            last_fire_ms = now_ms
-            fires_total += 1
-            # Fire all currently-selected lights. Track RTT (EMA) of the
-            # first light's pulse as our bridge-latency estimate.
-            for i, rid in enumerate(selected_rids):
-                rtt = fire_pulse(session, rid, args.peak, args.floor, args.decay_ms)
-                if i == 0 and rtt is not None:
-                    if bridge_rtt_ms_smoothed is None:
-                        bridge_rtt_ms_smoothed = rtt
-                    else:
-                        bridge_rtt_ms_smoothed = (
-                            (1 - BRIDGE_RTT_EMA_ALPHA) * bridge_rtt_ms_smoothed
-                            + BRIDGE_RTT_EMA_ALPHA * rtt
-                        )
-
-        # ~50Hz tick.
-        sleep_s = max(0.0, (1.0 / TICK_HZ) - (time.monotonic() - now_s))
-        time.sleep(sleep_s)
+        time.sleep(0.1)
 
 
 if __name__ == "__main__":

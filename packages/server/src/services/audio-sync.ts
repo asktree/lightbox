@@ -395,6 +395,11 @@ export function updateAudioSyncConfig(patch: Partial<AudioSyncConfig> & { channe
   return config;
 }
 
+// Lightweight liveness probe for the hue-stream watchdog (see stem-sync).
+export function isAudioSyncActive(): boolean {
+  return active;
+}
+
 export function getAudioSyncStatus() {
   const driver = (() => {
     try { return getSharedEntertainmentDriver(); } catch { return null; }

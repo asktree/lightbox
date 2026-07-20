@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { HueEntertainmentDriver, getSharedEntertainmentDriver } from '../drivers/hue-entertainment.js';
 import { restFadedPulse, getRestLights, getMusicGroupRid, getMusicGroupLightNames, setRestMaxSockets, getRestMaxSockets, ridToLmId, getBridgeRttMs, getLightSnapshot, restoreLightSnapshot, type LightSnapshot } from '../drivers/hue-rest-pulse.js';
 import type { PaletteAnimator } from '../lib/palette-animator.js';
+import { isStemSyncActive } from '../services/stem-sync.js';
+import { isAudioSyncActive } from '../services/audio-sync.js';
 
 // Lazily constructed so a missing hue-config doesn't break server startup.
 // Shared with the audio-sync service (one bridge = one stream).
@@ -29,6 +31,13 @@ export function createHueStreamRouter(paletteAnimator?: PaletteAnimator): Router
       if (!getDriver().active) return;
       if (lastStreamHeartbeatMs === 0) return; // no client has ever heartbeated; nothing to expire
       if (Date.now() - lastStreamHeartbeatMs < STREAM_HEARTBEAT_TIMEOUT_MS) return;
+      // Server-side stream owners (stem-sync, audio-sync) don't heartbeat —
+      // the watchdog only guards against dead BROWSER owners. While an
+      // in-process service is active, keep the timestamp fresh instead.
+      if (isStemSyncActive() || isAudioSyncActive()) {
+        lastStreamHeartbeatMs = Date.now();
+        return;
+      }
       console.log('[hue-stream] watchdog: no heartbeat for', STREAM_HEARTBEAT_TIMEOUT_MS / 1000, 's, stopping stream');
       lastStreamHeartbeatMs = 0;
       await getDriver().stop();
