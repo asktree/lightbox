@@ -18,6 +18,8 @@ export interface StemData {
   duration: number; // seconds (longest stem)
   pcm: Record<Stem, Float32Array>;
   energy: Record<Stem, { samples: Float32Array; max: number }>;
+  // ZCR-based chroma proxy (v1's "chroma": spectral-centroid stand-in).
+  chroma: Record<Stem, { samples: Float32Array; max: number }>;
   energyHz: number;
 }
 
@@ -67,6 +69,27 @@ function computeEnergy(pcm: Float32Array, sr: number): { samples: Float32Array; 
   return { samples: out, max };
 }
 
+// Per-chunk zero-crossing rate — same definition as the server's chroma
+// endpoint, so the timeline and the light hue agree.
+function computeChroma(pcm: Float32Array, sr: number): { samples: Float32Array; max: number } {
+  const per = Math.max(1, Math.round(sr / ENERGY_HZ));
+  const n = Math.ceil(pcm.length / per);
+  const out = new Float32Array(n);
+  let max = 0;
+  for (let i = 0; i < n; i++) {
+    const s = i * per;
+    const e = Math.min(pcm.length, s + per);
+    let crossings = 0;
+    for (let j = s + 1; j < e; j++) {
+      if ((pcm[j] >= 0) !== (pcm[j - 1] >= 0)) crossings++;
+    }
+    const zcr = (e - s) > 1 ? crossings / (e - s - 1) : 0;
+    out[i] = zcr;
+    if (zcr > max) max = zcr;
+  }
+  return { samples: out, max };
+}
+
 function evict(current: string) {
   if (ready.size <= CACHE_MAX) return;
   for (const key of ready.keys()) {
@@ -95,10 +118,12 @@ export function loadStemData(trackId: string): Promise<StemData> {
     const decoded = await Promise.all(STEMS.map((s) => decode(s)));
     const pcm = {} as Record<Stem, Float32Array>;
     const energy = {} as Record<Stem, { samples: Float32Array; max: number }>;
+    const chroma = {} as Record<Stem, { samples: Float32Array; max: number }>;
     let maxLen = 0;
     STEMS.forEach((s, i) => {
       pcm[s] = decoded[i];
       energy[s] = computeEnergy(decoded[i], DECODE_SR);
+      chroma[s] = computeChroma(decoded[i], DECODE_SR);
       if (decoded[i].length > maxLen) maxLen = decoded[i].length;
     });
     const data: StemData = {
@@ -107,6 +132,7 @@ export function loadStemData(trackId: string): Promise<StemData> {
       duration: maxLen / DECODE_SR,
       pcm,
       energy,
+      chroma,
       energyHz: ENERGY_HZ,
     };
     ready.set(trackId, data);

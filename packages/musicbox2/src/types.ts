@@ -79,6 +79,7 @@ export interface StemBinding {
   stems: Stem[];
   minLevel?: number;
   maxLevel?: number;
+  colorMode?: 'palette' | 'chroma';
 }
 
 export interface StemSyncStatus {
@@ -93,9 +94,12 @@ export interface StemSyncStatus {
     rid: string;
     light: string | null;
     stems: Stem[];
+    colorMode?: 'palette' | 'chroma';
+    effectiveOffsetMs?: number;
     streamChannelId: number | null;
     value: number;
     level: number;
+    chromaValue?: number;
     lastError: string | null;
   }>;
   error?: string | null;

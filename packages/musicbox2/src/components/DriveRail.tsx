@@ -21,6 +21,8 @@ export function DriveRail({ status, lights, apRef, playhead }: {
   playhead: PlayheadRef;
 }) {
   const [stemMap, setStemMap] = useState<Record<string, Stem[]>>({});
+  // rid → color mode: 'palette' (default) or 'chroma' (hue follows timbre).
+  const [colorModes, setColorModes] = useState<Record<string, 'palette' | 'chroma'>>({});
   const seeded = useRef(false);
   const [busy, setBusy] = useState(false);
   // Response shaping — engine params, seeded from the server once and
@@ -37,9 +39,13 @@ export function DriveRail({ status, lights, apRef, playhead }: {
   if (!seeded.current && Array.isArray(status.bindings) && status.config) {
     seeded.current = true;
     const m: Record<string, Stem[]> = {};
-    for (const b of status.bindings) if (b?.rid) m[b.rid] = b.stems ?? [];
+    const cm: Record<string, 'palette' | 'chroma'> = {};
+    for (const b of status.bindings) if (b?.rid) {
+      m[b.rid] = b.stems ?? [];
+      cm[b.rid] = b.colorMode === 'chroma' ? 'chroma' : 'palette';
+    }
     const { gamma, attack, decay } = status.config;
-    setTimeout(() => { setStemMap(m); setShaping({ gamma, attack, decay }); }, 0);
+    setTimeout(() => { setStemMap(m); setColorModes(cm); setShaping({ gamma, attack, decay }); }, 0);
   }
 
   const pushShaping = (next: { gamma: number; attack: number; decay: number }) => {
@@ -100,11 +106,12 @@ export function DriveRail({ status, lights, apRef, playhead }: {
     return () => cancelAnimationFrame(raf);
   }, [apRef, playhead]);
 
-  const push = (next: Record<string, Stem[]>) => {
-    setStemMap(next);
-    const bindings = Object.entries(next)
+  const push = (nextStems: Record<string, Stem[]>, nextModes: Record<string, 'palette' | 'chroma'>) => {
+    setStemMap(nextStems);
+    setColorModes(nextModes);
+    const bindings = Object.entries(nextStems)
       .filter(([, stems]) => stems.length > 0)
-      .map(([rid, stems]) => ({ rid, stems }));
+      .map(([rid, stems]) => ({ rid, stems, colorMode: nextModes[rid] ?? 'palette' }));
     fetch(`${LIGHTBOX_URL}/api/stem-sync/config`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -154,7 +161,7 @@ export function DriveRail({ status, lights, apRef, playhead }: {
                         onClick={() => push({
                           ...stemMap,
                           [l.rid]: on ? stems.filter((x) => x !== s) : [...stems, s],
-                        })}
+                        }, colorModes)}
                         style={on ? { color: STEM_COLOR[s], borderColor: `${STEM_COLOR[s]}66`, background: `${STEM_COLOR[s]}1a` } : undefined}
                         className={`px-1.5 py-0.5 rounded border font-mono text-[9px] ${
                           on ? '' : 'bg-zinc-900 text-zinc-600 border-zinc-800 hover:border-zinc-600'
@@ -162,6 +169,18 @@ export function DriveRail({ status, lights, apRef, playhead }: {
                       >{s}</button>
                     );
                   })}
+                  <button
+                    onClick={() => push(stemMap, {
+                      ...colorModes,
+                      [l.rid]: (colorModes[l.rid] ?? 'palette') === 'chroma' ? 'palette' : 'chroma',
+                    })}
+                    title="hue source: palette (room colors) vs chroma (color follows the music's timbre — dark=amber, bright=cyan)"
+                    className={`px-1.5 py-0.5 rounded border font-mono text-[9px] ${
+                      (colorModes[l.rid] ?? 'palette') === 'chroma'
+                        ? 'text-cyan-300 border-cyan-700/60 bg-cyan-900/30'
+                        : 'bg-zinc-900 text-zinc-600 border-zinc-800 hover:border-zinc-600'
+                    }`}
+                  >♪hue</button>
                 </div>
               </div>
               <div className="h-1 rounded bg-zinc-800 overflow-hidden">

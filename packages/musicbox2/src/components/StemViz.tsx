@@ -64,8 +64,9 @@ export function StemViz({ apRef, playhead }: {
     drums: EMPTY_BARS, bass: EMPTY_BARS, vocals: EMPTY_BARS, other: EMPTY_BARS,
   });
   const [overlay, setOverlay] = useState<string | null>(null);
-  // EnvelopeTimeline reads a stable ref; bump version to rebind on track change.
+  // EnvelopeTimeline reads stable refs; bump version to rebind on track change.
   const envelopesRef = useRef<Partial<Record<Stem, TimelineEnvelope>>>({});
+  const chromaRef = useRef<Partial<Record<Stem, TimelineEnvelope>>>({});
   const [envelopeVersion, setEnvelopeVersion] = useState(0);
   const envelopeTrack = useRef<string | null>(null);
   // Playhead as a plain {current} ref view for the copied v1 component.
@@ -102,15 +103,19 @@ export function StemViz({ apRef, playhead }: {
       // Feed the timeline's envelopes when track data (dis)appears.
       if (data && envelopeTrack.current !== data.trackId) {
         envelopeTrack.current = data.trackId;
-        const packed: Partial<Record<Stem, TimelineEnvelope>> = {};
+        const energy: Partial<Record<Stem, TimelineEnvelope>> = {};
+        const chroma: Partial<Record<Stem, TimelineEnvelope>> = {};
         for (const s of STEMS) {
-          packed[s] = { samples: data.energy[s].samples, sr: data.energyHz, max: data.energy[s].max };
+          energy[s] = { samples: data.energy[s].samples, sr: data.energyHz, max: data.energy[s].max };
+          chroma[s] = { samples: data.chroma[s].samples, sr: data.energyHz, max: data.chroma[s].max };
         }
-        envelopesRef.current = packed;
+        envelopesRef.current = energy;
+        chromaRef.current = chroma;
         setEnvelopeVersion((v) => v + 1);
       } else if (!data && envelopeTrack.current !== null) {
         envelopeTrack.current = null;
         envelopesRef.current = {};
+        chromaRef.current = {};
         setEnvelopeVersion((v) => v + 1);
       }
 
@@ -182,6 +187,10 @@ export function StemViz({ apRef, playhead }: {
       <div className="shrink-0 border-t border-zinc-800/50">
         <div className="text-[9px] font-mono uppercase tracking-wider text-zinc-600 px-2 py-0.5 border-b border-zinc-800/30">energy</div>
         <EnvelopeTimeline envelopesRef={envelopesRef} positionRef={positionRef} version={envelopeVersion} />
+      </div>
+      <div className="shrink-0 border-t border-zinc-800/50">
+        <div className="text-[9px] font-mono uppercase tracking-wider text-zinc-600 px-2 py-0.5 border-b border-zinc-800/30">chroma</div>
+        <EnvelopeTimeline envelopesRef={chromaRef} positionRef={positionRef} version={envelopeVersion} />
       </div>
     </div>
   );

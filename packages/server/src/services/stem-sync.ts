@@ -171,6 +171,39 @@ let envelopeLoading = false;
 
 const clamp01 = (x: number) => (x < 0 ? 0 : x > 1 ? 1 : x);
 
+// ---- Chroma → hue ----
+// Low chroma (dark timbre) = warm amber, high (bright timbre) = cyan-blue —
+// the same warm→cool reading as v1's spectrum gradient.
+const CHROMA_HUE_LO = 30;
+const CHROMA_HUE_HI = 210;
+const CHROMA_EMA = 0.85; // slow-ish hue drift; hue flicker looks broken
+
+function hsvToRgb16(h: number, s: number, v: number): { r: number; g: number; b: number } {
+  const c = v * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = v - c;
+  let r = 0, g = 0, b = 0;
+  if (h < 60) { r = c; g = x; }
+  else if (h < 120) { r = x; g = c; }
+  else if (h < 180) { g = c; b = x; }
+  else if (h < 240) { g = x; b = c; }
+  else if (h < 300) { r = x; b = c; }
+  else { r = c; b = x; }
+  return {
+    r: Math.round((r + m) * 65535),
+    g: Math.round((g + m) * 65535),
+    b: Math.round((b + m) * 65535),
+  };
+}
+
+// Channels whose color stem-sync owns (chroma mode). The hue-stream
+// palette-baseline loop must skip these or it would overwrite the hue at
+// 45Hz.
+const chromaChannels = new Set<number>();
+export function isChromaOwnedChannel(channelId: number): boolean {
+  return chromaChannels.has(channelId);
+}
+
 // ---- ENV2 binary parse (see musicbox envelope.ts serializeEnvelope) ----
 
 function parseEnvelope(trackId: string, buf: Buffer): Envelope {
@@ -210,6 +243,21 @@ async function loadEnvelope(trackId: string): Promise<void> {
     // stems aren't on disk yet — treat that as "not ready" and keep retrying.
     const anySignal = STEMS.some((s) => env.stems[s].max > 0);
     if (!anySignal) throw new Error('stems not ready (zeroed envelope)');
+    // Chroma rides along; failure is non-fatal (hue falls back to mid-ramp).
+    try {
+      const cr = await fetch(`${MUSICBOX_URL}/api/library/${trackId}/chroma`);
+      if (cr.ok) {
+        const cj = await cr.json() as { stems: Record<string, { samples: number[]; max: number }> };
+        const chroma = {} as NonNullable<Envelope['chroma']>;
+        for (const s of STEMS) {
+          const c = cj.stems?.[s];
+          chroma[s] = c
+            ? { samples: Float32Array.from(c.samples), max: c.max }
+            : { samples: new Float32Array(env.numSamples), max: 0 };
+        }
+        env.chroma = chroma;
+      }
+    } catch { /* energy-only */ }
     envelope = env;
     envelopeError = null;
     console.log(`[stem-sync] envelope loaded for ${trackId} (${env.numSamples} samples @ ${env.sr}Hz)`);
@@ -279,6 +327,33 @@ function tick(): void {
     const shaped = Math.pow(clamp01(rt.value), config.gamma);
     rt.level = rt.binding.minLevel + (rt.binding.maxLevel - rt.binding.minLevel) * shaped;
     driver.setLevel(rt.streamChannelId, rt.level);
+
+    // Chroma → hue: energy-weighted mean of the bound stems' chroma at the
+    // playhead (weighting stops a silent stem from dragging the hue), then
+    // EMA-smoothed and mapped onto the warm→cool ramp. We own the channel's
+    // baseline color in this mode; the palette loop skips it.
+    if (rt.binding.colorMode === 'chroma') {
+      chromaChannels.add(rt.streamChannelId);
+      const ch = env?.chroma;
+      if (ch && env && ph.playing) {
+        let wsum = 0, csum = 0;
+        for (const s of rt.binding.stems) {
+          const ce = ch[s];
+          const ee = env.stems[s];
+          if (!ce || ce.max <= 0 || ee.max <= 0) continue;
+          const w = ee.samples[idx] / ee.max;
+          csum += (ce.samples[idx] / ce.max) * w;
+          wsum += w;
+        }
+        const inst = wsum > 1e-4 ? clamp01(csum / wsum) : rt.chromaValue;
+        rt.chromaValue = rt.chromaValue * CHROMA_EMA + inst * (1 - CHROMA_EMA);
+      }
+      const hue = CHROMA_HUE_LO + (CHROMA_HUE_HI - CHROMA_HUE_LO) * rt.chromaValue;
+      const { r, g, b } = hsvToRgb16(hue, 1, 1);
+      driver.setChannel(rt.streamChannelId, r, g, b);
+    } else {
+      chromaChannels.delete(rt.streamChannelId);
+    }
   }
 }
 
@@ -304,7 +379,7 @@ export async function startStemSync(): Promise<{ ok: boolean; error?: string }> 
     const match = lights.find((l) => l.rid === b.rid);
     const rt: BindingRuntime = {
       binding: b, lmId: null, resolvedName: null, streamChannelId: null,
-      snapshot: null, value: 0, level: 0, lastError: null,
+      snapshot: null, value: 0, level: 0, chromaValue: 0.5, lastError: null,
     };
     if (!match) {
       rt.lastError = `no Hue light with rid ${b.rid}`;
@@ -368,6 +443,7 @@ export async function stopStemSync(opts?: { persistOff?: boolean }): Promise<voi
   const driver = getSharedEntertainmentDriver();
   for (const rt of runtimes) {
     if (rt.streamChannelId !== null) driver.clearEffect(rt.streamChannelId);
+    if (rt.streamChannelId !== null) chromaChannels.delete(rt.streamChannelId);
   }
   if (startedStream && driver.active) {
     await driver.stop().catch(() => { /* best effort */ });
@@ -411,6 +487,7 @@ export function updateStemSyncConfig(patch: Partial<StemSyncConfig> & { bindings
         stems: (Array.isArray(b.stems) ? b.stems : []).filter((s): s is Stem => (STEMS as readonly string[]).includes(s)),
         minLevel: clamp01(typeof b.minLevel === 'number' ? b.minLevel : 0.02),
         maxLevel: clamp01(typeof b.maxLevel === 'number' ? b.maxLevel : 1),
+        colorMode: (b.colorMode === 'chroma' ? 'chroma' : 'palette') as 'palette' | 'chroma',
       }));
     const oldRids = bindings.map((b) => b.rid).sort().join(',');
     const newRids = clean.map((b) => b.rid).sort().join(',');
@@ -454,10 +531,12 @@ export function getStemSyncStatus() {
       rid: rt.binding.rid,
       light: rt.resolvedName,
       stems: rt.binding.stems,
+      colorMode: rt.binding.colorMode ?? 'palette',
       effectiveOffsetMs: getPlayheadOffsetMs(rt.binding.rid) ?? config.offsetMs,
       streamChannelId: rt.streamChannelId,
       value: Number(rt.value.toFixed(3)),
       level: Number(rt.level.toFixed(3)),
+      chromaValue: Number(rt.chromaValue.toFixed(3)),
       lastError: rt.lastError,
     })),
     error: lastError,

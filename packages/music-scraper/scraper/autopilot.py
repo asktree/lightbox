@@ -191,7 +191,23 @@ def main():
         if now_s - last_queue_poll_s >= QUEUE_POLL_INTERVAL_S:
             last_queue_poll_s = now_s
             try:
-                upcoming = (sp.queue().get("queue") or [])[:QUEUE_VIEW_N]
+                raw_queue = sp.queue().get("queue") or []
+                # Sanitize known /me/player/queue quirks in autoplay mode:
+                # the endpoint sometimes returns the currently-playing track
+                # repeated in every slot ("all bubbles"), and duplicates in
+                # general. Drop the current track + dedupe by id. (The
+                # deeper quirk — autoplay suggestions genuinely differing
+                # per client — isn't fixable from here.)
+                seen_qids: set[str] = set()
+                upcoming = []
+                for t in raw_queue:
+                    qid = t.get("id")
+                    if not qid or qid == current_track_id or qid in seen_qids:
+                        continue
+                    seen_qids.add(qid)
+                    upcoming.append(t)
+                    if len(upcoming) >= QUEUE_VIEW_N:
+                        break
                 queue_view = [{
                     "id": t.get("id"),
                     "name": t.get("name", "?"),

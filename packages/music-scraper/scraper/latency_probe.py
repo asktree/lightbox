@@ -39,6 +39,23 @@ N_CLICKS = 8
 LEAD_IN_S = 0.5
 
 
+def _pick_input_device():
+    """Prefer a real microphone over whatever the system default input is —
+    virtual devices (BlackHole, Hue Sync Audio) record silence and have been
+    seen stealing the default. Returns (device_index_or_None, name)."""
+    import sounddevice as sd
+    devs = sd.query_devices()
+    for want in ("microphone", "macbook"):
+        for i, d in enumerate(devs):
+            if d["max_input_channels"] > 0 and want in d["name"].lower():
+                return i, d["name"]
+    try:
+        di = sd.default.device[0]
+        return None, devs[di]["name"] if di is not None and di >= 0 else "default"
+    except Exception:  # noqa: BLE001
+        return None, "default"
+
+
 def _click_template() -> np.ndarray:
     # Bell-like pluck: fundamental + quiet octave, 3ms attack, exponential
     # decay. Pleasant to hear; the sharp attack still gives the matched
@@ -76,7 +93,8 @@ def run_audio() -> dict:
     def on_input(indata, frames, time_info, status):  # noqa: ANN001
         chunks.append((time.time(), indata[:, 0].copy()))
 
-    in_stream = sd.InputStream(samplerate=SR, channels=1, callback=on_input, blocksize=1024)
+    mic_dev, mic_name = _pick_input_device()
+    in_stream = sd.InputStream(samplerate=SR, channels=1, callback=on_input, blocksize=1024, device=mic_dev)
     in_stream.start()
     input_latency_s = float(in_stream.latency)
     time.sleep(0.3)  # let the input stream settle before t0
@@ -198,7 +216,8 @@ def run_passive(audio_path: str, ref_pos_s: float, ref_wall_t: float, record_s: 
     def on_input(indata, frames, time_info, status):  # noqa: ANN001
         chunks.append((time.time(), indata[:, 0].copy()))
 
-    in_stream = sd.InputStream(samplerate=SR, channels=1, callback=on_input, blocksize=1024)
+    mic_dev, mic_name = _pick_input_device()
+    in_stream = sd.InputStream(samplerate=SR, channels=1, callback=on_input, blocksize=1024, device=mic_dev)
     in_stream.start()
     input_latency_s = float(in_stream.latency)
     time.sleep(record_s)
@@ -213,7 +232,7 @@ def run_passive(audio_path: str, ref_pos_s: float, ref_wall_t: float, record_s: 
 
     mic_rms = float(np.sqrt(np.mean(rec ** 2)))
     if mic_rms < 2e-5:
-        return {"ok": False, "error": "mic captured silence — is music audible?", "mic_rms": mic_rms}
+        return {"ok": False, "error": "mic captured silence — is music audible?", "mic_rms": mic_rms, "input_device": mic_name}
 
     # Reference: the track segment nominally at the ear during the capture,
     # padded PRE seconds early (in case latency beats the playhead) and

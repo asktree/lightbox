@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { HueEntertainmentDriver, getSharedEntertainmentDriver } from '../drivers/hue-entertainment.js';
 import { restFadedPulse, getRestLights, getMusicGroupRid, getMusicGroupLightNames, setRestMaxSockets, getRestMaxSockets, ridToLmId, getBridgeRttMs, getLightSnapshot, restoreLightSnapshot, type LightSnapshot } from '../drivers/hue-rest-pulse.js';
 import type { PaletteAnimator } from '../lib/palette-animator.js';
-import { isStemSyncActive } from '../services/stem-sync.js';
+import { isStemSyncActive, isChromaOwnedChannel } from '../services/stem-sync.js';
 import { isAudioSyncActive } from '../services/audio-sync.js';
 
 // Lazily constructed so a missing hue-config doesn't break server startup.
@@ -76,6 +76,9 @@ export function createHueStreamRouter(paletteAnimator?: PaletteAnimator): Router
       for (const ch of d.getChannels()) {
         const lm = cachedRestLightsByName.get(ch.lightName.trim().toLowerCase());
         if (!lm) continue;
+        // Chroma-mode channels get their color from stem-sync (music-driven
+        // hue), not the palette — don't overwrite it here.
+        if (isChromaOwnedChannel(ch.id)) continue;
         const color = paletteAnimator.getPaletteColorForLight(lm.lmId);
         if (color) d.setChannel(ch.id, color.r, color.g, color.b);
       }
