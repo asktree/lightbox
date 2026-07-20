@@ -22,7 +22,7 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from scraper.latency_probe import run_audio, run_video
+from scraper.latency_probe import run_audio, run_passive, run_video
 
 PORT = 3009
 
@@ -78,7 +78,24 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         global _video_thread, _video_result
-        if self.path == "/audio":
+        if self.path == "/passive":
+            if not _lock.acquire(blocking=False):
+                self._send(409, {"ok": False, "error": "a capture is already running"})
+                return
+            body = self._body()
+            try:
+                result = run_passive(
+                    str(body.get("audio_path") or ""),
+                    float(body.get("ref_pos_s") or 0),
+                    float(body.get("ref_wall_t") or 0),
+                    float(body.get("record_s") or 10.0),
+                )
+            except Exception as e:  # noqa: BLE001
+                result = {"ok": False, "error": f"passive capture crashed: {e}"}
+            finally:
+                _lock.release()
+            self._send(200 if result.get("ok") else 500, result)
+        elif self.path == "/audio":
             if not _lock.acquire(blocking=False):
                 self._send(409, {"ok": False, "error": "a capture is already running"})
                 return

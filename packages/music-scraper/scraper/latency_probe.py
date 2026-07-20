@@ -157,6 +157,113 @@ def run_audio() -> dict:
     }
 
 
+# ---- passive mode ----
+#
+# No test tones: record the room mic while music plays, and GCC-PHAT the
+# capture against the known track audio (autopilot pre-ingests every track to
+# ~/music-library). The playhead tells us which segment *should* be at the
+# ear right now; the correlation lag is the true playhead→ear latency of the
+# entire Spotify chain — the exact reference the light engines sync against.
+
+PASSIVE_FS = 16000  # common analysis rate; plenty for alignment
+
+
+def _gcc_phat(mic: np.ndarray, ref: np.ndarray, fs: int, lag_lo_s: float, lag_hi_s: float):
+    """Lag (s) of mic relative to ref via phase transform, plus confidence."""
+    n = len(mic) + len(ref)
+    nfft = 1 << (n - 1).bit_length()
+    m = np.fft.rfft(mic, nfft)
+    r = np.fft.rfft(ref, nfft)
+    cross = m * np.conj(r)
+    cross /= np.abs(cross) + 1e-12
+    cc = np.fft.irfft(cross, nfft)
+    lo = int(lag_lo_s * fs)
+    hi = int(lag_hi_s * fs)
+    lags = np.arange(lo, hi + 1)
+    vals = np.abs(cc[lags % nfft])
+    peak_i = int(np.argmax(vals))
+    # Confidence: peak height vs the field. PHAT peaks are near-impulses when
+    # alignment is real; music-vs-silence or wrong-track gives a flat field.
+    conf = float(vals[peak_i] / (np.median(vals) + 1e-12))
+    return lags[peak_i] / fs, conf
+
+
+def run_passive(audio_path: str, ref_pos_s: float, ref_wall_t: float, record_s: float) -> dict:
+    import sounddevice as sd
+    import soundfile as sf
+    from scipy.signal import resample_poly
+
+    chunks: list[tuple[float, np.ndarray]] = []
+
+    def on_input(indata, frames, time_info, status):  # noqa: ANN001
+        chunks.append((time.time(), indata[:, 0].copy()))
+
+    in_stream = sd.InputStream(samplerate=SR, channels=1, callback=on_input, blocksize=1024)
+    in_stream.start()
+    input_latency_s = float(in_stream.latency)
+    time.sleep(record_s)
+    in_stream.stop()
+    in_stream.close()
+
+    if not chunks:
+        return {"ok": False, "error": "no mic data captured"}
+    rec = np.concatenate([c for _, c in chunks])
+    first_t, first_chunk = chunks[0]
+    rec_t0 = first_t - len(first_chunk) / SR - input_latency_s
+
+    mic_rms = float(np.sqrt(np.mean(rec ** 2)))
+    if mic_rms < 2e-5:
+        return {"ok": False, "error": "mic captured silence — is music audible?", "mic_rms": mic_rms}
+
+    # Reference: the track segment nominally at the ear during the capture,
+    # padded PRE seconds early (in case latency beats the playhead) and
+    # MAX_LAT late (to catch up to ~4s of latency).
+    PRE, MAX_LAT = 1.0, 4.0
+    pos_at_rec0 = ref_pos_s + (rec_t0 - ref_wall_t)
+    ref_start = pos_at_rec0 - PRE
+    try:
+        info = sf.info(audio_path)
+        start_frame = max(0, int(ref_start * info.samplerate))
+        n_frames = int((PRE + record_s + MAX_LAT) * info.samplerate)
+        ref, ref_sr = sf.read(audio_path, start=start_frame, frames=n_frames, dtype="float32", always_2d=True)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"cannot read reference audio: {e}"}
+    ref = ref.mean(axis=1)
+    if len(ref) < ref_sr * 2:
+        return {"ok": False, "error": "reference segment too short (near end of track?)"}
+
+    mic16 = resample_poly(rec, PASSIVE_FS, SR).astype(np.float64)
+    ref16 = resample_poly(ref, PASSIVE_FS, ref_sr).astype(np.float64)
+
+    # mic(t) = ref(t + PRE − L)  →  lag = L − PRE, searched over L ∈ [−0.5, MAX_LAT].
+    lag_s, conf = _gcc_phat(mic16, ref16, PASSIVE_FS, -PRE - 0.5, MAX_LAT - PRE)
+    latency_ms = (lag_s + PRE) * 1000
+
+    reported = None
+    device = None
+    try:
+        from scraper.audio_latency import get_output_latency_ms
+        reported, device = get_output_latency_ms()
+    except Exception:
+        pass
+
+    if conf < 8:
+        return {
+            "ok": False,
+            "error": f"correlation too weak (confidence {conf:.1f}) — music inaudible, paused, or wrong track",
+            "confidence": round(conf, 1),
+            "coreaudio_reported_ms": reported,
+        }
+    return {
+        "ok": True,
+        "audio_latency_ms": round(float(latency_ms), 1),
+        "confidence": round(conf, 1),
+        "recorded_s": record_s,
+        "coreaudio_reported_ms": reported,
+        "output_device_name": device,
+    }
+
+
 # ---- video mode ----
 
 def run_video(duration_s: float, camera_index: int, on_ready=None) -> dict:
@@ -241,14 +348,20 @@ def run_video(duration_s: float, camera_index: int, on_ready=None) -> dict:
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("mode", choices=["audio", "video"])
+    p.add_argument("mode", choices=["audio", "video", "passive"])
     p.add_argument("--duration", type=float, default=14.0)
     p.add_argument("--camera", type=int, default=0)
+    p.add_argument("--audio-path")
+    p.add_argument("--pos", type=float, help="playhead position (s) at --wall-t")
+    p.add_argument("--wall-t", type=float, help="wall clock (s epoch) of --pos")
+    p.add_argument("--record", type=float, default=10.0)
     args = p.parse_args()
-    result = (
-        run_audio() if args.mode == "audio"
-        else run_video(args.duration, args.camera, on_ready=lambda: print("READY", flush=True))
-    )
+    if args.mode == "audio":
+        result = run_audio()
+    elif args.mode == "passive":
+        result = run_passive(args.audio_path, args.pos, args.wall_t, args.record)
+    else:
+        result = run_video(args.duration, args.camera, on_ready=lambda: print("READY", flush=True))
     print(json.dumps(result))
     sys.exit(0 if result.get("ok") else 1)
 

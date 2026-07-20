@@ -288,6 +288,28 @@ app.get('/api/library/:id/envelope', async (req, res) => {
   }
 });
 
+// Per-stem chroma proxy (ZCR-based spectral-centroid stand-in) at the same
+// rate as the envelope. Separate JSON endpoint on purpose — the ENV2 binary
+// format stays frozen for its existing consumers (twinklybox, stem-sync).
+// Shares the envelope's decode + cache, so first request cost is identical.
+app.get('/api/library/:id/chroma', async (req, res) => {
+  try {
+    const pack = await getEnvelope(req.params.id);
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    res.json({
+      trackId: pack.trackId,
+      sr: pack.sr,
+      numSamples: pack.numSamples,
+      stems: Object.fromEntries(Object.entries(pack.chroma).map(([stem, c]) => [
+        stem,
+        { max: c.max, samples: Array.from(c.samples, (v) => Math.round(v * 10000) / 10000) },
+      ])),
+    });
+  } catch (e: any) {
+    res.status(500).json({ error: String(e?.message ?? e) });
+  }
+});
+
 app.get('/api/envelope/stats', (_req, res) => res.json(envelopeStats()));
 
 // ---- Playback state ----

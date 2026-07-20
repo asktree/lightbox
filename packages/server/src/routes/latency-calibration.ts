@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import {
   calibrateAudio,
+  calibrateAudioPassive,
   calibrateLight,
   getCalibrationStatus,
   getLatencyRegistry,
@@ -26,6 +27,12 @@ export function createLatencyCalRouter(paletteAnimator?: PaletteAnimator): Route
 
   r.post('/audio', async (_req, res) => {
     const result = await calibrateAudio();
+    res.status(result.ok ? 200 : 500).json(result);
+  });
+
+  // Silent measurement using the currently-playing music itself.
+  r.post('/audio-passive', async (_req, res) => {
+    const result = await calibrateAudioPassive();
     res.status(result.ok ? 200 : 500).json(result);
   });
 

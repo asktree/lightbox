@@ -207,6 +207,62 @@ export async function calibrateAudio(): Promise<Record<string, unknown>> {
   }
 }
 
+// ---- passive audio calibration ----
+// Measures the playhead→ear latency of the actual Spotify chain by GCC-PHAT
+// correlating a room-mic capture against the pre-ingested track audio at the
+// autopilot's reported position. No test tones — runs while music plays, and
+// measures the exact reference the light engines sync against.
+
+const AUTOPILOT_STATE = '/tmp/lightbox-autopilot.json';
+const LIBRARY_TRACKS = join(process.env.HOME ?? '', 'music-library/tracks');
+
+export async function calibrateAudioPassive(): Promise<Record<string, unknown>> {
+  if (audioRunning) return { ok: false, error: 'audio calibration already running' };
+  audioRunning = true;
+  try {
+    let state: { track_id?: string; position_s?: number; updated_at?: number; playing?: boolean };
+    try {
+      state = JSON.parse(readFileSync(AUTOPILOT_STATE, 'utf-8'));
+    } catch {
+      return { ok: false, error: 'no autopilot state — is music playing via autopilot?' };
+    }
+    const age = Date.now() / 1000 - (state.updated_at ?? 0);
+    if (!state.track_id || !state.playing || age > 5) {
+      return { ok: false, error: `autopilot not playing (age ${age.toFixed(1)}s)` };
+    }
+    const audioPath = join(LIBRARY_TRACKS, state.track_id, 'audio.ogg');
+    if (!existsSync(audioPath)) {
+      return { ok: false, error: `track audio not on disk yet: ${audioPath}` };
+    }
+    if (!(await daemonAvailable())) {
+      return { ok: false, error: 'probe daemon not reachable — passive mode needs it (mic access)' };
+    }
+    const res = await daemonFetch('/passive', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        audio_path: audioPath,
+        ref_pos_s: state.position_s,
+        ref_wall_t: state.updated_at,
+        record_s: 10,
+      }),
+    }, 40000).catch((e) => ({ ok: false, error: `probe daemon: ${e}` } as Record<string, unknown>));
+    if (res.ok) {
+      registry.audio = {
+        latencyMs: res.audio_latency_ms as number,
+        jitterMs: registry.audio?.jitterMs ?? 0,
+        coreAudioReportedMs: (res.coreaudio_reported_ms as number | null) ?? null,
+        outputDeviceName: (res.output_device_name as string | null) ?? registry.audio?.outputDeviceName ?? null,
+        measuredAt: Date.now(),
+      };
+      persist();
+    }
+    return res;
+  } finally {
+    audioRunning = false;
+  }
+}
+
 // ---- light calibration ----
 
 let lightRunning: string | null = null;

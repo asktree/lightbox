@@ -42,6 +42,11 @@ export interface StemBinding {
   stems: Stem[];      // which stem envelopes feed this light (mean of set)
   minLevel: number;   // baseline multiplier at value 0
   maxLevel: number;   // baseline multiplier at value 1
+  // 'palette' (default): color follows the palette animator's baseline.
+  // 'chroma': color follows the music — the energy-weighted chroma proxy
+  // of the bound stems maps onto a warm→cool hue ramp (low/dark timbre =
+  // amber, bright timbre = cyan-blue, mirroring v1's spectrum gradient).
+  colorMode?: 'palette' | 'chroma';
 }
 
 export interface StemSyncConfig {
@@ -127,6 +132,7 @@ interface BindingRuntime {
   snapshot: LightSnapshot | null;
   value: number;
   level: number;
+  chromaValue: number; // EMA-smoothed 0..1 chroma driving the hue
   lastError: string | null;
 }
 
@@ -135,6 +141,9 @@ interface Envelope {
   sr: number;
   numSamples: number;
   stems: Record<Stem, { samples: Float32Array; max: number }>;
+  // Chroma proxy from :3002/api/library/:id/chroma — loaded alongside the
+  // energy envelope; optional so energy-only drive works if the fetch fails.
+  chroma?: Record<Stem, { samples: Float32Array; max: number }>;
 }
 
 let paletteAnimator: PaletteAnimator | null = null;

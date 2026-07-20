@@ -37,6 +37,15 @@ export interface StemEnvelope {
   max: number;
 }
 
+// Per-chunk zero-crossing rate — the cheap spectral-centroid proxy v1's UI
+// called "chroma" (high-frequency content drives ZCR up). One O(n) pass,
+// no FFT. Values are raw crossings/sample (0..1 of Nyquist); consumers
+// normalize by `max` for display or hue mapping.
+export interface StemChroma {
+  samples: Float32Array;
+  max: number;
+}
+
 export interface BandsEnvelope {
   // Row-major [chunk][band] → flat Float32Array length = numSamples × NUM_BANDS.
   // For chunk i, band b → samples[i * NUM_BANDS + b].
@@ -47,6 +56,10 @@ export interface EnvelopePack {
   trackId: string;
   sr: number;        // envelope Hz
   numSamples: number; // per stem (all stems padded to same length)
+  // Per-stem chroma proxy at the same rate. NOT part of the ENV2 wire
+  // format (existing binary consumers stay untouched) — served separately
+  // as JSON via /api/library/:id/chroma.
+  chroma: Record<Stem, StemChroma>;
   // True when this pack was computed from audio.ogg because stems weren't
   // on disk (per-stem envelopes zeroed). Such packs are re-checked on every
   // request and recomputed once stems appear — otherwise a request racing
@@ -119,6 +132,25 @@ async function decodeStemToMonoF32(stemPath: string): Promise<Float32Array> {
       resolve(new Float32Array(ab));
     });
   });
+}
+
+function computeChromaEnvelope(pcm: Float32Array, srAudio: number, srEnv: number): StemChroma {
+  const samplesPerChunk = Math.max(1, Math.round(srAudio / srEnv));
+  const numChunks = Math.ceil(pcm.length / samplesPerChunk);
+  const out = new Float32Array(numChunks);
+  let max = 0;
+  for (let i = 0; i < numChunks; i++) {
+    const s = i * samplesPerChunk;
+    const e = Math.min(pcm.length, s + samplesPerChunk);
+    let crossings = 0;
+    for (let j = s + 1; j < e; j++) {
+      if ((pcm[j] >= 0) !== (pcm[j - 1] >= 0)) crossings++;
+    }
+    const zcr = (e - s) > 1 ? crossings / (e - s - 1) : 0;
+    out[i] = zcr;
+    if (zcr > max) max = zcr;
+  }
+  return { samples: out, max };
 }
 
 function computeRMSEnvelope(pcm: Float32Array, srAudio: number, srEnv: number): StemEnvelope {
@@ -253,9 +285,13 @@ async function computeEnvelope(trackId: string): Promise<EnvelopePack> {
     const combined = await decodeStemToMonoF32(audioPath); // generic ffmpeg decode → mono f32
     const numSamples = computeRMSEnvelope(combined, DECODE_SR, ENVELOPE_HZ).samples.length;
     const stems = {} as Record<Stem, StemEnvelope>;
-    for (const s of STEMS) stems[s] = { samples: new Float32Array(numSamples), max: 0 };
+    const chroma = {} as Record<Stem, StemChroma>;
+    for (const s of STEMS) {
+      stems[s] = { samples: new Float32Array(numSamples), max: 0 };
+      chroma[s] = { samples: new Float32Array(numSamples), max: 0 };
+    }
     const bands = computeBandsEnvelope(combined, DECODE_SR, ENVELOPE_HZ);
-    return { trackId, sr: ENVELOPE_HZ, numSamples, stems, bands, stemless: true };
+    return { trackId, sr: ENVELOPE_HZ, numSamples, stems, chroma, bands, stemless: true };
   }
 
   // Stems present: decode all four in parallel — ffmpeg is single-threaded per stem, but
@@ -266,22 +302,27 @@ async function computeEnvelope(trackId: string): Promise<EnvelopePack> {
     const path = join(stemsDir, `${stem}.ogg`);
     if (!existsSync(path)) throw new Error(`stem missing: ${stem}`);
     const pcm = await decodeStemToMonoF32(path);
-    return { stem, pcm, rms: computeRMSEnvelope(pcm, DECODE_SR, ENVELOPE_HZ) } as const;
+    return {
+      stem, pcm,
+      rms: computeRMSEnvelope(pcm, DECODE_SR, ENVELOPE_HZ),
+      zcr: computeChromaEnvelope(pcm, DECODE_SR, ENVELOPE_HZ),
+    } as const;
   }));
   // Pad shorter stems up to the longest. Demucs output is usually identical
   // length but firmware versions / re-encodes have drifted in the past.
   let numSamples = 0;
   for (const d of decoded) if (d.rms.samples.length > numSamples) numSamples = d.rms.samples.length;
+  const pad = (arr: Float32Array): Float32Array => {
+    if (arr.length >= numSamples) return arr;
+    const padded = new Float32Array(numSamples);
+    padded.set(arr);
+    return padded;
+  };
   const stems = {} as Record<Stem, StemEnvelope>;
+  const chroma = {} as Record<Stem, StemChroma>;
   for (const d of decoded) {
-    const env = d.rms;
-    if (env.samples.length < numSamples) {
-      const padded = new Float32Array(numSamples);
-      padded.set(env.samples);
-      stems[d.stem] = { samples: padded, max: env.max };
-    } else {
-      stems[d.stem] = env;
-    }
+    stems[d.stem] = { samples: pad(d.rms.samples), max: d.rms.max };
+    chroma[d.stem] = { samples: pad(d.zcr.samples), max: d.zcr.max };
   }
 
   // Equal-weighted sum of stem PCM. Length = longest stem's pcm; pad
@@ -296,7 +337,7 @@ async function computeEnvelope(trackId: string): Promise<EnvelopePack> {
   // Don't divide by 4 — leaving it as a sum gives more headroom into the
   // FFT, percentile-normalization on the consumer side handles scaling.
   const bands = computeBandsEnvelope(combined, DECODE_SR, ENVELOPE_HZ);
-  return { trackId, sr: ENVELOPE_HZ, numSamples, stems, bands };
+  return { trackId, sr: ENVELOPE_HZ, numSamples, stems, chroma, bands };
 }
 
 // Binary serialization for HTTP transport. Format v2 — adds a per-chunk
