@@ -213,7 +213,7 @@ export async function calibrateAudio(): Promise<Record<string, unknown>> {
 // autopilot's reported position. No test tones — runs while music plays, and
 // measures the exact reference the light engines sync against.
 
-const AUTOPILOT_STATE = '/tmp/lightbox-autopilot.json';
+const AUTOPILOT_STATE = join(__dirname, '../../data/state/lightbox-autopilot.json');
 const LIBRARY_TRACKS = join(process.env.HOME ?? '', 'music-library/tracks');
 
 export async function calibrateAudioPassive(): Promise<Record<string, unknown>> {
@@ -372,7 +372,8 @@ async function runLightMeasurement(light: { rid: string; lmId: string; name: str
   const res = await probeResult();
   // Raw capture dump for offline debugging of edge detection.
   try {
-    writeFileSync('/tmp/latency-cal-last-video.json', JSON.stringify({ sendTimes, ...res }));
+    writeFileSync(join(__dirname, '../../data/state/latency-cal-last-video.json'),
+      JSON.stringify({ sendTimes, ...res }));
   } catch { /* diagnostic only */ }
   driver.clearEffect(ch.id);
   if (startedStream) await driver.stop().catch(() => { /* best effort */ });

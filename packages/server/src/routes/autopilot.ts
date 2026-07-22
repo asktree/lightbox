@@ -2,7 +2,7 @@
 // and exposes its state-file contents over HTTP so the musicbox UI can show
 // a live status panel with an on/off toggle.
 //
-// The Python process writes /tmp/lightbox-autopilot.json every ~500ms; we
+// The Python process writes data/state/lightbox-autopilot.json every ~500ms; we
 // just relay it. Start uses child_process.spawn with detached:true so the
 // autopilot survives tsx-watch dev-server restarts. Stop reads the PID
 // from the state file and sends SIGTERM.
@@ -16,15 +16,35 @@
 
 import { Router } from 'express';
 import { spawn } from 'child_process';
-import { readFileSync, existsSync, unlinkSync, openSync } from 'fs';
+import { readFileSync, existsSync, unlinkSync, openSync, mkdirSync, statSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
+import { homedir } from 'os';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, '../../../..');
 const SCRAPER_DIR = join(REPO_ROOT, 'packages/music-scraper');
 const VENV_PYTHON = join(SCRAPER_DIR, '.venv/bin/python');
-const STATE_FILE = '/tmp/lightbox-autopilot.json';
+// State under the repo (gitignored), logs under ~/.local/state — never
+// /tmp, which macOS purges after ~3 days. STATE_FILE is a shared contract
+// with scraper/autopilot.py and services/stem-sync.ts.
+const STATE_DIR = join(REPO_ROOT, 'packages/server/data/state');
+const STATE_FILE = join(STATE_DIR, 'lightbox-autopilot.json');
+const LOG_DIR = join(homedir(), '.local/state/lightbox');
+const LOG_FILE = join(LOG_DIR, 'autopilot.log');
+const LOG_MAX_BYTES = 10 * 1024 * 1024;
+
+mkdirSync(STATE_DIR, { recursive: true });
+mkdirSync(LOG_DIR, { recursive: true });
+// Truncate-on-boot: unbounded append would grow forever now that macOS
+// isn't purging it for us. Keep the last 1MB so a crash right before a
+// restart is still diagnosable.
+try {
+  if (existsSync(LOG_FILE) && statSync(LOG_FILE).size > LOG_MAX_BYTES) {
+    const raw = readFileSync(LOG_FILE);
+    writeFileSync(LOG_FILE, raw.subarray(raw.length - 1024 * 1024));
+  }
+} catch { /* best effort */ }
 
 const FRESH_AGE_S = 5; // heartbeat younger than this = healthy
 const WEDGE_AGE_S = 60; // pid alive + heartbeat older than this = wedged
@@ -127,7 +147,7 @@ function spawnAutopilot(opts: { autoIngest?: boolean; prefetch?: number }): numb
 
   // Redirect child stdout/stderr to a log file so we can post-mortem when
   // the detached process dies silently.
-  const logFd = openSync('/tmp/lightbox-autopilot.log', 'a');
+  const logFd = openSync(LOG_FILE, 'a');
   const child = spawn(VENV_PYTHON, args, {
     cwd: SCRAPER_DIR,
     env: { ...process.env, PYTHONUNBUFFERED: '1' },
@@ -160,7 +180,7 @@ function respawnFromWatchdog(): void {
     breakerTripped = true;
     console.error(
       `[autopilot] watchdog: ${consecutiveRespawns} respawns without a healthy heartbeat — ` +
-      `circuit breaker tripped, not respawning. Check /tmp/lightbox-autopilot.log, then POST /start.`,
+      `circuit breaker tripped, not respawning. Check ~/.local/state/lightbox/autopilot.log, then POST /start.`,
     );
     return;
   }
@@ -269,8 +289,8 @@ export function createAutopilotRouter(): Router {
     const pidAlive = state.pid ? isPidAlive(state.pid) : false;
     let logTail: string | null = null;
     try {
-      if (existsSync('/tmp/lightbox-autopilot.log')) {
-        const raw = readFileSync('/tmp/lightbox-autopilot.log', 'utf-8');
+      if (existsSync(LOG_FILE)) {
+        const raw = readFileSync(LOG_FILE, 'utf-8');
         logTail = raw.slice(-4000);
       }
     } catch {}

@@ -240,7 +240,9 @@ def cmd_ingest(args):
         print(f"[ingest] downloading {tid}")
         progress("download")
         t0 = time.time()
-        lock_f = open("/tmp/lightbox-zotify.lock", "w")
+        lock_dir = Path.home() / ".local/state/lightbox"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        lock_f = open(lock_dir / "zotify.lock", "w")
         try:
             fcntl.flock(lock_f, fcntl.LOCK_EX)
             if not audio_path.exists():  # may have appeared while we waited

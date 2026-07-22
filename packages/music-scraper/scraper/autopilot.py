@@ -1,7 +1,7 @@
 """Spotify playhead + auto-ingest brain.
 
 Polls Spotify's currently-playing endpoint and writes an interpolated,
-drift-corrected playhead to /tmp/lightbox-autopilot.json every ~500ms.
+drift-corrected playhead to packages/server/data/state/lightbox-autopilot.json every ~500ms.
 Unknown tracks (and the next few queue entries) are auto-ingested
 (download → demucs stems) so their energy envelopes are ready by the time
 they play.
@@ -35,7 +35,15 @@ POLL_INTERVAL_S = 2.0  # Spotify rate-limits; 2s/poll is a safe cadence
 # entirely; first poll that sees playback snaps back to full cadence.
 IDLE_AFTER_S = 300.0
 IDLE_POLL_INTERVAL_S = 30.0
-STATE_FILE = Path("/tmp/lightbox-autopilot.json")
+# State lives under the repo (gitignored), logs under ~/.local/state —
+# never /tmp, which macOS purges after ~3 days (it ate the forensic logs
+# from the July 21-22 incident night). Paths are shared contracts with
+# packages/server/src/routes/autopilot.ts and services/stem-sync.ts.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+STATE_DIR = _REPO_ROOT / "packages/server/data/state"
+STATE_FILE = STATE_DIR / "lightbox-autopilot.json"
+LOG_DIR = Path.home() / ".local/state/lightbox"
+STATE_DIR.mkdir(parents=True, exist_ok=True)
 STATE_WRITE_INTERVAL_S = 0.5
 POLL_BACKOFF_MAX_RATE_S = 900.0  # 15 min cap on rate-limit backoff
 POLL_BACKOFF_MAX_S = 60.0        # cap for auth/other error backoff
@@ -214,7 +222,8 @@ def main():
         ingest_started[tid] = time.time()
         # Shared append log — transient zotify/demucs failures are otherwise
         # undiagnosable (the progress file only captures the exit code).
-        log_f = open("/tmp/lightbox-ingest.log", "ab")
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        log_f = open(LOG_DIR / "ingest.log", "ab")
         ingesting[tid] = subprocess.Popen(
             [sys.executable, "-m", "scraper", "ingest", tid],
             cwd=str(pkg_root),

@@ -3,7 +3,7 @@
 //
 // The preprocessed cousin of audio-sync: instead of live-capturing system
 // audio, it follows the autopilot's interpolated Spotify playhead
-// (/tmp/lightbox-autopilot.json, written at 2Hz) and samples the demucs-stem
+// (data/state/lightbox-autopilot.json, written at 2Hz) and samples the demucs-stem
 // RMS envelopes that musicbox computes from stems on disk
 // (GET :3002/api/library/:id/envelope, ENV2 binary). Envelopes are
 // normalized per-stem against the whole track's max at load time — the
@@ -29,7 +29,10 @@ import { getSharedEntertainmentDriver } from '../drivers/hue-entertainment.js';
 import { getPlayheadOffsetMs } from './latency-calibration.js';
 import type { PaletteAnimator } from '../lib/palette-animator.js';
 
-const AUTOPILOT_STATE = '/tmp/lightbox-autopilot.json';
+// Shared contract with scraper/autopilot.py and routes/autopilot.ts —
+// state lives under the repo, not /tmp (macOS purges /tmp after ~3 days).
+const AUTOPILOT_STATE = join(dirname(fileURLToPath(import.meta.url)),
+  '../../data/state/lightbox-autopilot.json');
 const MUSICBOX_URL = 'http://localhost:3002';
 const ENVELOPE_RETRY_MS = 3000; // stems may still be ingesting — poll until they appear
 const STATE_FRESH_S = 3;        // autopilot state older than this = not playing
