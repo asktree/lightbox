@@ -18,9 +18,21 @@ SCOPES = [
 ]
 
 
-def make_client(cfg: Config) -> spotipy.Spotify:
+def make_client(
+    cfg: Config,
+    *,
+    open_browser: bool = True,
+    retries: int = 5,
+    status_retries: int | None = None,
+    requests_timeout: int = 30,
+) -> spotipy.Spotify:
     """Create an authenticated Spotify client. First run opens a browser
-    for OAuth; subsequent runs use the cached token at SPOTIPY_CACHE."""
+    for OAuth; subsequent runs use the cached token at SPOTIPY_CACHE.
+
+    Daemons must pass open_browser=False, retries=0, status_retries=0,
+    requests_timeout=10: retries=0/status_retries=0 disables urllib3's
+    Retry-After sleeps (observed sleeping 13.5h inside a call on a 429),
+    so every call returns/raises within ~the request timeout."""
     SPOTIPY_CACHE.parent.mkdir(parents=True, exist_ok=True)
     auth = SpotifyOAuth(
         client_id=cfg.spotify.client_id,
@@ -28,9 +40,14 @@ def make_client(cfg: Config) -> spotipy.Spotify:
         redirect_uri=REDIRECT_URI,
         scope=" ".join(SCOPES),
         cache_path=str(SPOTIPY_CACHE),
-        open_browser=True,
+        open_browser=open_browser,
     )
-    return spotipy.Spotify(auth_manager=auth, requests_timeout=30, retries=5)
+    kwargs: dict = {"requests_timeout": requests_timeout, "retries": retries}
+    if status_retries is not None:
+        # Only pass when explicitly requested — keeps spotipy's default for
+        # existing (fragile) interactive callers.
+        kwargs["status_retries"] = status_retries
+    return spotipy.Spotify(auth_manager=auth, **kwargs)
 
 
 def _track_to_dict(track: dict, added_at: str | None) -> dict | None:

@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -28,8 +29,66 @@ from .spotify_api import make_client
 
 
 POLL_INTERVAL_S = 2.0  # Spotify rate-limits; 2s/poll is a safe cadence
+# Idle decay: sustained 24/7 polling at full cadence is what earns extended
+# 429s (13h Retry-After, July 2026). After IDLE_AFTER_S with nothing
+# playing, ease the currently-playing poll off and stop queue polls
+# entirely; first poll that sees playback snaps back to full cadence.
+IDLE_AFTER_S = 300.0
+IDLE_POLL_INTERVAL_S = 30.0
 STATE_FILE = Path("/tmp/lightbox-autopilot.json")
 STATE_WRITE_INTERVAL_S = 0.5
+POLL_BACKOFF_MAX_RATE_S = 900.0  # 15 min cap on rate-limit backoff
+POLL_BACKOFF_MAX_S = 60.0        # cap for auth/other error backoff
+MAX_CONSECUTIVE_AUTH_FAILS = 10  # then die visibly with an "auth" tombstone
+
+# Written at most once — first writer wins (the auth path writes its own
+# tombstone before sys.exit, and the outer handler must not clobber it).
+_tombstoned = False
+
+
+def write_tombstone(exit_reason: str, last_error: str | None = None) -> None:
+    """Final state file on ANY exit. The Node supervisor reads this instead
+    of finding a vanished file: running=false + exit_reason tells it (and
+    the UI) exactly why the daemon is gone."""
+    global _tombstoned
+    if _tombstoned:
+        return
+    _tombstoned = True
+    now = time.time()
+    state = {
+        "running": False,
+        "pid": os.getpid(),
+        "exit_reason": exit_reason,  # "auth" | "stopped" | "crash"
+        "last_error": last_error,
+        "updated_at": now,
+        "exited_at": now,
+    }
+    try:
+        STATE_FILE.write_text(json.dumps(state))
+    except Exception:
+        pass
+
+
+def classify_error(e: Exception) -> tuple[str, float | None]:
+    """→ ("rate" | "auth" | "other", retry_after_s or None). Defensive
+    across spotipy versions: prefer http_status/headers, fall back to
+    string matching for non-SpotifyException failures."""
+    status = getattr(e, "http_status", None)
+    msg = str(e)
+    if status == 429 or "429" in msg or "rate" in msg.lower():
+        retry_after = None
+        headers = getattr(e, "headers", None)  # only on newer spotipy
+        if headers:
+            try:
+                raw = headers.get("Retry-After") or headers.get("retry-after")
+                if raw is not None:
+                    retry_after = float(raw)
+            except (TypeError, ValueError, AttributeError):
+                retry_after = None
+        return "rate", retry_after
+    if status == 401 or "401" in msg or "access token" in msg.lower():
+        return "auth", None
+    return "other", None
 
 
 def main():
@@ -42,7 +101,28 @@ def main():
     args = ap.parse_args()
 
     cfg = load_config()
-    sp = make_client(cfg)
+    # retries=0/status_retries=0: urllib3 must never sleep inside a call
+    # (a 429 Retry-After once slept 13.5h in-call and froze the heartbeat).
+    # requests_timeout=10 bounds every call. open_browser=False: detached
+    # headless daemon must never attempt interactive OAuth.
+    sp = make_client(cfg, open_browser=False, retries=0, status_retries=0,
+                     requests_timeout=10)
+
+    # Fail fast if there's no usable cached token — validate_token refreshes
+    # an expired one but never opens a browser. Without this the daemon
+    # would hammer 401s for hours (which is what got us rate-limited).
+    token_info = None
+    try:
+        auth = sp.auth_manager
+        token_info = auth.validate_token(auth.cache_handler.get_cached_token())
+    except Exception as e:
+        print(f"token validation err: {e}", file=sys.stderr)
+    if not token_info:
+        msg = "no usable Spotify token — run the scraper OAuth flow interactively to re-auth"
+        print(msg, file=sys.stderr)
+        write_tombstone("auth", msg)
+        sys.exit(2)
+
     print(f"Autopilot: playhead+ingest brain · auto_ingest={args.auto_ingest} prefetch={args.prefetch}")
 
     current_track_id: str | None = None
@@ -69,6 +149,8 @@ def main():
     last_latency_check_s = 0.0
     LATENCY_CHECK_INTERVAL_S = 15.0
     poll_backoff_s = POLL_INTERVAL_S
+    consec_auth_fails = 0
+    last_playing_s = time.monotonic()  # start attentive; decay if silent
     ingesting: dict[str, subprocess.Popen] = {}
     blacklist: set[str] = set()
     # Transient failures (zotify hiccups) deserve one retry; blacklist only
@@ -163,6 +245,7 @@ def main():
             "prefetch": args.prefetch,
             "blacklist": list(blacklist),
             "last_error": last_error,
+            "poll_interval_s": round(poll_backoff_s, 1),
             "updated_at": time.time(),
         }
         try:
@@ -188,7 +271,7 @@ def main():
         # Queue view + prefetch: pre-ingest what's coming next so stems are
         # ready before the track starts. Demucs takes well under a minute;
         # a few minutes of head start is plenty.
-        if now_s - last_queue_poll_s >= QUEUE_POLL_INTERVAL_S:
+        if now_s - last_queue_poll_s >= QUEUE_POLL_INTERVAL_S and now_s - last_playing_s <= IDLE_AFTER_S:
             last_queue_poll_s = now_s
             try:
                 raw_queue = sp.queue().get("queue") or []
@@ -223,7 +306,8 @@ def main():
                         spawn_ingest(t.get("id"), "up next")
             except Exception as e:
                 # Queue endpoint hiccups (404 when nothing plays, 429 rate
-                # limits) are non-fatal; try again next interval.
+                # limits) are non-fatal; try again next interval. retries=0
+                # on the client means the failed call itself never slept.
                 msg = str(e)
                 if "429" in msg or "rate" in msg.lower():
                     last_queue_poll_s = now_s + 60.0  # extra-long backoff
@@ -260,15 +344,34 @@ def main():
             try:
                 cp = sp.currently_playing()
                 poll_backoff_s = POLL_INTERVAL_S
+                consec_auth_fails = 0
                 last_error = None
             except Exception as e:
                 cp = None
-                msg = str(e)
-                last_error = msg[:200]
-                if "rate" in msg.lower() or "429" in msg:
-                    poll_backoff_s = min(60.0, poll_backoff_s * 2)
-                    print(f"  rate-limited; backing off to {poll_backoff_s:.0f}s", file=sys.stderr)
+                kind, retry_after_s = classify_error(e)
+                if kind == "rate":
+                    # Honor Retry-After ourselves (never in-call), doubling
+                    # otherwise, capped at 15 min. Heartbeat keeps running.
+                    poll_backoff_s = min(max(retry_after_s or 0.0, poll_backoff_s * 2),
+                                         POLL_BACKOFF_MAX_RATE_S)
+                    last_error = f"rate limited; next poll in {poll_backoff_s:.0f}s"
+                    print(f"  {last_error}", file=sys.stderr)
+                elif kind == "auth":
+                    consec_auth_fails += 1
+                    poll_backoff_s = min(POLL_BACKOFF_MAX_S,
+                                         2.0 * (2 ** (consec_auth_fails - 1)))
+                    last_error = f"auth error ({consec_auth_fails}x): {str(e)[:120]}"
+                    print(f"  spotify auth err ({consec_auth_fails}x); next poll in {poll_backoff_s:.0f}s",
+                          file=sys.stderr)
+                    if consec_auth_fails >= MAX_CONSECUTIVE_AUTH_FAILS:
+                        msg = ("spotify auth failing repeatedly — run the scraper "
+                               "OAuth flow interactively to re-auth")
+                        print(f"  {msg}; exiting", file=sys.stderr)
+                        write_tombstone("auth", msg)
+                        sys.exit(2)
                 else:
+                    poll_backoff_s = min(POLL_BACKOFF_MAX_S, poll_backoff_s * 2)
+                    last_error = str(e)[:200]
                     print(f"  spotify poll err: {e}", file=sys.stderr)
 
             if cp and cp.get("is_playing"):
@@ -314,7 +417,14 @@ def main():
             else:
                 playing = False
 
-        # Always write state — even paused — so the UI has something to show.
+            if playing:
+                last_playing_s = now_s
+            elif last_error is None and now_s - last_playing_s > IDLE_AFTER_S:
+                poll_backoff_s = IDLE_POLL_INTERVAL_S
+
+        # Always write state — even paused or erroring — so the UI has
+        # something to show. Nothing above can block past the 10s request
+        # timeout, so the heartbeat can't go stale.
         if now_s - last_state_write_s > STATE_WRITE_INTERVAL_S:
             last_state_write_s = now_s
             write_state()
@@ -322,11 +432,22 @@ def main():
         time.sleep(0.1)
 
 
+def _on_sigterm(signum, frame):
+    # Raise SystemExit so finally/except blocks run and the "stopped"
+    # tombstone gets written — the Node supervisor stops us with SIGTERM.
+    raise SystemExit(0)
+
+
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, _on_sigterm)
     try:
         main()
-    finally:
-        try:
-            if STATE_FILE.exists(): STATE_FILE.unlink()
-        except Exception:
-            pass
+        write_tombstone("stopped")
+    except (SystemExit, KeyboardInterrupt):
+        # Auth exits already wrote their tombstone; write_tombstone is a
+        # no-op after the first call, so this only claims clean stops.
+        write_tombstone("stopped")
+        raise
+    except Exception as e:
+        write_tombstone("crash", f"{type(e).__name__}: {e}"[:200])
+        raise
