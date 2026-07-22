@@ -3,6 +3,7 @@ import { STEMS, STEM_COLOR, type Stem, type StemSyncStatus, type RestLight, type
 import type { PlayheadRef } from '../playhead';
 import { LIGHTBOX_URL } from '../api';
 import { peekStemData } from '../dsp/stems';
+import { DualSlider, HueBar } from './sliders';
 
 // The only controls in the app: which stems feed which light, and the
 // engine's on/off. THE SERVER IS THE SOURCE OF TRUTH — the local map is
@@ -23,12 +24,19 @@ export function DriveRail({ status, lights, apRef, playhead }: {
   const [stemMap, setStemMap] = useState<Record<string, Stem[]>>({});
   // rid → color mode: 'palette' (default) or 'chroma' (hue follows timbre).
   const [colorModes, setColorModes] = useState<Record<string, 'palette' | 'chroma'>>({});
+  // rid → chroma hue arc (S/E handles + traversal direction).
+  interface HueArc { hueStart: number; hueEnd: number; hueDir: 'up' | 'down' }
+  const [hueMap, setHueMap] = useState<Record<string, HueArc>>({});
+  const DEFAULT_ARC: HueArc = { hueStart: 30, hueEnd: 210, hueDir: 'up' };
+  const bindingPushTimer = useRef<number | null>(null);
   const seeded = useRef(false);
   const [busy, setBusy] = useState(false);
   // Response shaping — engine params, seeded from the server once and
   // pushed (debounced) on slider moves. These are aesthetic controls, not
-  // latency: gamma bends the curve, attack/decay smooth rise/fall.
-  const [shaping, setShaping] = useState<{ gamma: number; attack: number; decay: number } | null>(null);
+  // latency: gamma bends the curve, attack/decay smooth rise/fall,
+  // min/max bound the brightness range.
+  interface Shaping { gamma: number; attack: number; decay: number; minLevel: number; maxLevel: number }
+  const [shaping, setShaping] = useState<Shaping | null>(null);
   const shapingPushTimer = useRef<number | null>(null);
   const meterRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const stemMapRef = useRef(stemMap);
@@ -40,15 +48,24 @@ export function DriveRail({ status, lights, apRef, playhead }: {
     seeded.current = true;
     const m: Record<string, Stem[]> = {};
     const cm: Record<string, 'palette' | 'chroma'> = {};
+    const hm: Record<string, HueArc> = {};
     for (const b of status.bindings) if (b?.rid) {
       m[b.rid] = b.stems ?? [];
       cm[b.rid] = b.colorMode === 'chroma' ? 'chroma' : 'palette';
+      hm[b.rid] = {
+        hueStart: b.hueStart ?? DEFAULT_ARC.hueStart,
+        hueEnd: b.hueEnd ?? DEFAULT_ARC.hueEnd,
+        hueDir: b.hueDir === 'down' ? 'down' : 'up',
+      };
     }
-    const { gamma, attack, decay } = status.config;
-    setTimeout(() => { setStemMap(m); setColorModes(cm); setShaping({ gamma, attack, decay }); }, 0);
+    const { gamma, attack, decay, minLevel, maxLevel } = status.config;
+    setTimeout(() => {
+      setStemMap(m); setColorModes(cm); setHueMap(hm);
+      setShaping({ gamma, attack, decay, minLevel: minLevel ?? 0.02, maxLevel: maxLevel ?? 1 });
+    }, 0);
   }
 
-  const pushShaping = (next: { gamma: number; attack: number; decay: number }) => {
+  const pushShaping = (next: Shaping) => {
     setShaping(next);
     if (shapingPushTimer.current != null) window.clearTimeout(shapingPushTimer.current);
     shapingPushTimer.current = window.setTimeout(() => {
@@ -92,7 +109,10 @@ export function DriveRail({ status, lights, apRef, playhead }: {
           const a = target > prev ? (cfg?.attack ?? 0) : (cfg?.decay ?? 0);
           const v = a > 0 ? prev * a + target * (1 - a) : target;
           smoothed[rid] = v;
-          level = Math.pow(v, cfg?.gamma ?? 1);
+          const shaped = Math.pow(v, cfg?.gamma ?? 1);
+          const lo = Math.min(cfg?.minLevel ?? 0.02, cfg?.maxLevel ?? 1);
+          const hi = Math.max(cfg?.minLevel ?? 0.02, cfg?.maxLevel ?? 1);
+          level = lo + (hi - lo) * shaped;
         } else {
           // Fall back to the engine's own (polled) level.
           const ch = (st.channels ?? []).find((c) => c.rid === rid);
@@ -106,17 +126,35 @@ export function DriveRail({ status, lights, apRef, playhead }: {
     return () => cancelAnimationFrame(raf);
   }, [apRef, playhead]);
 
-  const push = (nextStems: Record<string, Stem[]>, nextModes: Record<string, 'palette' | 'chroma'>) => {
+  const buildAndPushBindings = (
+    nextStems: Record<string, Stem[]>,
+    nextModes: Record<string, 'palette' | 'chroma'>,
+    nextHues: Record<string, HueArc>,
+    debounceMs = 0,
+  ) => {
     setStemMap(nextStems);
     setColorModes(nextModes);
-    const bindings = Object.entries(nextStems)
-      .filter(([, stems]) => stems.length > 0)
-      .map(([rid, stems]) => ({ rid, stems, colorMode: nextModes[rid] ?? 'palette' }));
-    fetch(`${LIGHTBOX_URL}/api/stem-sync/config`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bindings }),
-    }).catch(() => {});
+    setHueMap(nextHues);
+    const send = () => {
+      const bindings = Object.entries(nextStems)
+        .filter(([, stems]) => stems.length > 0)
+        .map(([rid, stems]) => ({
+          rid, stems,
+          colorMode: nextModes[rid] ?? 'palette',
+          ...(nextHues[rid] ?? DEFAULT_ARC),
+        }));
+      fetch(`${LIGHTBOX_URL}/api/stem-sync/config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bindings }),
+      }).catch(() => {});
+    };
+    if (debounceMs > 0) {
+      if (bindingPushTimer.current != null) window.clearTimeout(bindingPushTimer.current);
+      bindingPushTimer.current = window.setTimeout(send, debounceMs);
+    } else {
+      send();
+    }
   };
 
   const toggleEngine = async () => {
@@ -158,10 +196,10 @@ export function DriveRail({ status, lights, apRef, playhead }: {
                     return (
                       <button
                         key={s}
-                        onClick={() => push({
+                        onClick={() => buildAndPushBindings({
                           ...stemMap,
                           [l.rid]: on ? stems.filter((x) => x !== s) : [...stems, s],
-                        }, colorModes)}
+                        }, colorModes, hueMap)}
                         style={on ? { color: STEM_COLOR[s], borderColor: `${STEM_COLOR[s]}66`, background: `${STEM_COLOR[s]}1a` } : undefined}
                         className={`px-1.5 py-0.5 rounded border font-mono text-[9px] ${
                           on ? '' : 'bg-zinc-900 text-zinc-600 border-zinc-800 hover:border-zinc-600'
@@ -170,11 +208,11 @@ export function DriveRail({ status, lights, apRef, playhead }: {
                     );
                   })}
                   <button
-                    onClick={() => push(stemMap, {
+                    onClick={() => buildAndPushBindings(stemMap, {
                       ...colorModes,
                       [l.rid]: (colorModes[l.rid] ?? 'palette') === 'chroma' ? 'palette' : 'chroma',
-                    })}
-                    title="hue source: palette (room colors) vs chroma (color follows the music's timbre — dark=amber, bright=cyan)"
+                    }, hueMap)}
+                    title="hue source: palette (room colors) vs chroma (color follows the music's timbre)"
                     className={`px-1.5 py-0.5 rounded border font-mono text-[9px] ${
                       (colorModes[l.rid] ?? 'palette') === 'chroma'
                         ? 'text-cyan-300 border-cyan-700/60 bg-cyan-900/30'
@@ -183,6 +221,17 @@ export function DriveRail({ status, lights, apRef, playhead }: {
                   >♪hue</button>
                 </div>
               </div>
+              {(colorModes[l.rid] ?? 'palette') === 'chroma' && (
+                <HueBar
+                  start={(hueMap[l.rid] ?? DEFAULT_ARC).hueStart}
+                  end={(hueMap[l.rid] ?? DEFAULT_ARC).hueEnd}
+                  dir={(hueMap[l.rid] ?? DEFAULT_ARC).hueDir}
+                  onChange={(patch) => buildAndPushBindings(stemMap, colorModes, {
+                    ...hueMap,
+                    [l.rid]: { ...(hueMap[l.rid] ?? DEFAULT_ARC), ...patch },
+                  }, 150)}
+                />
+              )}
               <div className="h-1 rounded bg-zinc-800 overflow-hidden">
                 <div
                   ref={(el) => { meterRefs.current[l.rid] = el; }}
@@ -196,6 +245,20 @@ export function DriveRail({ status, lights, apRef, playhead }: {
 
       {shaping && (
         <div className="flex flex-col gap-1.5 border-t border-zinc-800/60 pt-2">
+          <label
+            className="flex items-center gap-2 text-[10px] font-mono text-zinc-500"
+            title="brightness floor and ceiling — the energy range maps between the two notches"
+          >
+            <span className="w-10 uppercase tracking-wider text-zinc-600">bright</span>
+            <DualSlider
+              lo={shaping.minLevel}
+              hi={shaping.maxLevel}
+              onChange={(lo, hi) => pushShaping({ ...shaping, minLevel: lo, maxLevel: hi })}
+            />
+            <span className="w-14 text-right tabular-nums text-zinc-300">
+              {Math.round(shaping.minLevel * 100)}–{Math.round(shaping.maxLevel * 100)}%
+            </span>
+          </label>
           {([
             { key: 'gamma', label: 'gamma', min: 0.2, max: 4, step: 0.05,
               title: 'response curve: >1 tames quiet parts / darkens mids, <1 lifts them' },

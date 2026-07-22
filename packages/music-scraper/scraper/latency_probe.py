@@ -202,8 +202,20 @@ def _gcc_phat(mic: np.ndarray, ref: np.ndarray, fs: int, lag_lo_s: float, lag_hi
     peak_i = int(np.argmax(vals))
     # Confidence: peak height vs the field. PHAT peaks are near-impulses when
     # alignment is real; music-vs-silence or wrong-track gives a flat field.
-    conf = float(vals[peak_i] / (np.median(vals) + 1e-12))
-    return lags[peak_i] / fs, conf
+    med = float(np.median(vals)) + 1e-12
+    conf = float(vals[peak_i] / med)
+    # Top peaks (non-max-suppressed within ±50ms) for diagnosing false locks
+    # onto musical self-similarity.
+    v = vals.copy()
+    peaks = []
+    for _ in range(5):
+        i = int(np.argmax(v))
+        if v[i] <= 0:
+            break
+        peaks.append({"lag_s": round(float(lags[i] / fs), 4), "conf": round(float(v[i] / med), 1)})
+        s = int(0.05 * fs)
+        v[max(0, i - s):i + s] = 0
+    return lags[peak_i] / fs, conf, peaks
 
 
 def run_passive(audio_path: str, ref_pos_s: float, ref_wall_t: float, record_s: float) -> dict:
@@ -255,8 +267,9 @@ def run_passive(audio_path: str, ref_pos_s: float, ref_wall_t: float, record_s: 
     ref16 = resample_poly(ref, PASSIVE_FS, ref_sr).astype(np.float64)
 
     # mic(t) = ref(t + PRE − L)  →  lag = L − PRE, searched over L ∈ [−0.5, MAX_LAT].
-    lag_s, conf = _gcc_phat(mic16, ref16, PASSIVE_FS, -PRE - 0.5, MAX_LAT - PRE)
+    lag_s, conf, peaks = _gcc_phat(mic16, ref16, PASSIVE_FS, -PRE - 0.5, MAX_LAT - PRE)
     latency_ms = (lag_s + PRE) * 1000
+    peaks_ms = [{"latency_ms": round((p["lag_s"] + PRE) * 1000, 1), "conf": p["conf"]} for p in peaks]
 
     reported = None
     device = None
@@ -277,6 +290,8 @@ def run_passive(audio_path: str, ref_pos_s: float, ref_wall_t: float, record_s: 
         "ok": True,
         "audio_latency_ms": round(float(latency_ms), 1),
         "confidence": round(conf, 1),
+        "peaks": peaks_ms,
+        "ref_duration_s": round(info.frames / info.samplerate, 2),
         "recorded_s": record_s,
         "coreaudio_reported_ms": reported,
         "output_device_name": device,
