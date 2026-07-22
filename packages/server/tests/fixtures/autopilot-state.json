@@ -1,0 +1,16 @@
+{
+  "running": true,
+  "pid": 48213,
+  "track_id": "3n3Ppam7vgaVa1iaRUc9Lp",
+  "track_name": "Mr. Brightside",
+  "artists": ["The Killers"],
+  "album": "Hot Fuss",
+  "art_url": "https://i.scdn.co/image/ab67616d0000b273ccdddd46119a4ff53eaf1f5d",
+  "duration_s": 222.973,
+  "track_status": "ready",
+  "playing": true,
+  "coasting": false,
+  "position_s": 42.5,
+  "last_error": null,
+  "updated_at": 1753142400.0
+}

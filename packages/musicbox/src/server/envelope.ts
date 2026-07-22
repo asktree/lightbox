@@ -12,6 +12,7 @@ import { spawn } from 'child_process';
 import { join } from 'path';
 import { existsSync } from 'fs';
 import { homedir } from 'os';
+import { LruMap } from './lru.js';
 
 const LIBRARY_DIR = process.env.MUSICBOX_LIBRARY ?? join(homedir(), 'music-library');
 const TRACKS_DIR = join(LIBRARY_DIR, 'tracks');
@@ -77,17 +78,9 @@ export interface EnvelopePack {
 // (~10MB for a long track), so unbounded growth across a 1.2k-track
 // library would eventually eat the process.
 const CACHE_MAX = 50;
-const cache = new Map<string, Promise<EnvelopePack>>();
-
-function touchLru(trackId: string, p: Promise<EnvelopePack>): void {
-  // Map iteration order is insertion order — re-inserting marks recency.
-  cache.delete(trackId);
-  cache.set(trackId, p);
-  while (cache.size > CACHE_MAX) {
-    const oldest = cache.keys().next().value as string;
-    cache.delete(oldest);
-  }
-}
+// LruMap.touch re-inserts to mark recency and evicts oldest past the cap —
+// same semantics as the old inline touchLru (see lru.ts).
+const cache = new LruMap<string, Promise<EnvelopePack>>(CACHE_MAX);
 
 function stemsComplete(trackId: string): boolean {
   const stemsDir = join(TRACKS_DIR, trackId, 'stems');
@@ -96,7 +89,7 @@ function stemsComplete(trackId: string): boolean {
 
 function computeAndCache(trackId: string): Promise<EnvelopePack> {
   const p = computeEnvelope(trackId);
-  touchLru(trackId, p);
+  cache.touch(trackId, p);
   // Drop on failure so next request retries instead of returning a
   // permanently-rejected promise.
   p.catch(() => { cache.delete(trackId); });
@@ -106,7 +99,7 @@ function computeAndCache(trackId: string): Promise<EnvelopePack> {
 export function getEnvelope(trackId: string): Promise<EnvelopePack> {
   const cached = cache.get(trackId);
   if (!cached) return computeAndCache(trackId);
-  touchLru(trackId, cached);
+  cache.touch(trackId, cached);
   return cached.then((pack) => {
     // Stemless pack but stems have since landed (ingest finished):
     // recompute so consumers get real per-stem envelopes.

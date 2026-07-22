@@ -99,6 +99,49 @@ def classify_error(e: Exception) -> tuple[str, float | None]:
     return "other", None
 
 
+def next_playing_state(
+    poll_ok: bool,
+    cp: dict | None,
+    playing: bool,
+    coast_since_s: float | None,
+    now_s: float,
+    coast_max_s: float,
+) -> tuple[bool, float | None]:
+    """Pure decision: given a poll outcome, the next (playing, coast_since_s).
+
+    - Failed poll while playing: latch coast_since_s at the first failure and
+      keep playing=True until failures have persisted > coast_max_s.
+    - Failed poll while not playing: no change.
+    - Successful poll: coast resets to None; playing mirrors is_playing.
+    """
+    if not poll_ok:
+        if playing:
+            if coast_since_s is None:
+                return True, now_s
+            if now_s - coast_since_s > coast_max_s:
+                return False, coast_since_s
+        return playing, coast_since_s
+    if cp and cp.get("is_playing"):
+        return True, None
+    return False, None
+
+
+def rate_backoff_s(retry_after_s: float | None, current_backoff_s: float) -> float:
+    """429 backoff: honor Retry-After (else double), capped at 15 min."""
+    return min(max(retry_after_s or 0.0, current_backoff_s * 2),
+               POLL_BACKOFF_MAX_RATE_S)
+
+
+def auth_backoff_s(consec_auth_fails: int) -> float:
+    """Auth backoff: 2s doubling per consecutive failure, capped at 60s."""
+    return min(POLL_BACKOFF_MAX_S, 2.0 * (2 ** (consec_auth_fails - 1)))
+
+
+def other_backoff_s(current_backoff_s: float) -> float:
+    """Generic error backoff: double, capped at 60s."""
+    return min(POLL_BACKOFF_MAX_S, current_backoff_s * 2)
+
+
 def main():
     ap = argparse.ArgumentParser(prog="scraper.autopilot")
     ap.add_argument("--auto-ingest", action="store_true",
@@ -370,14 +413,12 @@ def main():
                 if kind == "rate":
                     # Honor Retry-After ourselves (never in-call), doubling
                     # otherwise, capped at 15 min. Heartbeat keeps running.
-                    poll_backoff_s = min(max(retry_after_s or 0.0, poll_backoff_s * 2),
-                                         POLL_BACKOFF_MAX_RATE_S)
+                    poll_backoff_s = rate_backoff_s(retry_after_s, poll_backoff_s)
                     last_error = f"rate limited; next poll in {poll_backoff_s:.0f}s"
                     print(f"  {last_error}", file=sys.stderr)
                 elif kind == "auth":
                     consec_auth_fails += 1
-                    poll_backoff_s = min(POLL_BACKOFF_MAX_S,
-                                         2.0 * (2 ** (consec_auth_fails - 1)))
+                    poll_backoff_s = auth_backoff_s(consec_auth_fails)
                     last_error = f"auth error ({consec_auth_fails}x): {str(e)[:120]}"
                     print(f"  spotify auth err ({consec_auth_fails}x); next poll in {poll_backoff_s:.0f}s",
                           file=sys.stderr)
@@ -388,24 +429,24 @@ def main():
                         write_tombstone("auth", msg)
                         sys.exit(2)
                 else:
-                    poll_backoff_s = min(POLL_BACKOFF_MAX_S, poll_backoff_s * 2)
+                    poll_backoff_s = other_backoff_s(poll_backoff_s)
                     last_error = str(e)[:200]
                     print(f"  spotify poll err: {e}", file=sys.stderr)
 
+            # Coast: a failed poll says nothing about playback. Hold the
+            # last known playing state and let consumers extrapolate from
+            # the existing anchor, until the failures have gone on long
+            # enough that "still playing" stops being the safe bet.
+            # (Pure decision lives in next_playing_state; assignment happens
+            # AFTER the success branch below, whose drift guard must read the
+            # pre-poll `playing` value.)
+            new_playing, new_coast_since_s = next_playing_state(
+                poll_ok, cp, playing, coast_since_s, now_s, COAST_MAX_S)
             if not poll_ok:
-                # Coast: a failed poll says nothing about playback. Hold the
-                # last known playing state and let consumers extrapolate from
-                # the existing anchor, until the failures have gone on long
-                # enough that "still playing" stops being the safe bet.
-                if playing:
-                    if coast_since_s is None:
-                        coast_since_s = now_s
-                    elif now_s - coast_since_s > COAST_MAX_S:
-                        playing = False
-                        print(f"  poll failing for {COAST_MAX_S:.0f}s+ — declaring paused",
-                              file=sys.stderr)
+                if playing and not new_playing:
+                    print(f"  poll failing for {COAST_MAX_S:.0f}s+ — declaring paused",
+                          file=sys.stderr)
             elif cp and cp.get("is_playing"):
-                coast_since_s = None
                 item = cp.get("item") or {}
                 tid = item.get("id")
                 progress_ms = cp.get("progress_ms") or 0
@@ -444,10 +485,8 @@ def main():
 
                 anchor_monotonic_ms = now_ms
                 anchor_spotify_s = progress_ms / 1000.0
-                playing = True
-            else:
-                coast_since_s = None
-                playing = False
+
+            playing, coast_since_s = new_playing, new_coast_since_s
 
             if playing:
                 last_playing_s = now_s

@@ -27,6 +27,7 @@ import {
 } from '../drivers/hue-rest-pulse.js';
 import { getSharedEntertainmentDriver } from '../drivers/hue-entertainment.js';
 import { getPlayheadOffsetMs } from './latency-calibration.js';
+import { STEMS, parseEnvelope, type Stem, type Envelope } from './envelope-parse.js';
 import type { PaletteAnimator } from '../lib/palette-animator.js';
 
 // Shared contract with scraper/autopilot.py and routes/autopilot.ts —
@@ -37,8 +38,10 @@ const MUSICBOX_URL = 'http://localhost:3002';
 const ENVELOPE_RETRY_MS = 3000; // stems may still be ingesting — poll until they appear
 const STATE_FRESH_S = 3;        // autopilot state older than this = not playing
 
-export const STEMS = ['drums', 'bass', 'vocals', 'other'] as const;
-export type Stem = (typeof STEMS)[number];
+// ENV2 parsing + stem list live in envelope-parse.ts (pure, unit-tested);
+// re-export so existing importers keep working.
+export { STEMS } from './envelope-parse.js';
+export type { Stem } from './envelope-parse.js';
 
 export interface StemBinding {
   rid: string;        // CLIP v2 light UUID
@@ -153,16 +156,6 @@ interface BindingRuntime {
   lastError: string | null;
 }
 
-interface Envelope {
-  trackId: string;
-  sr: number;
-  numSamples: number;
-  stems: Record<Stem, { samples: Float32Array; max: number }>;
-  // Chroma proxy from :3002/api/library/:id/chroma — loaded alongside the
-  // energy envelope; optional so energy-only drive works if the fetch fails.
-  chroma?: Record<Stem, { samples: Float32Array; max: number }>;
-}
-
 let paletteAnimator: PaletteAnimator | null = null;
 export function setStemSyncPaletteAnimator(pa: PaletteAnimator): void {
   paletteAnimator = pa;
@@ -224,32 +217,6 @@ function hsvToRgb16(h: number, s: number, v: number): { r: number; g: number; b:
 const chromaChannels = new Set<number>();
 export function isChromaOwnedChannel(channelId: number): boolean {
   return chromaChannels.has(channelId);
-}
-
-// ---- ENV2 binary parse (see musicbox envelope.ts serializeEnvelope) ----
-
-function parseEnvelope(trackId: string, buf: Buffer): Envelope {
-  if (buf.length < 12 || buf.toString('ascii', 0, 4) !== 'ENV2') {
-    throw new Error('bad envelope magic');
-  }
-  const numStems = buf.readUInt8(4);
-  const sr = buf.readUInt16LE(6);
-  const numSamples = buf.readUInt32LE(8);
-  if (numStems !== STEMS.length) throw new Error(`expected ${STEMS.length} stems, got ${numStems}`);
-  const stems = {} as Envelope['stems'];
-  let off = 12;
-  for (const stem of STEMS) {
-    const bytes = numSamples * 4;
-    if (off + bytes > buf.length) throw new Error('envelope truncated');
-    // Copy out — Buffer's backing ArrayBuffer may be pooled/offset.
-    const samples = new Float32Array(numSamples);
-    for (let i = 0; i < numSamples; i++) samples[i] = buf.readFloatLE(off + i * 4);
-    let max = 0;
-    for (let i = 0; i < numSamples; i++) if (samples[i] > max) max = samples[i];
-    stems[stem] = { samples, max };
-    off += bytes;
-  }
-  return { trackId, sr, numSamples, stems };
 }
 
 async function loadEnvelope(trackId: string): Promise<void> {

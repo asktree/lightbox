@@ -1,0 +1,32 @@
+{
+  "running": true,
+  "pid": 12345,
+  "track_id": "3n3Ppam7vgaVa1iaRUc9Lp",
+  "track_name": "Mr. Brightside",
+  "artists": ["The Killers"],
+  "album": "Hot Fuss",
+  "art_url": "https://i.scdn.co/image/ab67616d00001e02example",
+  "duration_s": 222.1,
+  "track_status": "ready",
+  "playing": true,
+  "coasting": false,
+  "position_s": 42.5,
+  "drift_ms": -12.3,
+  "output_latency_ms": 30,
+  "output_device_name": "MacBook Pro Speakers",
+  "ingesting": ["7ouMYWpwJ422jRcDASZB7P"],
+  "ingest_started": {"7ouMYWpwJ422jRcDASZB7P": 1753200000.0},
+  "ingest_progress": {"7ouMYWpwJ422jRcDASZB7P": {"stage": "demucs", "pct": 40}},
+  "ingest_history": [
+    {"id": "0eGsygTp906u18L0Oimnem", "name": "Mr. Blue Sky", "artists": ["ELO"], "ok": true, "rc": 0, "secs": 41.2, "at": 1753199000.0}
+  ],
+  "queue": [
+    {"id": "0eGsygTp906u18L0Oimnem", "name": "Mr. Blue Sky", "artists": ["ELO"], "album": "Out of the Blue", "duration_s": 303.0, "art_url": null, "status": "ready"}
+  ],
+  "auto_ingest": true,
+  "prefetch": 2,
+  "blacklist": [],
+  "last_error": null,
+  "poll_interval_s": 2.0,
+  "updated_at": 1753200042.5
+}

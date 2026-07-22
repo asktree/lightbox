@@ -52,7 +52,7 @@ const KILL_WAIT_MS = 1500; // grace period after SIGTERM before SIGKILL
 const WATCHDOG_INTERVAL_MS = 60_000;
 const MAX_CONSECUTIVE_RESPAWNS = 5;
 
-interface AutopilotState {
+export interface AutopilotState {
   running: boolean;
   pid?: number;
   track_id?: string | null;
@@ -90,10 +90,12 @@ function heartbeatAge(raw: any): number {
   return Date.now() / 1000 - (raw?.updated_at ?? 0);
 }
 
-function readState(): AutopilotState {
-  const raw = readRawState();
+// Pure derivation of the served state from a raw state-file object —
+// exported (with an injectable clock) so the stale/tombstone/playhead
+// contract is unit-testable. readState() below is the production wrapper.
+export function deriveAutopilotState(raw: any, nowMs: number = Date.now()): AutopilotState {
   if (!raw) return { running: false };
-  const age = heartbeatAge(raw);
+  const age = nowMs / 1000 - (raw?.updated_at ?? 0);
   raw.stale = age > FRESH_AGE_S; // if no update for 5s+, probably dead
   // An explicit tombstone (daemon wrote running:false on exit) stays false
   // even while fresh; otherwise running derives from heartbeat freshness.
@@ -109,6 +111,10 @@ function readState(): AutopilotState {
     raw.position_live = raw.position_s ?? 0;
   }
   return raw;
+}
+
+function readState(): AutopilotState {
+  return deriveAutopilotState(readRawState());
 }
 
 function isPidAlive(pid: number): boolean {
