@@ -1,201 +1,177 @@
 # Lightbox
 
-Unified smart light control with React UI, Node.js backend, and MCP server.
+Unified smart light control: React UIs, Node.js services, a Python music
+pipeline, and audio-reactive light drives.
 
 ## Quick Start
 
 ```bash
 pnpm install
-pnpm dev        # Run all packages in dev mode (Claude runs this in background)
-pnpm server     # Run server only
-pnpm client     # Run client only
-pnpm musicbox   # Run musicbox only
+pnpm dev        # Run all packages in dev mode (see Dev Server Management)
 pnpm build      # Build all packages
 pnpm kill       # Kill all dev processes
 pnpm redev      # Kill and restart dev (named `redev` to avoid pnpm's `restart`
                 # lifecycle which implicitly requires `stop`/`start` scripts)
 ```
 
-Server: http://localhost:3001
-Client: http://localhost:5173
-Musicbox: http://localhost:5174
-Musicbox2: http://localhost:5175 (Spotify-driven console; see packages/musicbox2 + design doc)
-WebSocket: ws://localhost:3001/ws
+## Services & Ports
+
+| Port | What | Package |
+|------|------|---------|
+| 3001 | Lightbox server — lights/groups/scenes/palettes, autopilot supervisor, stem-sync, audio-sync, latency calibration; WS at `/ws` | `server` |
+| 3002 | Music library server — track library, audio + per-stem oggs, queue, local playback state (`/api/playback`), energy envelopes (ENV2), chroma | `musicbox` (server half) |
+| 3010 | Twinklybox — WLED/DDP pattern engine (audio bus: mic, syscap, musicbox-follower) | `twinklybox` (server half) |
+| 3020 | Curtainbox — Govee curtain direct LAN client | `curtainbox` (server half) |
+| 5173 | Main light-control client (wheel, palettes, rooms) | `client` |
+| 5174 | Thin local music player (root + `/musicplayer.html`, `src/player/`) | `musicbox` (client half) |
+| 5175 | Musicbox2 — Spotify-driven console: now playing, stem viz, drive rail, queue, diagnostics | `musicbox2` |
+| 5180 | Twinklybox UI | `twinklybox` |
+| 5190 | Curtainbox UI | `curtainbox` |
+
+The old musicbox v1 client (AutopilotPage, waveform/onset timelines) is
+**deleted** — the `musicbox` package is now the library server plus a thin
+local player. History in GRAVESTONE.md.
+
+```
+packages/
+├── shared/         # Types & utilities (build first)
+├── server/         # Lightbox server (Express + WS + SQLite) :3001
+├── client/         # Main light UI :5173
+├── musicbox/       # Library server :3002 + thin player :5174
+├── musicbox2/      # Spotify console UI :5175
+├── music-scraper/  # Python: scraper CLI, ingest (zotify+demucs), autopilot daemon
+├── twinklybox/     # WLED/DDP patterns :3010/:5180
+└── curtainbox/     # Govee curtain client :3020/:5190
+```
 
 ## Dev Server Management (for Claude)
 
 **Claude manages the dev server.** Start it with `pnpm dev` via Bash
-`run_in_background: true`. It pipes combined output to `/tmp/lightbox.log`.
-Three watchers run in parallel:
-- `tsx watch` for server (auto-restarts on .ts changes)
-- `vite` for client / musicbox (HMR on file changes)
-- `tsc --watch` for shared types
+`run_in_background: true`. It pipes combined output to `/tmp/lightbox.log`
+(dev-session log only; all durable state/logs live elsewhere — see below).
 
-**Logs**: read `/tmp/lightbox.log` to debug.
+**Caveat (July 2026, partially verified):** processes started from a
+non-GUI context (ssh, nohup) on macOS Sequoia may be blocked by Local
+Network TCC (symptom: server gets EHOSTUNREACH to Hue/Tuya/Govee while
+shell curl/ping succeed) and lose `/opt/homebrew/bin` from PATH (ffmpeg →
+envelope 500s, demucs rc=1). If either signature appears after a restart
+from ssh, have the owner restart `pnpm dev` from a GUI terminal instead.
 
-**Code changes**: picked up automatically — no restart needed for .ts/.tsx edits.
+**Code changes**: picked up automatically (tsx watch + vite HMR) — no
+restart needed for .ts/.tsx edits.
 
-**Config/data changes** (e.g., `tuya-devices.json`, new routes added while the
-server had an import error, etc.): run `pnpm redev` to fully restart.
+**Config/data changes** (e.g. `tuya-devices.json`, routes added while the
+server had an import error): run `pnpm redev`.
 
-To build a single package:
-```bash
-pnpm --filter @lightbox/client build
-pnpm --filter @lightbox/server build
-```
+## State & Log Locations (never /tmp)
 
-## Architecture
+macOS purges /tmp after ~3 days — durable state and logs must not live there.
 
-```
-packages/
-├── shared/    # Types & utilities (build first)
-├── server/    # Express + WebSocket + SQLite
-├── client/    # React + Vite + Tailwind
-└── mcp/       # MCP server for Claude
-```
+- `packages/server/data/` — SQLite (`lightbox.db`), `hue-config.json`,
+  `tuya-devices.json`, `stem-sync.json`, `latency-registry.json`
+- `packages/server/data/state/` — `lightbox-autopilot.json` (autopilot
+  heartbeat/state; shared contract between `scraper/autopilot.py`,
+  `routes/autopilot.ts`, `services/stem-sync.ts`), latency-cal video dumps
+- `~/.local/state/lightbox/` — `autopilot.log` (10MB truncate-on-boot),
+  `ingest.log`, `zotify.lock`
+- `~/.config/musicbox/` — Spotify credentials + `.spotipy_cache` (shared by
+  the autopilot daemon and every ingest subprocess; writes are atomic)
+- `~/music-library/tracks/<id>/` — audio.ogg, stems/, envelope caches
+
+## Music → Lights Pipeline
+
+1. **Autopilot daemon** (`music-scraper/scraper/autopilot.py`, spawned and
+   supervised by the lightbox server via `/api/autopilot/*`): polls Spotify
+   for the playhead (drift-corrected anchor), auto-ingests the current track
+   and queue prefetch (zotify download → demucs stems). Hardened: bounded
+   spotipy calls (no in-call retry sleeps), classified backoff (429 cap
+   15min, auth tombstone after 10 consecutive 401s), idle polling decay,
+   coasts through poll errors up to 60s before declaring paused, tombstone
+   state file on any exit. The server watchdog reaps wedged pids, adopts
+   across tsx restarts, has a respawn circuit breaker, and never respawns
+   over an auth tombstone. Boot auto-spawn is deliberately OFF.
+2. **Library server** (:3002) computes per-stem RMS envelopes + 12-band FFT
+   (ENV2 binary) and chroma, cached with a ~50-track LRU.
+3. **Stem-sync** (`server/src/services/stem-sync.ts`) maps stem energy at
+   the playhead onto Hue Entertainment channels at 50Hz. Playhead source is
+   configurable: `'spotify'` (autopilot state file) or `'local'` (thin
+   player pushing to :3002/api/playback). A supervisor reconciles
+   `wantActive` every 5s and rebuilds dead DTLS streams.
+4. **Twinklybox** follows :3002 playback + envelopes (or mic/syscap live
+   audio) into WLED/DDP patterns.
+
+**Audio-reactive control must use the Hue Entertainment stream — never
+REST** (REST pulse-firing is dead; see GRAVESTONE.md). `audio-sync.ts` is
+the live system-audio fallback drive (no stems/playhead needed); it has no
+UI entry point, curl its routes.
+
+Latency: per-light offsets come from mic/webcam ground-truth measurement
+(`latency-calibration.ts`, registry in `data/latency-registry.json`) — never
+from eyeballed sliders. Mic/camera probes must run from a GUI-session
+process (TCC silently zeroes them over ssh).
 
 ## Light Integrations
 
 ### Hue (via Bridge)
-- Local API, no cloud required
-- Bridge discovery via mDNS/UPnP
-- First connection requires button press
-- `packages/server/src/drivers/hue.ts`
+- Local API; bridge discovery via mDNS/UPnP; first connect needs button press
+- `drivers/hue.ts` (REST + EventStream), `drivers/hue-entertainment.ts`
+  (DTLS stream; creates `lightbox-stream[-<hash>]` entertainment configs on
+  the bridge on demand), `drivers/hue-rest-pulse.ts` (REST helpers:
+  getRestLights, snapshots — used by stem-sync/audio-sync/calibration)
+- All clipV2 requests carry 10s timeouts; every outbound fetch in the
+  codebase must be bounded (AbortSignal.timeout) — unbounded calls caused
+  the July 2026 incident night
 
-### Govee (LAN Protocol)
-- UDP multicast discovery on port 4001
-- Control commands on port 4003
-- Must enable "LAN Control" in Govee app for each device
-- `packages/server/src/drivers/govee.ts`
+### Govee (LAN)
+- UDP discovery :4001, control :4003; enable "LAN Control" per device in app
+- `drivers/govee.ts`; curtain lights also driven via twinklybox (WLED/DDP)
+  and curtainbox (direct) — different transports, both used
 
-### Tuya (Local Control)
-- Requires local key extraction via tinytuya wizard
-- Run: `cd packages/server/data && python3 -m tinytuya wizard`
-- Keys stored in `packages/server/data/tuya-devices.json`
-- Some devices may need "LAN Control" enabled in SmartLife app
-- Devices must be on same network as server (check 2.4GHz vs 5GHz)
-- `packages/server/src/drivers/tuya.ts`
+### Tuya (Local)
+- Keys via `cd packages/server/data && python3 -m tinytuya wizard`
+- Bulbs have a built-in ~800ms fade (firmware, can't disable); Hue has
+  `transitiontime` — for animations send Tuya more frequent updates
+- BLE-only devices (`tuya-ble.ts` + `tuya-ble-proxy.ts`) use
+  @abandonware/noble, encrypted, flaky; TODO: separate service process
 
-## API
+### WiZ
+- `drivers/wiz.ts`, registered and live
 
-### Lights
-- `GET /api/lights` - List all
-- `GET /api/lights/:id` - Get one
-- `PUT /api/lights/:id` - Set state
+## Lightbox Server API (:3001)
 
-### Groups
-- `GET /api/groups` - List all
-- `POST /api/groups` - Create
-- `PUT /api/groups/:id` - Update
-- `DELETE /api/groups/:id` - Delete
-- `PUT /api/groups/:id/state` - Control
+- Lights/groups/scenes/rooms/palettes CRUD as before (`routes/`)
+- `/api/autopilot/*` — start/stop/state/debug/self-test (supervisor)
+- `/api/stem-sync/*` — start/stop/config/bindings/status
+- `/api/audio-sync/*` — live system-audio drive
+- `/api/latency-calibration/*`, `/api/audio-latency/*` — measurement stack
+- WS `ws://localhost:3001/ws` — `lights_sync`, `light_update`, room/palette
+  broadcasts
 
-### Scenes
-- `GET /api/scenes` - List all
-- `POST /api/scenes` - Create
-- `DELETE /api/scenes/:id` - Delete
-- `PUT /api/scenes/:id/activate` - Activate
+Palette animation runs **server-side** (survives browser close, per-room
+state, synchronized clients).
 
-### WebSocket
-Connect to `ws://localhost:3001/ws` for real-time updates.
+## Spotify / Rate Limits
 
-Messages:
-- `lights_sync` - Full state on connect
-- `light_update` - Single light changed
-
-## Data
-
-SQLite database at `packages/server/data/lightbox.db`
-- `groups` - Light groups
-- `scenes` - Saved scenes
-
-## Feature Ideas
-
-- Disconnected lights on ColorWheel should be faded (50% opacity) - still selectable and draggable, just visually greyed out to indicate attempts to move them probably won't work
-- Palette view should display light pins the same way as ColorWheel (reuse component). When dragging in palette view, lights snap to nearest point on the track instead of free movement.
-
-## Future Work
-
-- [x] **Tuya integration** - Local control via tinytuya
-- [ ] **Snapshots** - Quick save of current light positions from wheel view (next priority)
-- [ ] **Automations** - Time-based triggers with snapshot/palette actions
-- [ ] **Color accuracy** - Switch to xy color space with gamut handling per bulb type
-- [ ] **Audio reactive** - Sync to Sonos playback
-- [ ] **Agent chat** - Claude-powered assistant for natural language light control
-
-## Snapshots
-
-Quick mood-boarding feature for saving light states:
-- One-click save from wheel view
-- Shows as list on left side with color swatches (no names required, but optional)
-- Easy delete
-- Cannot be edited - just delete and remake
-- Clicking a snapshot applies it instantly
-
-## Automations
-
-Time/event-based light control:
-- Each automation step can reference a **snapshot** or **palette**
-- **Snapshots are COPIED** into the automation - deleting the snapshot won't break it
-- **Palettes are REFERENCED** - deleting palette breaks the automation
-- Triggers: time of day, sunrise/sunset, manual
-
-## Palettes
-
-Animated color paths on the wheel:
-- Catmull-Rom spline through nodes on color wheel
-- **Tension slider**: 0 = straight lines, 1 = smooth curves
-- **Speed slider**: seconds per node
-- Lights animate along the path
-- Double-click wheel to add node, double-click node to delete
-- Stored in SQLite: `packages/server/data/lightbox.db`
-
-**Server-side animation**: Palette animation runs on the server, not the client.
-- Closing the browser doesn't stop the palette animation
-- Animation state is per-room (activePaletteId, isPlaying, light positions)
-- Palette definitions are global (same list for all rooms)
-- Light positions persist per-palette in database
-- Multiple clients viewing the same room see synchronized state
-- WebSocket broadcasts: `room_state`, `palette_positions`, `position_update`
-- REST API: `/api/rooms/:roomId/play`, `/api/rooms/:roomId/pause`, etc.
+App "Bongo" is our own client_id. Limits are per-endpoint; sustained 24/7
+polling once earned a 13.5h extended 429 — hence idle polling decay and
+retries=0 (urllib3's in-call Retry-After sleep is what wedged the daemon).
+Token cache is shared across processes; writes are atomic (temp+rename).
 
 ## Color Accuracy Notes
 
-Current: Using Hue's proprietary hs scale (Red=0, Green=25500, Blue=46920)
-- Not standard HSV - requires piecewise conversion
-- Color/temperature are mutually exclusive modes
+- Hue's proprietary hs scale (Red=0, Green=25500, Blue=46920), not standard
+  HSV; color/temperature mutually exclusive modes
+- SUNVIE Tuya and Hue are on different color spaces; close enough for now
+- Future: CIE xy with per-bulb gamut handling (Hue gamuts A/B/C)
 
-**Known Issues:**
-- SUNVIE Tuya lights and Hue lights are on different color spaces
-- Hue colors don't map perfectly to our UI but close enough to be usable
-- Need to investigate proper color space conversion per-brand
+## Open Threads
 
-Future improvement: Use CIE xy color space with per-bulb gamut handling
-- Different Hue bulbs have Gamut A, B, or C (different color triangles)
-- Colors outside gamut get clipped to nearest point
-- More accurate but more complex
-
-## Tuya Transition Behavior
-
-Tuya bulbs have **built-in ~800ms fade** between color/brightness changes - cannot be disabled.
-- Hue has `transitiontime` parameter (100ms units) - works great
-- Tuya has no equivalent - fade is baked into firmware
-- For palette animations: send more frequent updates to Tuya lights to compensate
-- The built-in fade actually helps smooth out the animation
-
-Sources:
-- https://github.com/jasonacox/tinytuya/issues/29
-- https://developer.tuya.com/en/docs/iot-device-dev/light_of_control
-
-## Tuya BLE
-
-BLE-only devices (Sunset Lamp, Galaxy Projector) require separate handling:
-- Uses `@abandonware/noble` for BLE communication
-- Encrypted protocol with login key (MD5 of local_key[0:6]) and session key
-- Packets chunked to 20-byte MTU for BLE transmission
-- Devices only accept connections when in pairing mode (flaky)
-
-**TODO:** Move BLE driver to separate service process:
-- Avoids noble blocking issues in main server
-- Can restart BLE independently
-- Could run on separate device (Pi near BLE devices)
+- 401 "Access token missing" bursts despite valid cached token — atomic
+  cache writes deployed as suspected fix; watch whether bursts recur
+- Bridge flaps: devbox↔Hue LAN segment intermittently drops (EHOSTUNREACH
+  bursts, ping RTT 3→85ms) — software now survives it; the link itself is
+  a hardware/network question
+- Supervision: autopilot + stem-sync self-heal; BLE child, twinklybox,
+  envelope pipeline don't yet (extract the wantActive-reconcile pattern)
+- launchd user agents for always-on services; rename `musicbox` package →
+  `library`; error-surfacing pass over the UIs' silent `.catch(() => {})`
