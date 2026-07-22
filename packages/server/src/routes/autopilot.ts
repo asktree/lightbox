@@ -6,6 +6,13 @@
 // just relay it. Start uses child_process.spawn with detached:true so the
 // autopilot survives tsx-watch dev-server restarts. Stop reads the PID
 // from the state file and sends SIGTERM.
+//
+// Supervision contract with the daemon: it heartbeats every 0.5s even while
+// erroring, so heartbeat age > WEDGE_AGE_S with a live pid genuinely means
+// wedged (e.g. stuck in a multi-hour rate-limit sleep) — kill and respawn.
+// On exit it writes a tombstone {running:false, exit_reason, ...} instead of
+// unlinking; exit_reason:"auth" means a human must re-auth Spotify
+// interactively, so respawning is pointless and would hammer the API.
 
 import { Router } from 'express';
 import { spawn } from 'child_process';
@@ -19,6 +26,12 @@ const SCRAPER_DIR = join(REPO_ROOT, 'packages/music-scraper');
 const VENV_PYTHON = join(SCRAPER_DIR, '.venv/bin/python');
 const STATE_FILE = '/tmp/lightbox-autopilot.json';
 const LIGHTS_FILE = '/tmp/lightbox-autopilot-lights.json';
+
+const FRESH_AGE_S = 5; // heartbeat younger than this = healthy
+const WEDGE_AGE_S = 60; // pid alive + heartbeat older than this = wedged
+const KILL_WAIT_MS = 1500; // grace period after SIGTERM before SIGKILL
+const WATCHDOG_INTERVAL_MS = 60_000;
+const MAX_CONSECUTIVE_RESPAWNS = 5;
 
 interface AutopilotState {
   running: boolean;
@@ -38,34 +51,70 @@ interface AutopilotState {
   blacklist?: string[];
   last_error?: string | null;
   updated_at?: number;
+  exited_at?: number;
+  exit_reason?: 'auth' | 'stopped' | 'crash';
   stale?: boolean; // derived: state file hasn't been updated recently
+  position_live?: number; // derived: position_s age-corrected at read time
+  pid_alive?: boolean; // derived: process.kill(pid, 0) check (/state only)
+}
+
+function readRawState(): any | null {
+  try {
+    if (!existsSync(STATE_FILE)) return null;
+    return JSON.parse(readFileSync(STATE_FILE, 'utf-8'));
+  } catch {
+    return null;
+  }
+}
+
+function heartbeatAge(raw: any): number {
+  return Date.now() / 1000 - (raw?.updated_at ?? 0);
 }
 
 function readState(): AutopilotState {
-  if (!existsSync(STATE_FILE)) return { running: false };
-  try {
-    const raw = JSON.parse(readFileSync(STATE_FILE, 'utf-8'));
-    const age = Date.now() / 1000 - (raw.updated_at ?? 0);
-    raw.stale = age > 5; // if no update for 5s+, probably dead
-    raw.running = !raw.stale;
-    // Age-correct the playhead at read time. The state file is written at
-    // 2Hz, so position_s is up to ~500ms stale when a client polls — and
-    // this process shares a clock with the autopilot, so the correction
-    // here is exact. Clients extrapolate from position_live using only
-    // their own receive time (network latency ≈ ms on LAN).
-    if (raw.playing && typeof raw.position_s === 'number' && !raw.stale) {
-      raw.position_live = raw.position_s + Math.max(0, age);
-    } else {
-      raw.position_live = raw.position_s ?? 0;
-    }
-    return raw;
-  } catch {
-    return { running: false };
+  const raw = readRawState();
+  if (!raw) return { running: false };
+  const age = heartbeatAge(raw);
+  raw.stale = age > FRESH_AGE_S; // if no update for 5s+, probably dead
+  // An explicit tombstone (daemon wrote running:false on exit) stays false
+  // even while fresh; otherwise running derives from heartbeat freshness.
+  raw.running = raw.running === false ? false : !raw.stale;
+  // Age-correct the playhead at read time. The state file is written at
+  // 2Hz, so position_s is up to ~500ms stale when a client polls — and
+  // this process shares a clock with the autopilot, so the correction
+  // here is exact. Clients extrapolate from position_live using only
+  // their own receive time (network latency ≈ ms on LAN).
+  if (raw.playing && typeof raw.position_s === 'number' && !raw.stale) {
+    raw.position_live = raw.position_s + Math.max(0, age);
+  } else {
+    raw.position_live = raw.position_s ?? 0;
   }
+  return raw;
 }
 
 function isPidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    t.unref(); // never hold the process open
+  });
+}
+
+// SIGTERM, wait up to KILL_WAIT_MS, escalate to SIGKILL, wait again.
+// Returns true if the pid is dead by the end.
+async function killPid(pid: number): Promise<boolean> {
+  for (const sig of ['SIGTERM', 'SIGKILL'] as const) {
+    try { process.kill(pid, sig); } catch { return true; } // already gone
+    const deadline = Date.now() + KILL_WAIT_MS;
+    while (Date.now() < deadline) {
+      if (!isPidAlive(pid)) return true;
+      await sleep(100);
+    }
+  }
+  return !isPidAlive(pid);
 }
 
 // Autopilot is the Spotify playhead + auto-ingest brain; it drives no
@@ -90,23 +139,128 @@ function spawnAutopilot(opts: { autoIngest?: boolean; prefetch?: number }): numb
   return child.pid;
 }
 
+// ---------------------------------------------------------------------------
+// Watchdog. desiredRunning tracks operator intent (boot/start=true, stop=
+// false); the watchdog reconciles reality toward it every 60s.
+
+let desiredRunning = false;
+let watchdogTimer: ReturnType<typeof setInterval> | null = null;
+let consecutiveRespawns = 0; // respawns since last healthy heartbeat
+let breakerTripped = false;
+let authLogged = false; // log the re-auth message once, not every tick
+
+function resetSupervision(): void {
+  consecutiveRespawns = 0;
+  breakerTripped = false;
+  authLogged = false;
+}
+
+function respawnFromWatchdog(): void {
+  if (breakerTripped) return;
+  if (consecutiveRespawns >= MAX_CONSECUTIVE_RESPAWNS) {
+    breakerTripped = true;
+    console.error(
+      `[autopilot] watchdog: ${consecutiveRespawns} respawns without a healthy heartbeat — ` +
+      `circuit breaker tripped, not respawning. Check /tmp/lightbox-autopilot.log, then POST /start.`,
+    );
+    return;
+  }
+  consecutiveRespawns++;
+  const pid = spawnAutopilot({});
+  console.log(`[autopilot] watchdog respawned pid=${pid} (attempt ${consecutiveRespawns}/${MAX_CONSECUTIVE_RESPAWNS})`);
+}
+
+async function watchdogTick(): Promise<void> {
+  const raw = readRawState();
+  if (!desiredRunning) {
+    // Adopt an already-running daemon after a dev-server restart: module
+    // state resets on tsx-watch reloads, but /stop unlinks the state file,
+    // so a live non-tombstone heartbeat means someone started it and
+    // nobody stopped it — keep supervising it.
+    if (raw?.pid && raw.running !== false && isPidAlive(raw.pid)) {
+      desiredRunning = true;
+    } else {
+      return;
+    }
+  }
+  const pid: number | undefined = raw?.pid;
+  const age = heartbeatAge(raw);
+  const alive = pid != null && isPidAlive(pid);
+
+  if (alive && age <= FRESH_AGE_S) {
+    resetSupervision(); // healthy heartbeat observed → re-arm the breaker
+    return;
+  }
+
+  if (alive) {
+    if (age <= WEDGE_AGE_S) return; // 5–60s: slow, but not wedged — hands off
+    console.error(`[autopilot] watchdog: pid=${pid} alive but heartbeat ${Math.round(age)}s old — reaping`);
+    await killPid(pid!);
+    try { if (existsSync(STATE_FILE)) unlinkSync(STATE_FILE); } catch {}
+    respawnFromWatchdog();
+    return;
+  }
+
+  // pid dead (or no state file at all)
+  if (raw?.exit_reason === 'auth') {
+    if (!authLogged) {
+      console.error('[autopilot] watchdog: exit_reason=auth — Spotify token dead, needs interactive re-auth; not respawning');
+      authLogged = true;
+    }
+    return;
+  }
+  respawnFromWatchdog();
+}
+
+export function startAutopilotWatchdog(): void {
+  if (watchdogTimer) return; // idempotent
+  watchdogTimer = setInterval(() => {
+    // async fn: sync throws become rejections, so .catch covers everything
+    watchdogTick().catch((err) => console.error('[autopilot] watchdog tick failed:', err));
+  }, WATCHDOG_INTERVAL_MS);
+  watchdogTimer.unref();
+}
+
 // Called at server boot. If no autopilot is running, start one in drift-only
 // mode (no lights). UI checkboxes add/remove lights live without needing
 // another spawn. Gives us a continuously-updating drift readout.
-export function ensureAutopilotRunning(): void {
-  const state = readState();
-  if (state.pid && isPidAlive(state.pid)) {
-    console.log(`[autopilot] already running pid=${state.pid}`);
-    return;
+export async function ensureAutopilotRunning(): Promise<void> {
+  try {
+    startAutopilotWatchdog();
+    desiredRunning = true;
+    const raw = readRawState();
+    const pid: number | undefined = raw?.pid;
+    if (pid && isPidAlive(pid)) {
+      const age = heartbeatAge(raw);
+      if (age <= WEDGE_AGE_S) {
+        console.log(`[autopilot] already running pid=${pid}`);
+        return;
+      }
+      console.error(`[autopilot] boot: pid=${pid} wedged (heartbeat ${Math.round(age)}s old) — reaping`);
+      await killPid(pid);
+      try { if (existsSync(STATE_FILE)) unlinkSync(STATE_FILE); } catch {}
+    } else if (raw?.exit_reason === 'auth') {
+      // Spawning would just 401-hammer Spotify on every server boot.
+      console.error('[autopilot] boot: last exit was exit_reason=auth — needs interactive Spotify re-auth, not spawning');
+      authLogged = true;
+      return;
+    }
+    const newPid = spawnAutopilot({});
+    console.log(`[autopilot] daemon spawned pid=${newPid}`);
+  } catch (err) {
+    console.error('[autopilot] ensureAutopilotRunning failed:', err);
   }
-  const pid = spawnAutopilot({});
-  console.log(`[autopilot] daemon spawned pid=${pid}`);
 }
 
 export function createAutopilotRouter(): Router {
   const r = Router();
 
-  r.get('/state', (_req, res) => res.json(readState()));
+  r.get('/state', (_req, res) => {
+    const state = readState();
+    // pid_alive + exit_reason let the UI distinguish "wedged" (alive+stale)
+    // and "needs re-auth" from a plain dead daemon.
+    res.json({ ...state, pid_alive: state.pid ? isPidAlive(state.pid) : false });
+  });
 
   // Debug dump: current state + process liveness + recent log tail. Useful
   // when the drift readout is blank (answers "is autopilot running? is
@@ -182,15 +336,30 @@ print("OK")
   });
 
   // Body: { autoIngest?, prefetch? } (legacy light/source fields ignored)
-  r.post('/start', (req, res) => {
-    const current = readState();
-    if (current.pid && isPidAlive(current.pid)) {
-      return res.status(409).json({ error: 'autopilot already running', state: current });
+  r.post('/start', async (req, res) => {
+    try {
+      const current = readState();
+      let reaped: number | undefined;
+      if (current.pid && isPidAlive(current.pid)) {
+        if (!current.stale) {
+          // Alive AND heartbeating — genuinely already running.
+          return res.status(409).json({ error: 'autopilot already running', state: current });
+        }
+        // Alive but heartbeat stale → wedged. Reap so start always works.
+        console.error(`[autopilot] reaping wedged pid=${current.pid} (stale heartbeat)`);
+        await killPid(current.pid);
+        try { if (existsSync(STATE_FILE)) unlinkSync(STATE_FILE); } catch {}
+        reaped = current.pid;
+      }
+      desiredRunning = true;
+      resetSupervision(); // manual start re-arms the breaker / auth latch
+      const { autoIngest = true, prefetch = 2 } = req.body ?? {};
+      const pid = spawnAutopilot({ autoIngest, prefetch });
+      console.log(`[autopilot] spawned pid=${pid}${reaped != null ? ` (reaped ${reaped})` : ''}`);
+      res.json(reaped != null ? { ok: true, pid, reaped } : { ok: true, pid });
+    } catch (err) {
+      res.status(500).json({ error: String(err) });
     }
-    const { autoIngest = true, prefetch = 2 } = req.body ?? {};
-    const pid = spawnAutopilot({ autoIngest, prefetch });
-    console.log(`[autopilot] spawned pid=${pid}`);
-    res.json({ ok: true, pid });
   });
 
   // Read-merge-write the config file so partial updates don't clobber
@@ -225,17 +394,22 @@ print("OK")
     res.json({ ok: true, config: updateConfig({ offsetMs: Math.round(offsetMs) }) });
   });
 
-  r.post('/stop', (_req, res) => {
+  r.post('/stop', async (_req, res) => {
+    desiredRunning = false;
     const current = readState();
     if (!current.pid || !isPidAlive(current.pid)) {
       try { if (existsSync(STATE_FILE)) unlinkSync(STATE_FILE); } catch {}
       return res.json({ ok: true, was_running: false });
     }
     try {
-      process.kill(current.pid, 'SIGTERM');
-      console.log(`[autopilot] sent SIGTERM to pid=${current.pid}`);
-      // State file is removed by the child's finally block; wipe here as backup.
-      setTimeout(() => { try { if (existsSync(STATE_FILE)) unlinkSync(STATE_FILE); } catch {} }, 500);
+      console.log(`[autopilot] stopping pid=${current.pid}`);
+      await killPid(current.pid); // TERM, then KILL if it's wedged
+      // A clean exit leaves a tombstone (running:false). A SIGKILLed child
+      // can't write one, so wipe a heartbeat still claiming to run.
+      try {
+        const raw = readRawState();
+        if (raw && raw.running !== false) unlinkSync(STATE_FILE);
+      } catch {}
       res.json({ ok: true, was_running: true });
     } catch (err) {
       res.status(500).json({ error: String(err) });

@@ -28,7 +28,7 @@ import type { WizDriver } from './drivers/wiz.js';
 import { createTuyaRouter } from './routes/tuya.js';
 import type { TuyaDriver } from './drivers/tuya.js';
 import { createAudioLatencyRouter } from './routes/audio-latency.js';
-import { createAutopilotRouter, ensureAutopilotRunning } from './routes/autopilot.js';
+import { createAutopilotRouter, ensureAutopilotRunning, startAutopilotWatchdog } from './routes/autopilot.js';
 import { hueRestPulseEvents } from './drivers/hue-rest-pulse.js';
 import { createStreamingRouter } from './routes/streaming.js';
 import { createAudioSyncRouter } from './routes/audio-sync.js';
@@ -179,6 +179,10 @@ async function start() {
     // to restore that behavior.
     // ensureAutopilotRunning();
     void ensureAutopilotRunning;
+    // The watchdog is always on regardless: it supervises whatever daemon
+    // exists (reaps wedged pids, respawns crashes, adopts across restarts)
+    // but never spawns one that wasn't asked for.
+    startAutopilotWatchdog();
 
     // Stem-sync survives tsx-watch restarts: if it was active when the
     // previous process died, resume with the persisted bindings once the
