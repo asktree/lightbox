@@ -71,7 +71,16 @@ macOS purges /tmp after ~3 days — durable state and logs must not live there.
   `tuya-devices.json`, `stem-sync.json`, `latency-registry.json`
 - `packages/server/data/state/` — `lightbox-autopilot.json` (autopilot
   heartbeat/state; shared contract between `scraper/autopilot.py`,
-  `routes/autopilot.ts`, `services/stem-sync.ts`), latency-cal video dumps
+  `routes/autopilot.ts`, `services/stem-sync.ts`), `server-heartbeat.json`
+  (last-alive stamp for the boot freshness gate), latency-cal video dumps
+
+**Boot freshness gate** (`lib/server-heartbeat.ts`): design state (stem
+bindings, palette selections/positions) always persists and always loads;
+*actuation* only auto-resumes when the server was down < 1h. Longer
+downtime = cold boot: palettes load paused, stem-sync loads idle (demotion
+persisted so a later warm restart can't resurrect stale intent), and
+nothing touches the lights until a human clicks. Dev restarts (seconds)
+resume seamlessly.
 - `~/.local/state/lightbox/` — `autopilot.log` (10MB truncate-on-boot),
   `ingest.log`, `zotify.lock`
 - `~/.config/musicbox/` — Spotify credentials + `.spotipy_cache` (shared by

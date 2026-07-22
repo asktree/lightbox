@@ -116,9 +116,17 @@ function loadPersisted(): { active: boolean } {
 // bring it back with the same bindings. Retries with backoff: the bridge
 // holds the previous process's orphaned DTLS session for ~10s, so the
 // first attempt after a restart usually fails with "stream already active".
-export function resumeStemSync(): void {
-  const { active: wasActive } = loadPersisted();
+export function resumeStemSync(opts?: { resumeActuation?: boolean }): void {
+  const resumeActuation = opts?.resumeActuation !== false;
+  const { active: wasActive } = loadPersisted(); // always: bindings/config feed the UI
   if (!wasActive || bindings.length === 0) return;
+  if (!resumeActuation) {
+    // Cold boot: design state is loaded, but the drive stays off. Persist
+    // the demotion so a later warm restart can't resurrect stale intent.
+    persist(false);
+    console.log('[stem-sync] cold boot — drive was active before shutdown; loaded idle (start it from the UI)');
+    return;
+  }
   wantActive = true; // supervisor keeps trying even if this loop gives up
   console.log('[stem-sync] resuming after restart…');
   let attempts = 0;

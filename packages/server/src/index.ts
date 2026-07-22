@@ -34,6 +34,7 @@ import { createAudioSyncRouter } from './routes/audio-sync.js';
 import { createStemSyncRouter } from './routes/stem-sync.js';
 import { resumeStemSync } from './services/stem-sync.js';
 import { createLatencyCalRouter } from './routes/latency-calibration.js';
+import { startServerHeartbeat, finalHeartbeat, isColdBoot, downtimeMs } from './lib/server-heartbeat.js';
 
 const PORT = process.env.PORT || 3001;
 
@@ -152,6 +153,19 @@ app.get('/api/health', (req, res) => {
 
 // Start server
 async function start() {
+  // First: stamp liveness (the module already captured the previous stamp
+  // at import time, so this can't clobber the downtime measurement).
+  startServerHeartbeat();
+
+  // Freshness gate, decided up front: design state always loads; actuation
+  // only resumes after a short outage (dev restart). After RESUME_TTL_MS of
+  // downtime nothing may touch the lights until a human acts.
+  const cold = isColdBoot();
+  const down = downtimeMs();
+  if (cold) {
+    console.log(`Cold boot (down ${down === null ? 'unknown' : Math.round(down / 60_000) + 'min'}) — loading state, not resuming actuation`);
+  }
+
   // Start HTTP server early so clients can connect while drivers initialize
   server.listen(PORT, () => {
     console.log(`Lightbox server running on http://localhost:${PORT}`);
@@ -163,7 +177,7 @@ async function start() {
     await lightManager.initialize();
     console.log(`Discovered ${lightManager.getAllLights().length} lights`);
 
-    await paletteAnimator.initialize();
+    await paletteAnimator.initialize({ resumeActuation: !cold });
     console.log('Palette animator initialized');
 
     // Autopilot is OFF by default. Start it explicitly via the UI's
@@ -181,7 +195,7 @@ async function start() {
     // Stem-sync survives tsx-watch restarts: if it was active when the
     // previous process died, resume with the persisted bindings once the
     // Hue side has had a moment to settle.
-    setTimeout(() => resumeStemSync(), 2000);
+    setTimeout(() => resumeStemSync({ resumeActuation: !cold }), 2000);
 
     // Broadcast updated state to all connected clients now that initialization is complete
     wss.clients.forEach((client) => {
@@ -203,6 +217,7 @@ async function start() {
 // Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('Shutting down...');
+  finalHeartbeat();
   paletteAnimator.dispose();
   lightManager.dispose().then(() => {
     db.close();

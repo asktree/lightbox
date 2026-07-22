@@ -103,9 +103,15 @@ export class PaletteAnimator extends EventEmitter {
   }
 
   /**
-   * Initialize - restore state from database for all rooms
+   * Initialize - restore state from database for all rooms.
+   *
+   * resumeActuation=false (cold boot, server was down a while): selections,
+   * positions, and speeds all load exactly as saved, but a palette that was
+   * playing comes up paused — and the demotion is persisted, so a later
+   * warm restart can't resurrect day-old intent and start moving lights.
    */
-  async initialize(): Promise<void> {
+  async initialize(opts?: { resumeActuation?: boolean }): Promise<void> {
+    const resumeActuation = opts?.resumeActuation !== false;
     // Initialize state for all known rooms
     for (const roomId of Object.keys(ROOMS)) {
       const dbState = this.db.getRoomState(roomId);
@@ -142,7 +148,13 @@ export class PaletteAnimator extends EventEmitter {
 
       // Resume animation if it was playing
       if (state.isPlaying && state.activePaletteId) {
-        this.startAnimationLoop(roomId);
+        if (resumeActuation) {
+          this.startAnimationLoop(roomId);
+        } else {
+          state.isPlaying = false;
+          this.db.setRoomState(roomId, state.activePaletteId, false);
+          console.log(`PaletteAnimator: cold boot — ${roomId} had palette ${state.activePaletteId} playing; loaded paused`);
+        }
       }
     }
 
