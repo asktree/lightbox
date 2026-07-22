@@ -26,7 +26,9 @@ export function createStemSyncRouter(paletteAnimator?: PaletteAnimator): Router 
     res.json(getStemSyncStatus());
   });
 
-  r.post('/stop', async (_req, res) => {
+  r.post('/stop', async (req, res) => {
+    // Identify the stopper — an anonymous stop once masqueraded as a bug.
+    console.log(`[stem-sync] /stop from ${req.ip} ua=${(req.headers['user-agent'] ?? '?').slice(0, 40)}`);
     await stopStemSync();
     res.json(getStemSyncStatus());
   });
@@ -34,6 +36,7 @@ export function createStemSyncRouter(paletteAnimator?: PaletteAnimator): Router 
   r.get('/status', (_req, res) => res.json(getStemSyncStatus()));
 
   r.put('/config', async (req, res) => {
+    console.log(`[stem-sync] /config from ${req.ip}: ${JSON.stringify(req.body ?? {}).slice(0, 140)}`);
     const { needsRestart } = updateStemSyncConfig(req.body ?? {});
     if (needsRestart) {
       await stopStemSync({ persistOff: false });

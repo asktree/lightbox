@@ -44,9 +44,14 @@ export interface StemBinding {
   maxLevel: number;   // baseline multiplier at value 1
   // 'palette' (default): color follows the palette animator's baseline.
   // 'chroma': color follows the music — the energy-weighted chroma proxy
-  // of the bound stems maps onto a warm→cool hue ramp (low/dark timbre =
-  // amber, bright timbre = cyan-blue, mirroring v1's spectrum gradient).
+  // of the bound stems maps onto the binding's hue arc.
   colorMode?: 'palette' | 'chroma';
+  // Chroma hue arc: chromaValue 0 lands on hueStart, 1 on hueEnd,
+  // traversing in hueDir ('up' = incrementing hue, 'down' = decrementing),
+  // wrapping through 360 as needed.
+  hueStart?: number; // degrees 0-360
+  hueEnd?: number;
+  hueDir?: 'up' | 'down';
 }
 
 export interface StemSyncConfig {
@@ -55,6 +60,11 @@ export interface StemSyncConfig {
   gamma: number;      // level = value^gamma
   attack: number;     // smoothing α when rising (0 = instant)
   decay: number;      // smoothing α when falling
+  minLevel: number;   // global brightness floor (baseline multiplier at value 0)
+  maxLevel: number;   // global brightness ceiling (at value 1)
+  // Where the playhead comes from: 'spotify' = autopilot state file,
+  // 'local' = the thin local player pushing to musicbox's /api/playback.
+  playheadSource: 'spotify' | 'local';
 }
 
 const config: StemSyncConfig = {
@@ -63,6 +73,9 @@ const config: StemSyncConfig = {
   gamma: 1,
   attack: 0,
   decay: 0.5,
+  minLevel: 0.02,
+  maxLevel: 1,
+  playheadSource: 'spotify',
 };
 let bindings: StemBinding[] = [];
 
@@ -100,6 +113,7 @@ function loadPersisted(): { active: boolean } {
 export function resumeStemSync(): void {
   const { active: wasActive } = loadPersisted();
   if (!wasActive || bindings.length === 0) return;
+  wantActive = true; // supervisor keeps trying even if this loop gives up
   console.log('[stem-sync] resuming after restart…');
   let attempts = 0;
   const tryStart = () => {
@@ -162,6 +176,11 @@ let startedStream = false;
 let tickTimer: NodeJS.Timeout | null = null;
 let runtimes: BindingRuntime[] = [];
 let lastError: string | null = null;
+// Operator intent, reconciled by the supervisor below. Set true by a
+// successful start (or resume intent), cleared only by a user stop —
+// internal teardowns (stream death, calibration) keep it true so the
+// drive comes back by itself once the bridge is reachable again.
+let wantActive = false;
 
 let envelope: Envelope | null = null;
 let envelopeTrackId: string | null = null;  // track we last tried to load
@@ -269,11 +288,57 @@ async function loadEnvelope(trackId: string): Promise<void> {
   }
 }
 
-// ---- Autopilot playhead ----
+// ---- Playhead sources ----
 
 interface Playhead { trackId: string | null; posS: number; playing: boolean }
 
+// Local player: musicbox's /api/playback holds the last push from the thin
+// player (position inferred server-side at read time). Polled at 2Hz while
+// the service is active and the source is 'local'; extrapolated between
+// polls, and staled out when the poll stops succeeding.
+const LOCAL_POLL_MS = 500;
+const LOCAL_STALE_S = 3;
+interface LocalPlayback { trackId: string | null; position: number; playing: boolean; playSpeed: number; fetchedAtMs: number }
+let localPlayback: LocalPlayback | null = null;
+let localPollInFlight = false;
+
+async function pollLocalPlayback(): Promise<void> {
+  if (config.playheadSource !== 'local' || localPollInFlight) return;
+  localPollInFlight = true;
+  try {
+    const res = await fetch(`${MUSICBOX_URL}/api/playback`);
+    if (!res.ok) throw new Error(`playback ${res.status}`);
+    const j = await res.json() as { trackId: string | null; position: number; playing: boolean; playSpeed: number };
+    localPlayback = {
+      trackId: j.trackId ?? null,
+      position: typeof j.position === 'number' ? j.position : 0,
+      playing: !!j.playing,
+      playSpeed: typeof j.playSpeed === 'number' ? j.playSpeed : 1,
+      fetchedAtMs: Date.now(),
+    };
+  } catch { /* readLocalPlayhead stales out below */ }
+  finally { localPollInFlight = false; }
+}
+
+// Always ticking (no-op unless source is 'local') so the status playhead
+// is truthful even before the drive starts. unref'd: never holds the
+// process open.
+setInterval(pollLocalPlayback, LOCAL_POLL_MS).unref();
+
+function readLocalPlayhead(): Playhead {
+  const lp = localPlayback;
+  if (!lp) return { trackId: null, posS: 0, playing: false };
+  const ageS = (Date.now() - lp.fetchedAtMs) / 1000;
+  if (ageS > LOCAL_STALE_S) return { trackId: lp.trackId, posS: lp.position, playing: false };
+  return {
+    trackId: lp.trackId,
+    posS: lp.position + (lp.playing ? ageS * lp.playSpeed : 0),
+    playing: lp.playing,
+  };
+}
+
 function readPlayhead(): Playhead {
+  if (config.playheadSource === 'local') return readLocalPlayhead();
   try {
     const raw = JSON.parse(readFileSync(AUTOPILOT_STATE, 'utf-8'));
     const nowS = Date.now() / 1000;
@@ -325,7 +390,9 @@ function tick(): void {
     const a = target > rt.value ? config.attack : config.decay;
     rt.value = a > 0 ? rt.value * a + target * (1 - a) : target;
     const shaped = Math.pow(clamp01(rt.value), config.gamma);
-    rt.level = rt.binding.minLevel + (rt.binding.maxLevel - rt.binding.minLevel) * shaped;
+    const lo = Math.min(config.minLevel, config.maxLevel);
+    const hi = Math.max(config.minLevel, config.maxLevel);
+    rt.level = lo + (hi - lo) * shaped;
     driver.setLevel(rt.streamChannelId, rt.level);
 
     // Chroma → hue: energy-weighted mean of the bound stems' chroma at the
@@ -348,7 +415,14 @@ function tick(): void {
         const inst = wsum > 1e-4 ? clamp01(csum / wsum) : rt.chromaValue;
         rt.chromaValue = rt.chromaValue * CHROMA_EMA + inst * (1 - CHROMA_EMA);
       }
-      const hue = CHROMA_HUE_LO + (CHROMA_HUE_HI - CHROMA_HUE_LO) * rt.chromaValue;
+      // Traverse the binding's hue arc: 0 → hueStart, 1 → hueEnd, moving
+      // in hueDir and wrapping through 360.
+      const hs = rt.binding.hueStart ?? CHROMA_HUE_LO;
+      const he = rt.binding.hueEnd ?? CHROMA_HUE_HI;
+      const span = (rt.binding.hueDir ?? 'up') === 'up'
+        ? (((he - hs) % 360) + 360) % 360
+        : -((((hs - he) % 360) + 360) % 360);
+      const hue = (((hs + span * rt.chromaValue) % 360) + 360) % 360;
       const { r, g, b } = hsvToRgb16(hue, 1, 1);
       driver.setChannel(rt.streamChannelId, r, g, b);
     } else {
@@ -371,6 +445,9 @@ export async function startStemSync(): Promise<{ ok: boolean; error?: string }> 
   if (suspended) return { ok: false, error: 'suspended for latency calibration' };
   if (active) return { ok: true };
   if (bindings.length === 0) return { ok: false, error: 'no bindings — map at least one stem to a light' };
+  // Asking to start IS the intent — latch it even if this attempt fails,
+  // so the supervisor keeps retrying through bridge flaps unattended.
+  wantActive = true;
   lastError = null;
 
   const lights = await getRestLights();
@@ -425,6 +502,7 @@ export async function startStemSync(): Promise<{ ok: boolean; error?: string }> 
   }
 
   active = true;
+  wantActive = true;
   persist(true);
   tickTimer = setInterval(tick, config.tickMs);
   console.log(`[stem-sync] started — ${runtimes.filter((r) => r.streamChannelId !== null)
@@ -433,6 +511,7 @@ export async function startStemSync(): Promise<{ ok: boolean; error?: string }> 
 }
 
 export async function stopStemSync(opts?: { persistOff?: boolean }): Promise<void> {
+  if (opts?.persistOff !== false) wantActive = false; // user stop = real intent
   if (!active) return;
   active = false;
   // Internal bounces (binding-set changes, resume) keep active=true on disk;
@@ -459,14 +538,63 @@ export async function stopStemSync(opts?: { persistOff?: boolean }): Promise<voi
   console.log('[stem-sync] stopped');
 }
 
+// Stream supervisor. A mid-show bridge flap kills the DTLS stream while the
+// service stays 'active' with a dead driver — frozen lights, no recovery
+// (the July 22 failure). Every 5s, reconcile toward wantActive: tear down a
+// dead stream, then keep retrying the start until the bridge is back.
+// Unlike the boot-time resume loop, this never gives up — bridge flaps end.
+let supervisorBusy = false;
+let supervisorFails = 0;
+setInterval(async () => {
+  if (supervisorBusy || suspended) return;
+  supervisorBusy = true;
+  try {
+    if (active) {
+      let driverActive = false;
+      try { driverActive = getSharedEntertainmentDriver().active; } catch {}
+      if (!driverActive) {
+        console.log('[stem-sync] stream died — tearing down for rebuild');
+        await stopStemSync({ persistOff: false });
+      } else {
+        supervisorFails = 0;
+      }
+    } else if (wantActive) {
+      const r = await startStemSync();
+      if (r.ok) {
+        supervisorFails = 0;
+        console.log('[stem-sync] supervisor restarted the drive');
+      } else {
+        // First failure logs; then once a minute — a long outage shouldn't spam.
+        supervisorFails++;
+        if (supervisorFails === 1 || supervisorFails % 12 === 0) {
+          console.log(`[stem-sync] supervisor start failed (${supervisorFails}x): ${r.error}`);
+        }
+      }
+    }
+  } catch (e) {
+    console.log('[stem-sync] supervisor error:', e);
+  } finally {
+    supervisorBusy = false;
+  }
+}, 5000).unref();
+
 // Returns whether a restart is needed for the change to fully apply (the
 // set of bound lights changed while active — stream channels are fixed at
 // start time).
 export function updateStemSyncConfig(patch: Partial<StemSyncConfig> & { bindings?: StemBinding[] }): { needsRestart: boolean } {
+  if (patch.playheadSource === 'spotify' || patch.playheadSource === 'local') {
+    if (config.playheadSource !== patch.playheadSource) {
+      config.playheadSource = patch.playheadSource;
+      localPlayback = null; // don't drive from the other source's stale echo
+      console.log(`[stem-sync] playhead source → ${config.playheadSource}`);
+    }
+  }
   if (typeof patch.offsetMs === 'number') config.offsetMs = Math.max(-2000, Math.min(8000, Math.round(patch.offsetMs)));
   if (typeof patch.gamma === 'number') config.gamma = Math.max(0.2, Math.min(4, patch.gamma));
   if (typeof patch.attack === 'number') config.attack = Math.max(0, Math.min(0.99, patch.attack));
   if (typeof patch.decay === 'number') config.decay = Math.max(0, Math.min(0.99, patch.decay));
+  if (typeof patch.minLevel === 'number') config.minLevel = clamp01(patch.minLevel);
+  if (typeof patch.maxLevel === 'number') config.maxLevel = clamp01(patch.maxLevel);
   if (typeof patch.tickMs === 'number') {
     config.tickMs = Math.max(16, Math.min(1000, Math.round(patch.tickMs)));
     if (tickTimer) { clearInterval(tickTimer); tickTimer = setInterval(tick, config.tickMs); }
@@ -488,6 +616,9 @@ export function updateStemSyncConfig(patch: Partial<StemSyncConfig> & { bindings
         minLevel: clamp01(typeof b.minLevel === 'number' ? b.minLevel : 0.02),
         maxLevel: clamp01(typeof b.maxLevel === 'number' ? b.maxLevel : 1),
         colorMode: (b.colorMode === 'chroma' ? 'chroma' : 'palette') as 'palette' | 'chroma',
+        hueStart: typeof b.hueStart === 'number' ? ((b.hueStart % 360) + 360) % 360 : undefined,
+        hueEnd: typeof b.hueEnd === 'number' ? ((b.hueEnd % 360) + 360) % 360 : undefined,
+        hueDir: (b.hueDir === 'down' ? 'down' : b.hueDir === 'up' ? 'up' : undefined) as 'up' | 'down' | undefined,
       }));
     const oldRids = bindings.map((b) => b.rid).sort().join(',');
     const newRids = clean.map((b) => b.rid).sort().join(',');
@@ -515,11 +646,12 @@ export function getStemSyncStatus() {
   const ph = readPlayhead();
   return {
     active,
+    wantActive, // false+wantActive=true reads as "reconnecting" in the UI
     streamActive: driver?.active ?? false,
     startedStream,
     config,
     bindings,
-    playhead: ph,
+    playhead: { ...ph, source: config.playheadSource },
     envelope: envelope ? {
       trackId: envelope.trackId,
       sr: envelope.sr,
