@@ -93,7 +93,10 @@ export class HueEntertainmentDriver {
   // via a Zigbee group command (analogous to REST grouped_light but within
   // the streaming protocol). Channel count = 1.
   async start(opts?: { lightNames?: string[] | null; groupIntoSingleChannel?: boolean }): Promise<void> {
-    if (this._active || this.connecting) return;
+    if (this._active) return;
+    // Loud, not silent: a silent return here once made every caller think
+    // start succeeded while a stuck attempt held the lock.
+    if (this.connecting) throw new Error('entertainment stream start already in progress');
     this.connecting = true;
     this.lightNamesFilter = opts?.lightNames && opts.lightNames.length > 0 ? opts.lightNames : null;
     this.groupChannel = !!opts?.groupIntoSingleChannel;
@@ -444,6 +447,11 @@ export class HueEntertainmentDriver {
         });
       });
       req.on('error', reject);
+      // A SYN blackhole during a LAN flap otherwise hangs this forever
+      // (and with it whoever holds the `connecting` lock).
+      req.setTimeout(10_000, () => {
+        req.destroy(new Error(`${method} ${path} timed out after 10s`));
+      });
       if (payload) req.write(payload);
       req.end();
     });

@@ -147,6 +147,12 @@ function clipV2(method: 'GET' | 'PUT' | 'POST', path: string, body?: any): Promi
       else sock.once('connect', captured);
     });
     req.on('error', reject);
+    // No timeout here once wedged an entire stem-sync start behind a
+    // blackholed SYN — and with maxSockets:1 agents, one hung socket
+    // queues every later request. destroy() frees the pinned socket.
+    req.setTimeout(10_000, () => {
+      req.destroy(new Error(`${method} ${path} timed out after 10s`));
+    });
     if (payload) req.write(payload);
     req.end();
   });
