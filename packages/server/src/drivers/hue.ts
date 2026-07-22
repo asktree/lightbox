@@ -212,6 +212,10 @@ export class HueDriver implements LightDriver {
         resolve();
       });
 
+      // Bounded like every other outbound call — a SYN blackhole here would
+      // otherwise hang connect() forever.
+      req.setTimeout(10_000, () => req.destroy(new Error('v2 mapping request timeout')));
+
       req.end();
     });
   }
@@ -331,7 +335,16 @@ export class HueDriver implements LightDriver {
       rejectUnauthorized: false, // Hue bridge uses self-signed cert
     };
 
+    // Connect-phase timeout only: once headers arrive the stream may sit
+    // silent indefinitely (that's normal SSE), so an idle timeout would kill
+    // healthy connections — but a connect that never answers must not hang.
+    const connectTimer = setTimeout(() => {
+      console.log('Hue: EventStream connect timeout');
+      this.eventStreamReq?.destroy(new Error('EventStream connect timeout'));
+    }, 10_000);
+
     this.eventStreamReq = https.request(options, (res) => {
+      clearTimeout(connectTimer);
       if (res.statusCode !== 200) {
         console.log(`Hue: EventStream failed with status ${res.statusCode}`);
         return;
@@ -371,6 +384,7 @@ export class HueDriver implements LightDriver {
     });
 
     this.eventStreamReq.on('error', (err) => {
+      clearTimeout(connectTimer);
       console.log('Hue: EventStream request error:', err.message);
       setTimeout(() => this.startListening(), 5000);
     });

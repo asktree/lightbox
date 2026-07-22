@@ -22,7 +22,11 @@ export default function App() {
   // Playhead source: the server (stem-sync config) owns it so the lights
   // and every open tab agree; the click applies an optimistic override
   // until the 500ms status poll confirms the switch.
-  const serverSource: PlayheadSource = drive.config?.playheadSource ?? 'spotify';
+  // While the server is unreachable (tsx restart) config goes undefined —
+  // hold the last-known source instead of snapping back to 'spotify'.
+  const lastKnownSource = useRef<PlayheadSource>('spotify');
+  if (drive.config?.playheadSource) lastKnownSource.current = drive.config.playheadSource;
+  const serverSource: PlayheadSource = drive.config?.playheadSource ?? lastKnownSource.current;
   const [srcOverride, setSrcOverride] = useState<PlayheadSource | null>(null);
   const source = srcOverride ?? serverSource;
   useEffect(() => {

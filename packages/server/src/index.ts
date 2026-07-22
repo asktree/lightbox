@@ -29,7 +29,6 @@ import { createTuyaRouter } from './routes/tuya.js';
 import type { TuyaDriver } from './drivers/tuya.js';
 import { createAudioLatencyRouter } from './routes/audio-latency.js';
 import { createAutopilotRouter, ensureAutopilotRunning, startAutopilotWatchdog } from './routes/autopilot.js';
-import { hueRestPulseEvents } from './drivers/hue-rest-pulse.js';
 import { createStreamingRouter } from './routes/streaming.js';
 import { createAudioSyncRouter } from './routes/audio-sync.js';
 import { createStemSyncRouter } from './routes/stem-sync.js';
@@ -145,11 +144,6 @@ app.use('/api/autopilot', createAutopilotRouter());
 app.use('/api/streaming', createStreamingRouter());
 app.use('/api/audio-sync', createAudioSyncRouter(paletteAnimator));
 app.use('/api/stem-sync', createStemSyncRouter(paletteAnimator));
-
-// Pipe REST-pulse timing logs into the shared debug log broadcast.
-hueRestPulseEvents.on('debug', (entry) => {
-  broadcast({ type: 'debug_log', entry });
-});
 
 // Health check
 app.get('/api/health', (req, res) => {

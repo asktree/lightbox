@@ -134,6 +134,12 @@ def main():
     anchor_monotonic_ms = 0.0
     anchor_spotify_s = 0.0
     playing = False
+    # Coast window: a failed poll is not evidence of a pause — the music
+    # almost certainly kept going. Keep playing=True (the anchor keeps
+    # extrapolating) through consecutive poll failures for up to
+    # COAST_MAX_S before declaring paused. None = last poll succeeded.
+    coast_since_s: float | None = None
+    COAST_MAX_S = 60.0
     last_poll_s = 0.0
     last_state_write_s = 0.0
     last_error: str | None = None
@@ -232,6 +238,7 @@ def main():
             "duration_s": current_duration_s,
             "track_status": track_status(current_track_id),
             "playing": playing,
+            "coasting": coast_since_s is not None and playing,
             "position_s": round(anchor_spotify_s + (time.monotonic() * 1000 - anchor_monotonic_ms) / 1000.0, 2) if playing else 0,
             "drift_ms": round(drift_ms_smoothed, 1) if drift_ms_smoothed is not None else None,
             "output_latency_ms": output_latency_ms,
@@ -341,8 +348,10 @@ def main():
 
         if now_s - last_poll_s >= poll_backoff_s:
             last_poll_s = now_s
+            poll_ok = False
             try:
                 cp = sp.currently_playing()
+                poll_ok = True
                 poll_backoff_s = POLL_INTERVAL_S
                 consec_auth_fails = 0
                 last_error = None
@@ -374,7 +383,20 @@ def main():
                     last_error = str(e)[:200]
                     print(f"  spotify poll err: {e}", file=sys.stderr)
 
-            if cp and cp.get("is_playing"):
+            if not poll_ok:
+                # Coast: a failed poll says nothing about playback. Hold the
+                # last known playing state and let consumers extrapolate from
+                # the existing anchor, until the failures have gone on long
+                # enough that "still playing" stops being the safe bet.
+                if playing:
+                    if coast_since_s is None:
+                        coast_since_s = now_s
+                    elif now_s - coast_since_s > COAST_MAX_S:
+                        playing = False
+                        print(f"  poll failing for {COAST_MAX_S:.0f}s+ — declaring paused",
+                              file=sys.stderr)
+            elif cp and cp.get("is_playing"):
+                coast_since_s = None
                 item = cp.get("item") or {}
                 tid = item.get("id")
                 progress_ms = cp.get("progress_ms") or 0
@@ -415,6 +437,7 @@ def main():
                 anchor_spotify_s = progress_ms / 1000.0
                 playing = True
             else:
+                coast_since_s = None
                 playing = False
 
             if playing:

@@ -186,7 +186,7 @@ function parseEnvelope(buf: ArrayBuffer): EnvelopePack {
 }
 
 async function fetchEnvelope(trackId: string): Promise<EnvelopePack> {
-  const r = await fetch(`${MUSICBOX_BASE}/api/library/${trackId}/envelope`);
+  const r = await fetch(`${MUSICBOX_BASE}/api/library/${trackId}/envelope`, { signal: AbortSignal.timeout(5000) });
   if (!r.ok) throw new Error(`envelope fetch ${trackId} → ${r.status}`);
   const buf = await r.arrayBuffer();
   return parseEnvelope(buf);
@@ -210,7 +210,7 @@ function getEnvelope(trackId: string): Promise<EnvelopePack> {
 async function pollOnce() {
   if (manualOverride) return; // bypass network when in manual scrub mode
   try {
-    const r = await fetch(`${MUSICBOX_BASE}/api/playback`);
+    const r = await fetch(`${MUSICBOX_BASE}/api/playback`, { signal: AbortSignal.timeout(2000) });
     if (!r.ok) return;
     const j = (await r.json()) as PlaybackResp;
     currentPlayback = j;

@@ -16,7 +16,7 @@
 
 import { Router } from 'express';
 import { spawn } from 'child_process';
-import { readFileSync, writeFileSync, existsSync, unlinkSync, openSync } from 'fs';
+import { readFileSync, existsSync, unlinkSync, openSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -25,7 +25,6 @@ const REPO_ROOT = join(__dirname, '../../../..');
 const SCRAPER_DIR = join(REPO_ROOT, 'packages/music-scraper');
 const VENV_PYTHON = join(SCRAPER_DIR, '.venv/bin/python');
 const STATE_FILE = '/tmp/lightbox-autopilot.json';
-const LIGHTS_FILE = '/tmp/lightbox-autopilot-lights.json';
 
 const FRESH_AGE_S = 5; // heartbeat younger than this = healthy
 const WEDGE_AGE_S = 60; // pid alive + heartbeat older than this = wedged
@@ -277,7 +276,6 @@ export function createAutopilotRouter(): Router {
     } catch {}
     res.json({
       state_file_exists: existsSync(STATE_FILE),
-      lights_file_exists: existsSync(LIGHTS_FILE),
       state,
       pid_alive: pidAlive,
       log_tail: logTail,
@@ -360,38 +358,6 @@ print("OK")
     } catch (err) {
       res.status(500).json({ error: String(err) });
     }
-  });
-
-  // Read-merge-write the config file so partial updates don't clobber
-  // fields we didn't send.
-  function updateConfig(patch: Record<string, unknown>): Record<string, unknown> {
-    let cur: Record<string, unknown> = {};
-    try {
-      if (existsSync(LIGHTS_FILE)) cur = JSON.parse(readFileSync(LIGHTS_FILE, 'utf-8')) || {};
-    } catch { /* reset on parse error */ }
-    const next = { ...cur, ...patch };
-    writeFileSync(LIGHTS_FILE, JSON.stringify(next));
-    return next;
-  }
-
-  // Live-update the active light set without restarting the autopilot.
-  // Body: { lightRids: string[] }
-  r.post('/set-lights', (req, res) => {
-    const { lightRids } = req.body ?? {};
-    if (!Array.isArray(lightRids)) {
-      return res.status(400).json({ error: 'lightRids array required' });
-    }
-    const rids = lightRids.filter((x) => typeof x === 'string');
-    res.json({ ok: true, config: updateConfig({ lightRids: rids }) });
-  });
-
-  // Live-update the offset. Body: { offsetMs: number }
-  r.post('/set-offset', (req, res) => {
-    const { offsetMs } = req.body ?? {};
-    if (typeof offsetMs !== 'number') {
-      return res.status(400).json({ error: 'offsetMs number required' });
-    }
-    res.json({ ok: true, config: updateConfig({ offsetMs: Math.round(offsetMs) }) });
   });
 
   r.post('/stop', async (_req, res) => {

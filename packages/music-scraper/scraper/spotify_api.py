@@ -2,9 +2,13 @@
 reading playlists, and fetching rich track metadata."""
 from __future__ import annotations
 
+import json
+import os
+import tempfile
 from typing import Iterator
 
 import spotipy
+from spotipy.cache_handler import CacheFileHandler
 from spotipy.oauth2 import SpotifyOAuth
 
 from .config import Config, REDIRECT_URI, SPOTIPY_CACHE
@@ -16,6 +20,25 @@ SCOPES = [
     "playlist-read-private",
     "user-read-playback-state", # /me/player/currently-playing (autopilot)
 ]
+
+
+class AtomicCacheFileHandler(CacheFileHandler):
+    """The autopilot daemon and every ingest subprocess share one token
+    cache. The stock handler writes it with a plain open('w'), so another
+    process can read it half-written during a refresh — the suspected cause
+    of the intermittent 401 "Access token missing" bursts despite a valid
+    token. Write-to-temp + os.replace is atomic: readers see either the old
+    token or the new one, never a torn file."""
+
+    def save_token_to_cache(self, token_info):
+        try:
+            cache_dir = os.path.dirname(self.cache_path) or "."
+            fd, tmp = tempfile.mkstemp(dir=cache_dir, prefix=".spotipy_cache.")
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps(token_info))
+            os.replace(tmp, self.cache_path)
+        except OSError as e:
+            print(f"Couldn't write token to cache at: {self.cache_path}: {e}")
 
 
 def make_client(
@@ -39,7 +62,7 @@ def make_client(
         client_secret=cfg.spotify.client_secret,
         redirect_uri=REDIRECT_URI,
         scope=" ".join(SCOPES),
-        cache_path=str(SPOTIPY_CACHE),
+        cache_handler=AtomicCacheFileHandler(cache_path=str(SPOTIPY_CACHE)),
         open_browser=open_browser,
     )
     kwargs: dict = {"requests_timeout": requests_timeout, "retries": retries}

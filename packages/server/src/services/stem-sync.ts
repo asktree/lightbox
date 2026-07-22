@@ -254,7 +254,7 @@ async function loadEnvelope(trackId: string): Promise<void> {
   envelopeLoading = true;
   lastEnvelopeAttempt = Date.now();
   try {
-    const res = await fetch(`${MUSICBOX_URL}/api/library/${trackId}/envelope`);
+    const res = await fetch(`${MUSICBOX_URL}/api/library/${trackId}/envelope`, { signal: AbortSignal.timeout(5000) });
     if (!res.ok) throw new Error(`envelope ${res.status}`);
     const buf = Buffer.from(await res.arrayBuffer());
     const env = parseEnvelope(trackId, buf);
@@ -264,7 +264,7 @@ async function loadEnvelope(trackId: string): Promise<void> {
     if (!anySignal) throw new Error('stems not ready (zeroed envelope)');
     // Chroma rides along; failure is non-fatal (hue falls back to mid-ramp).
     try {
-      const cr = await fetch(`${MUSICBOX_URL}/api/library/${trackId}/chroma`);
+      const cr = await fetch(`${MUSICBOX_URL}/api/library/${trackId}/chroma`, { signal: AbortSignal.timeout(5000) });
       if (cr.ok) {
         const cj = await cr.json() as { stems: Record<string, { samples: number[]; max: number }> };
         const chroma = {} as NonNullable<Envelope['chroma']>;
@@ -306,7 +306,7 @@ async function pollLocalPlayback(): Promise<void> {
   if (config.playheadSource !== 'local' || localPollInFlight) return;
   localPollInFlight = true;
   try {
-    const res = await fetch(`${MUSICBOX_URL}/api/playback`);
+    const res = await fetch(`${MUSICBOX_URL}/api/playback`, { signal: AbortSignal.timeout(2000) });
     if (!res.ok) throw new Error(`playback ${res.status}`);
     const j = await res.json() as { trackId: string | null; position: number; playing: boolean; playSpeed: number };
     localPlayback = {
