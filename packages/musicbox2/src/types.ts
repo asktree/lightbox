@@ -72,7 +72,13 @@ export interface AutopilotState {
   last_error?: string | null;
   updated_at?: number;
   stale?: boolean;
+  exit_reason?: 'auth' | 'stopped' | 'crash';
+  // Server-side age-corrected playhead (lightbox relay adds it); also set
+  // directly by the synthesized local-player state.
+  position_live?: number;
 }
+
+export type PlayheadSource = 'spotify' | 'local';
 
 export interface StemBinding {
   rid: string;
@@ -80,14 +86,21 @@ export interface StemBinding {
   minLevel?: number;
   maxLevel?: number;
   colorMode?: 'palette' | 'chroma';
+  hueStart?: number;
+  hueEnd?: number;
+  hueDir?: 'up' | 'down';
 }
 
 export interface StemSyncStatus {
   active?: boolean;
   streamActive?: boolean;
-  config?: { offsetMs: number; gamma: number; attack: number; decay: number; tickMs: number };
+  config?: {
+    offsetMs: number; gamma: number; attack: number; decay: number; tickMs: number;
+    minLevel?: number; maxLevel?: number;
+    playheadSource?: PlayheadSource;
+  };
   bindings?: StemBinding[];
-  playhead?: { trackId: string | null; posS: number; playing: boolean };
+  playhead?: { trackId: string | null; posS: number; playing: boolean; source?: PlayheadSource };
   envelope?: { trackId: string; sr: number; numSamples: number } | null;
   envelopeError?: string | null;
   channels?: Array<{

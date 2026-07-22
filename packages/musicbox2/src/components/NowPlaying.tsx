@@ -37,10 +37,10 @@ export function NowPlaying({ state, playhead, now }: {
   const status = state.track_status ?? 'unknown';
 
   if (!state.running) {
-    return <div className="text-sm text-zinc-500">autopilot is stopped — nothing to follow</div>;
+    return <div className="text-sm text-zinc-500">playhead source is stopped — nothing to follow</div>;
   }
   if (!state.track_id) {
-    return <div className="text-sm text-zinc-500">waiting for Spotify playback…</div>;
+    return <div className="text-sm text-zinc-500">waiting for playback…</div>;
   }
 
   return (
