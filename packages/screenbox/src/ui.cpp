@@ -8,13 +8,18 @@
 #include <math.h>
 #include "board.h"
 #include "net.h"
+#include "labyrinth.h"
 
 namespace ui {
 namespace {
 
 board::Display lcd;
 LGFX_Sprite    frame(&lcd);      // full-screen back buffer (PSRAM)
-LGFX_Sprite    floorSpr(&lcd);   // pre-rendered, pre-squashed wheel (PSRAM)
+// Unsquashed circular wheel (PSRAM). The dormant look is carved out of it at
+// runtime using the labyrinth distance field: lines of uniform thickness.
+LGFX_Sprite    wheelSolid(&lcd);
+LGFX_Sprite    floorCache(&lcd);  // last composite; reused while nothing changes (PSRAM)
+uint32_t       floorSig = 0;
 
 constexpr int W = board::LCD_W, H = board::LCD_H;
 
@@ -37,7 +42,7 @@ constexpr uint32_t HOLD_CHARGE_MS = 500;    // ring fill time -> toggle
 constexpr uint32_t SELECT_TIMEOUT_MS = 5000;
 
 // --- palette -----------------------------------------------------------------
-constexpr uint32_t C_BG      = 0x09090b;
+constexpr uint32_t C_BG      = 0x000000;  // true black: the LCD renders zinc-950 with a purple cast
 constexpr uint32_t C_ZINC800 = 0x27272a;
 constexpr uint32_t C_ZINC700 = 0x3f3f46;
 constexpr uint32_t C_ZINC500 = 0x71717a;
@@ -65,7 +70,7 @@ uint32_t seenVersion = 0xffffffff;
 int offlineCount = 0;
 
 String selectedId;
-enum class Hold { None, Orb, Bar, Floor };
+enum class Hold { None, Orb, Bar, Floor, Rim };
 Hold     hold = Hold::None;
 String   holdId;
 bool     dragging = false, longFired = false;
@@ -78,6 +83,29 @@ uint32_t lastFrameMs = 0;
 
 struct Ratio { String id; float ratio; };
 std::vector<Ratio> barRatios;
+
+// --- wheel rotation (grab the bottom rim and turn the dial) -------------------
+// wheelRot = how far the disc is turned: hue h is drawn at angle h + wheelRot.
+float    wheelRot = 0.f;
+enum class RotPhase { Idle, Dragging, Settling, Returning };
+RotPhase rotPhase = RotPhase::Idle;
+uint32_t rotPhaseMs = 0;
+float    rotGrabAngle = 0.f, rotAtGrab = 0.f, rotReturnFrom = 0.f;
+float    rimTouchAngle = 0.f;                     // for the rim highlight
+struct RotOrb { String id; float angle0; };       // screen angle of each orb at grab
+std::vector<RotOrb> rotOrbs;
+constexpr uint32_t ROT_SETTLE_MS = 500, ROT_RETURN_MS = 650;
+constexpr float RIM_IN = 0.80f, RIM_OUT = 1.18f;  // grab band, in wheel radii
+
+// --- floor "wake" state --------------------------------------------------------
+float    floorFill = 0.f;                         // 0 = dormant lines, 1 = solid
+constexpr uint32_t FLOOR_AWAKE_MS = 1200;         // stays solid this long after the last touch
+constexpr float PORTHOLE_R = 9.f;                 // solid colour inside each dropper ring
+constexpr float THICK_IN = 14.f, THICK_OUT = 34.f; // thicker lines near a light, easing back to thin
+// labyrinth line half-widths (px): dormant, near a light, fully awake (gaps closed)
+constexpr float LINE_THIN = 0.55f, LINE_NEAR = 1.6f;
+constexpr float SLIVER_HALF = 0.5f;               // black "inverse path" left along gap centre-lines when awake
+uint32_t renderAccumUs = 0, renderFrames = 0;
 
 struct Ripple { float wx, wy; uint32_t start; uint32_t color; };
 std::vector<Ripple> ripples;
@@ -168,6 +196,12 @@ void worldToHs(float wx, float wy, int& h, int& s) {
 inline int   sx(float wx)           { return CX + (int)roundf(wx); }
 inline int   sy(float wy, float z)  { return CY + (int)roundf(wy * SQUASH - z); }
 
+// Where an orb with hue h / sat s sits on the (possibly rotated) wheel.
+void orbWorld(const Orb& o, float& wx, float& wy) { hsToWorld((int)o.h, o.s, wx, wy); float a = wheelRot * (float)M_PI / 180.f; float c = cosf(a), s = sinf(a); float rx = wx * c - wy * s, ry = wx * s + wy * c; wx = rx; wy = ry; }
+float normDeg(float d) { d = fmodf(d, 360.f); if (d < 0) d += 360.f; return d; }
+float normDegSigned(float d) { d = normDeg(d); return d > 180.f ? d - 360.f : d; }
+float easeInOut(float t) { t = fmaxf(0.f, fminf(1.f, t)); return t < 0.5f ? 2 * t * t : 1 - powf(-2 * t + 2, 2) / 2; }
+
 Orb* findOrb(const String& id) { for (auto& o : orbs) if (o.id == id) return &o; return nullptr; }
 int maxBrightness() { int m = 0; for (auto& l : lights) if (l.on && l.reachable) m = max(m, l.brightness); return m; }
 
@@ -184,7 +218,7 @@ void syncOrbs() {
     else { o.id = l.id; o.phase = (float)(rand() % 628) / 100.f; o.fresh = true; }
     o.name = l.name; o.h = l.h; o.s = l.s; o.bri = l.brightness; o.on = l.on;
     o.color = hsvToRgb888(l.h, l.s, 100);
-    hsToWorld(l.h, l.s, o.tx, o.ty);
+    orbWorld(o, o.tx, o.ty);
     o.tz = l.on ? l.brightness / 100.f * ZMAX : 0;
     if (o.fresh) { o.x = o.tx; o.y = o.ty; o.z = -ORB_R * 2; o.fresh = false; }   // new orbs rise up from below
     next.push_back(o);
@@ -193,38 +227,145 @@ void syncOrbs() {
 }
 
 // --- floor -------------------------------------------------------------------
+// Base wheel colour at unit-disc coords (u right, v down). V=88 so orbs pop.
+uint32_t wheelHue(float u, float v, float dist, float ang, float value) {
+  return hsvToRgb888(ang, dist * 100.f, value);
+}
+
+// One solid wheel pixel.
+uint32_t floorColor(float u, float v, float pxPerUnit) {
+  float dist = sqrtf(u * u + v * v);
+  if (dist > 1.f) return C_BG;
+  float ang = atan2f(v, u) * 180.f / (float)M_PI + 90.f;
+  if (ang < 0) ang += 360.f;
+  uint32_t c = hsvToRgb888(ang, dist * 100.f, 92.f);
+  if (dist < 0.10f) c = blend(c, C_WHITE, 0.6f * (1.f - dist / 0.10f));   // centre bloom
+  float rimPx = (1.f - dist) * pxPerUnit;                                  // anti-aliased rim
+  if (rimPx < 1.f) c = blend(C_BG, c, rimPx);
+  return c;
+}
+
+void buildWheelLayer(LGFX_Sprite& s) {
+  const int D = R * 2;
+  s.setColorDepth(16);
+  s.setPsram(true);
+  s.createSprite(D, D);
+  for (int y = 0; y < D; y++)
+    for (int x = 0; x < D; x++)
+      s.drawPixel(x, y, floorColor((x + 0.5f - R) / R, (y + 0.5f - R) / R, R));
+}
+
 void buildFloor() {
-  const int Wf = (RX + GLOW_PX) * 2, Hf = (RY + GLOW_PX) * 2;
-  floorSpr.setColorDepth(16);
-  floorSpr.setPsram(true);
-  floorSpr.createSprite(Wf, Hf);
-  const float cx = Wf / 2.f, cy = Hf / 2.f;
-  for (int y = 0; y < Hf; y++) {
-    for (int x = 0; x < Wf; x++) {
-      float u = (x + 0.5f - cx) / RX, v = (y + 0.5f - cy) / RY;   // unit-disc coords
-      float dist = sqrtf(u * u + v * v);
-      uint32_t c = C_BG;
-      if (dist <= 1.f) {
-        float ang = atan2f(v, u) * 180.f / (float)M_PI + 90.f;
-        if (ang < 0) ang += 360.f;
-        c = hsvToRgb888(ang, dist * 100.f, 88.f);        // slightly under V=100 so orbs pop
-        // etched grid: saturation rings at 25/50/75 %, hue spokes every 30°
-        float ringD = fabsf(dist * 4.f - roundf(dist * 4.f));
-        if (dist > 0.05f && dist < 0.98f && ringD < 0.03f) c = blend(c, C_WHITE, 0.28f);
-        float spokeD = fabsf(ang / 30.f - roundf(ang / 30.f));
-        if (dist > 0.12f && spokeD < 0.012f) c = blend(c, C_WHITE, 0.20f);
-        // centre bloom (web cosmetic) + anti-aliased rim
-        if (dist < 0.12f) c = blend(c, C_WHITE, 0.7f * (1.f - dist / 0.12f));
-        float rimPx = (1.f - dist) * RX;
-        if (rimPx < 1.f) c = blend(C_BG, c, rimPx);
-      } else {
-        // soft purple halo outside the rim
-        float outPx = (dist - 1.f) * RX;
-        if (outPx < GLOW_PX) c = blend(C_BG, C_PURPLE, 0.30f * (1.f - outPx / GLOW_PX) * (1.f - outPx / GLOW_PX));
+  buildWheelLayer(wheelSolid);
+  static_assert(LAB_N == R * 2, "labyrinth field must match the wheel sprite size");
+  floorCache.setColorDepth(16);
+  floorCache.setPsram(true);
+  floorCache.createSprite(RX * 2, RY * 2);
+  floorCache.fillScreen(C_BG);
+}
+
+// Composite the wheel into `frame`: rotate-then-squash sampling of the three
+// layers, choosing per pixel by distance to the nearest light's floor point
+// and the global wake level (Bayer-dithered). Hot loop: integer fixed-point.
+uint32_t floorSignature() {
+  uint32_t h = 2166136261u;
+  auto mix = [&](int v) { h ^= (uint32_t)v; h *= 16777619u; };
+  mix((int)(floorFill * 64.f + 0.5f)); mix((int)(wheelRot * 4.f)); mix((int)orbs.size());
+  for (auto& o : orbs) { mix((int)lroundf(o.x)); mix((int)lroundf(o.y)); }
+  return h;
+}
+
+// Copy the cached composite (disc rows only) into the frame.
+void pushFloorCache() {
+  const uint16_t* src = (const uint16_t*)floorCache.getBuffer();
+  uint16_t* dst = (uint16_t*)frame.getBuffer();
+  const int CW = RX * 2;
+  const float R2in = (R - 1.5f) * (R - 1.5f);
+  for (int y = CY - RY; y < CY + RY; y++) {
+    float v = (y + 0.5f - CY) / SQUASH;
+    float rem = R2in - v * v;
+    if (rem <= 0) continue;
+    int hw = (int)sqrtf(rem);
+    int xl = max(CX - RX, CX - hw), xr = min(CX + RX - 1, CX + hw);
+    memcpy(dst + y * W + xl, src + (y - (CY - RY)) * CW + (xl - (CX - RX)), (xr - xl + 1) * 2);
+  }
+}
+
+// Composite the wheel: rotate-then-squash sampling of the solid wheel, carved
+// into labyrinth lines whose half-width T varies per pixel:
+//   dormant -> LINE_THIN, near a light -> LINE_NEAR, inside a dropper ring or
+//   when awake -> wide enough to close the gaps (solid). Edges Bayer-dithered.
+__attribute__((optimize("O2"))) void blitFloor() {
+  uint32_t sig = floorSignature();
+  if (sig == floorSig) { pushFloorCache(); return; }
+  floorSig = sig;
+  const uint16_t* solid = (const uint16_t*)wheelSolid.getBuffer();
+  uint16_t* dst = (uint16_t*)floorCache.getBuffer();
+  const int CW = RX * 2;
+  const int D = R * 2;
+  const float a = wheelRot * (float)M_PI / 180.f;
+  const int32_t c16 = (int32_t)(cosf(a) * 65536.f), s16 = (int32_t)(sinf(a) * 65536.f);
+  const uint16_t bg565 = frame.color565((C_BG >> 16) & 255, (C_BG >> 8) & 255, C_BG & 255);
+
+  // line half-width in field units (1/16 px): T_FULL closes every gap
+  const float T_FULL = LAB_DMAX + 1.f;
+  const float ease = floorFill * floorFill * (3.f - 2.f * floorFill);          // smoothstep
+  const int tBase = (int)((LINE_THIN + (T_FULL - LINE_THIN) * ease) * LAB_SCALE);
+  const int tNear = (int)(LINE_NEAR * LAB_SCALE), tFull = (int)(T_FULL * LAB_SCALE);
+  const int sliver16Half = (int)(SLIVER_HALF * LAB_SCALE);
+  const bool fullyAwake = tBase >= tFull;
+
+  int ox[12], oy[12]; int n = 0;
+  for (auto& o : orbs) if (n < 12) { ox[n] = (int)lroundf(o.x); oy[n] = (int)lroundf(o.y); n++; }
+  const int ph2 = (int)(PORTHOLE_R * PORTHOLE_R), ti2 = (int)(THICK_IN * THICK_IN), to2 = (int)(THICK_OUT * THICK_OUT);
+  const int R2in = (int)((R - 1.5f) * (R - 1.5f));
+
+  for (int y = CY - RY; y < CY + RY; y++) {
+    const float vf = (y + 0.5f - CY) / SQUASH;
+    const int v = (int)lroundf(vf);
+    const int32_t vs = (int32_t)(vf * 65536.f);
+    const uint8_t* brow = BAYER[y & 3];
+    uint16_t* drow = dst + (y - (CY - RY)) * CW - (CX - RX);   // indexed by screen x below
+
+    int spanL = 1 << 30, spanR = -(1 << 30);
+    for (int i = 0; i < n; i++) {
+      int dy = v - oy[i]; int rem = to2 - dy * dy;
+      if (rem < 0) continue;
+      int hw = (int)sqrtf((float)rem);
+      spanL = min(spanL, ox[i] - hw); spanR = max(spanR, ox[i] + hw);
+    }
+
+    for (int x = CX - RX; x < CX + RX; x++) {
+      const int u = x - CX;
+      if (u * u + v * v > R2in) continue;
+      const int32_t uf = ((int32_t)u << 16) + 32768;
+      const int sx = (int)(((int64_t)uf * c16 + (int64_t)vs * s16) >> 32) + R;
+      const int sy = (int)(((int64_t)vs * c16 - (int64_t)uf * s16) >> 32) + R;
+      if ((unsigned)sx >= (unsigned)D || (unsigned)sy >= (unsigned)D) continue;
+      const int idx = sy * D + sx;
+      const int b = brow[x & 3];
+      // the inverse path: never painted (except inside a dropper porthole)
+      const int sliver16 = (int)pgm_read_byte(&LAB_GAPD[idx]) - sliver16Half + 8;   // 0..16 over one px
+      if (fullyAwake) { drow[x] = (sliver16 > 16 || (sliver16 > 0 && b < sliver16)) ? solid[idx] : bg565; continue; }
+
+      // per-pixel half-width
+      int T = tBase;
+      if (u >= spanL && u <= spanR) {
+        int d2 = 1 << 30;
+        for (int i = 0; i < n; i++) { int dx = u - ox[i], dy = v - oy[i]; int q = dx * dx + dy * dy; if (q < d2) d2 = q; }
+        if (d2 < ph2) T = tFull;
+        else if (d2 < ti2) T = max(T, tNear);
+        else if (d2 < to2) { float tt = (THICK_OUT - sqrtf((float)d2)) / (THICK_OUT - THICK_IN); T = max(T, tBase + (int)((tNear - tBase) * tt)); }
       }
-      floorSpr.drawPixel(x, y, c);
+      // coverage: dist <= T (and outside the inverse path unless in a porthole),
+      // anti-aliased over 1 px and Bayer-dithered
+      const int d16 = (int)pgm_read_byte(&LAB_DIST[idx]);
+      int cover16 = T - d16 + 8;                                // 0..16 over one px
+      if (T != tFull) cover16 = min(cover16, sliver16);         // portholes (T == tFull) stay solid
+      drow[x] = (cover16 > 16 || (cover16 > 0 && b < cover16)) ? solid[idx] : bg565;
     }
   }
+  pushFloorCache();
 }
 
 // --- drawing -----------------------------------------------------------------
@@ -255,6 +396,14 @@ void drawBar(uint32_t now) {
 }
 
 String lastReadoutId;   // keep showing the last orb while it fades out
+Fader rotFader; float rotShown = 0.f;
+void drawRotReadout() {
+  if (!rotFader.visible()) return;
+  char buf[24]; snprintf(buf, sizeof buf, "HUE %+d", (int)roundf(-normDegSigned(rotShown)));
+  ditherText(CX, READOUT_Y, "TURN", C_ZINC400, textdatum_t::top_center, rotFader.alpha(), false);
+  ditherText(CX, READOUT_Y + 11, buf, C_WHITE, textdatum_t::top_center, rotFader.alpha(), false);
+}
+
 void drawReadout() {
   Orb* o = findOrb(selectedId.length() ? selectedId : lastReadoutId);
   if (!o || !readoutFader.visible()) return;
@@ -284,9 +433,9 @@ void drawOrb(Orb& o, uint32_t now) {
   const float bob = o.on ? sinf(now * 0.0016f + o.phase) * 1.5f : 0.f;
   const int X = sx(o.x), Yf = sy(o.y, 0), Y = sy(o.y, o.z + bob);
 
-  // landing marker on the floor
-  frame.fillEllipse(X, Yf, 5, 3, blend(C_BG, C_WHITE, o.on ? 0.85f : 0.3f));
-  frame.drawEllipse(X, Yf, 9, 5, blend(C_BG, C_WHITE, o.on ? 0.45f : 0.15f));
+  // dropper ring on the floor: hollow, with a white point at the centre
+  frame.drawEllipse(X, Yf, 9, 5, blend(C_BG, C_WHITE, o.on ? 0.8f : 0.25f));
+  frame.fillRect(X - 1, Yf - 1, 2, 2, o.on ? C_WHITE : blend(C_BG, C_WHITE, 0.4f));
 
   // marching dotted projection line
   if (o.on && Y + ORB_R + 3 < Yf - 3) {
@@ -341,7 +490,14 @@ void drawStatus() {
 
 void render(uint32_t now) {
   frame.fillScreen(C_BG);
-  floorSpr.pushSprite(&frame, CX - RX - GLOW_PX, CY - RY - GLOW_PX);
+  uint32_t t0 = micros();
+  blitFloor();
+  renderAccumUs += micros() - t0; renderFrames++;
+  if (rotPhase == RotPhase::Dragging) {
+    // rim highlight under the finger
+    int a0 = (int)(rimTouchAngle - 90.f - 18.f), a1 = a0 + 36;   // fillArc uses screen angles (0 = right)
+    frame.fillEllipseArc(CX, CY, RX + 2, RX - 1, RY + 2, RY - 1, a0, a1, blend(C_BG, C_WHITE, 0.9f));
+  }
   drawRipples(now);
 
   // painter's order: far (top of screen) first; dragged/selected orb last
@@ -353,6 +509,7 @@ void render(uint32_t now) {
 
   drawBar(now);
   drawReadout();
+  drawRotReadout();
   drawStatus();
   frame.pushSprite(0, 0);
 }
@@ -366,9 +523,31 @@ void animate(float dt) {
   String st = net::statusText();
   if (st != lastStatusText) { if (!statusFader.visible()) lastStatusText = st; statusFader.update(false, dt); }
   else statusFader.update(true, dt);
+  // wheel rotation state machine
+  uint32_t now = millis();
+  switch (rotPhase) {
+    case RotPhase::Settling:
+      if (now - rotPhaseMs >= ROT_SETTLE_MS) { rotPhase = RotPhase::Returning; rotPhaseMs = now; rotReturnFrom = normDegSigned(wheelRot); }
+      break;
+    case RotPhase::Returning: {
+      float tt = (now - rotPhaseMs) / (float)ROT_RETURN_MS;
+      wheelRot = rotReturnFrom * (1.f - easeInOut(tt));
+      if (tt >= 1.f) { wheelRot = 0.f; rotPhase = RotPhase::Idle; }
+      break;
+    }
+    default: break;
+  }
+  const bool wheelMoving = rotPhase != RotPhase::Idle;
+  const bool awake = hold != Hold::None || wheelMoving || (now - lastInteractMs < FLOOR_AWAKE_MS);
+  floorFill += ((awake ? 1.f : 0.f) - floorFill) * fminf(1.f, dt * (awake ? 7.f : 3.f));
+  rotFader.update(rotPhase == RotPhase::Dragging || rotPhase == RotPhase::Settling, dt);
+  if (rotPhase == RotPhase::Dragging || rotPhase == RotPhase::Settling) rotShown = wheelRot;
+
   for (auto& o : orbs) {
+    orbWorld(o, o.tx, o.ty);                       // targets follow the wheel angle
     bool held = (hold == Hold::Orb && holdId == o.id && dragging);
-    if (!held) { o.x += (o.tx - o.x) * 0.18f; o.y += (o.ty - o.y) * 0.18f; }
+    if (wheelMoving) { o.x = o.tx; o.y = o.ty; }   // pinned to the disc while it turns
+    else if (!held) { o.x += (o.tx - o.x) * 0.18f; o.y += (o.ty - o.y) * 0.18f; }
     o.z += (o.tz - o.z) * 0.12f;
   }
 }
@@ -406,6 +585,25 @@ void onDown(int x, int y, uint32_t now) {
     applyBar(x);
     return;
   }
+  {
+    // grab the dial: lower part of the rim band
+    float wx = x - CX, wy = (y - CY) / SQUASH;
+    float d = sqrtf(wx * wx + wy * wy) / R;
+    if (d >= RIM_IN && d <= RIM_OUT && wy > 0.25f * R) {
+      hold = Hold::Rim;
+      rotGrabAngle = atan2f(wy, wx) * 180.f / (float)M_PI;
+      rimTouchAngle = rotGrabAngle + 90.f;
+      rotAtGrab = wheelRot;
+      rotPhase = RotPhase::Dragging;
+      rotOrbs.clear();
+      for (auto& o : orbs) {
+        if (!o.on) continue;
+        rotOrbs.push_back({o.id, normDeg(o.h + wheelRot)});   // screen angle it must keep
+        net::startControlling(o.id);
+      }
+      return;
+    }
+  }
   hold = Hold::Floor;
   float wx = x - CX, wy = (y - CY) / SQUASH;
   if (wx * wx + wy * wy <= (float)R * R * 1.1f) {
@@ -433,6 +631,18 @@ void onMove(int x, int y, uint32_t now) {
     net::setColor(o->id, h, s);
   } else if (hold == Hold::Bar) {
     applyBar(x);
+  } else if (hold == Hold::Rim) {
+    float wx = x - CX, wy = (y - CY) / SQUASH;
+    float a = atan2f(wy, wx) * 180.f / (float)M_PI;
+    rimTouchAngle = a + 90.f;
+    wheelRot = normDeg(rotAtGrab + (a - rotGrabAngle));
+    // orbs stay where they are; the colour under them changes
+    for (auto& ro : rotOrbs) {
+      Orb* o = findOrb(ro.id);
+      if (!o) continue;
+      int h = (int)roundf(normDeg(ro.angle0 - wheelRot)) % 360;
+      if (h != o->h) { o->h = h; o->color = hsvToRgb888(h, o->s, 100); net::setColor(o->id, h, o->s); }
+    }
   }
 }
 
@@ -442,6 +652,10 @@ void onUp(int x, int y, uint32_t now) {
     if (dragging) net::stopControlling(holdId);
   } else if (hold == Hold::Floor) {
     selectedId = "";                       // tap the floor to deselect
+  } else if (hold == Hold::Rim) {
+    for (auto& ro : rotOrbs) net::stopControlling(ro.id);
+    rotOrbs.clear();
+    rotPhase = RotPhase::Settling; rotPhaseMs = now;
   }
   hold = Hold::None; holdId = ""; dragging = false; longFired = false;
 }
@@ -468,8 +682,12 @@ void begin() {
   lcd.drawString("screenbox", W / 2, H / 2);
 
   frame.setColorDepth(16);
-  frame.setPsram(true);
-  if (!frame.createSprite(W, H)) Serial.println("[ui] frame sprite alloc FAILED");
+  frame.setPsram(false);                       // internal RAM if it fits (fast), else PSRAM
+  if (!frame.createSprite(W, H)) {
+    frame.setPsram(true);
+    if (!frame.createSprite(W, H)) Serial.println("[ui] frame sprite alloc FAILED");
+    else Serial.println("[ui] frame in PSRAM");
+  } else Serial.println("[ui] frame in internal RAM");
   buildFloor();
   scratch.setColorDepth(16);
   scratch.createSprite(SCRATCH_W, SCRATCH_H);
@@ -494,6 +712,11 @@ void loop() {
     animate((now - lastFrameMs) / 1000.f);
     render(now);
     lastFrameMs = now;
+  }
+  static uint32_t lastPerf = 0;
+  if (now - lastPerf > 10000 && renderFrames) {
+    Serial.printf("[ui] floor composite avg %lu us over %lu frames\n", (unsigned long)(renderAccumUs / renderFrames), (unsigned long)renderFrames);
+    renderAccumUs = 0; renderFrames = 0; lastPerf = now;
   }
   delay(1);
 }
