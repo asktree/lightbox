@@ -10,6 +10,7 @@ constexpr int LCD_W = 240;
 constexpr int LCD_H = 320;
 constexpr int WHEEL_R = 104;        // labyrinth field is 2*WHEEL_R (src/labyrinth_208.h)
 #define SCREENBOX_LAB_HEADER "labyrinth_208.h"
+constexpr int PIXEL_SCALE = 1;
 constexpr int TEXT_SCALE = 1;
 inline const lgfx::IFont* uiFont() { return &fonts::Font0; }
 

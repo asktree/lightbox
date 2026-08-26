@@ -6,12 +6,25 @@
 
 namespace board {
 
-constexpr int LCD_W = 320;
-constexpr int LCD_H = 480;
+constexpr int PHYS_W = 320, PHYS_H = 480;   // the panel itself
+#if defined(SCREENBOX_LOWRES)
+// Experiment: render at half resolution and pixel-double on push (2x2 pseudo pixels)
+constexpr int PIXEL_SCALE = 2;
+constexpr int LCD_W = PHYS_W / 2;
+constexpr int LCD_H = PHYS_H / 2;
+constexpr int WHEEL_R = 70;         // labyrinth field is 2*WHEEL_R (src/labyrinth_140.h)
+#define SCREENBOX_LAB_HEADER "labyrinth_140.h"
+constexpr int TEXT_SCALE = 1;
+inline const lgfx::IFont* uiFont() { return &fonts::TomThumb; }   // 3x5 -> 6x10 physical
+#else
+constexpr int PIXEL_SCALE = 1;
+constexpr int LCD_W = PHYS_W;
+constexpr int LCD_H = PHYS_H;
 constexpr int WHEEL_R = 140;        // labyrinth field is 2*WHEEL_R (src/labyrinth_280.h)
 #define SCREENBOX_LAB_HEADER "labyrinth_280.h"
 constexpr int TEXT_SCALE = 1;
 inline const lgfx::IFont* uiFont() { return &fonts::DejaVu12; }
+#endif
 
 constexpr int LCD_BL  = 45;
 constexpr int LCD_RST = 4;          // shared with touch reset
@@ -84,8 +97,8 @@ public:
       cfg.pin_cs   = -1;
       cfg.pin_rst  = LCD_RST;
       cfg.pin_busy = -1;
-      cfg.memory_width  = LCD_W;  cfg.memory_height = LCD_H;
-      cfg.panel_width   = LCD_W;  cfg.panel_height  = LCD_H;
+      cfg.memory_width  = PHYS_W;  cfg.memory_height = PHYS_H;
+      cfg.panel_width   = PHYS_W;  cfg.panel_height  = PHYS_H;
       cfg.offset_x = 0;  cfg.offset_y = 0;
       cfg.offset_rotation  = 2;
       cfg.dummy_read_pixel = 8;
@@ -108,8 +121,8 @@ public:
     }
     {
       auto cfg = _touch.config();
-      cfg.x_min = 0; cfg.x_max = LCD_W;
-      cfg.y_min = 0; cfg.y_max = LCD_H;
+      cfg.x_min = 0; cfg.x_max = PHYS_W;
+      cfg.y_min = 0; cfg.y_max = PHYS_H;
       cfg.bus_shared      = false;
       cfg.offset_rotation = 0;
       cfg.i2c_port = 1;

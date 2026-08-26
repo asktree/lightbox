@@ -59,6 +59,18 @@ wrong SSID/password (scan shows what the ESP32 can see, 2.4 GHz only).
 "server..." forever means it can't reach `LIGHTBOX_HOST:3001` — check the
 server is up and that hearth isn't on a different subnet/VLAN than the panel.
 
+## Boards and modes
+
+| env | board | notes |
+|---|---|---|
+| `wt32s3_28s_pro` (default) | 2.8" WT32S3-28S PRO | 240×320, `screenbox.local` |
+| `wt32_sc01_plus` | 3.5" WT32-SC01 Plus | 320×480, DejaVu 12 font, `screenbox-35.local` |
+| `wt32_sc01_plus_lowres` | 3.5" WT32-SC01 Plus | same board rendered at 160×240 and pixel-doubled (2×2 pseudo pixels), TomThumb 3×5 font, half the wisps |
+
+Each has an `_ota` twin. Switching modes on the 3.5" is just flashing the other env:
+`pnpm screenbox35:ota` (full res) / `pnpm screenbox35:lowres` (pixel-doubled), both over Wi-Fi.
+The dormant-wheel labyrinth is precomputed per wheel size by `tools/gen_labyrinth.py --size <2*WHEEL_R>`.
+
 ## Toolchain
 
 [PlatformIO](https://platformio.org/) + Arduino-ESP32 + [LovyanGFX](https://github.com/lovyan03/LovyanGFX).

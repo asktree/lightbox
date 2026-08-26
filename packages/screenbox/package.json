@@ -10,6 +10,7 @@
     "flash:35": "pio run -e wt32_sc01_plus -t upload",
     "flash:35:ota": "pio run -e wt32_sc01_plus_ota -t upload",
     "monitor": "pio device monitor",
-    "clean": "pio run -t clean"
+    "clean": "pio run -t clean",
+    "flash:35:lowres": "pio run -e wt32_sc01_plus_lowres_ota -t upload"
   }
 }

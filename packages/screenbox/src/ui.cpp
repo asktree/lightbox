@@ -461,7 +461,7 @@ void drawBar(uint32_t now) {
       text(BAR_X + BAR_W + 8, BAR_Y + BAR_H / 2, buf, active ? C_WHITE : C_ZINC400, textdatum_t::middle_left);
     }
   }
-  text(BAR_X, BAR_Y - 2, single ? "LEVEL  (global paused)" : "LEVEL", C_ZINC500, textdatum_t::bottom_left);
+  text(BAR_X, BAR_Y - 2, "LEVEL", C_ZINC500, textdatum_t::bottom_left);
 
   // per-light slider, overlapping just below
   if (single) {
@@ -571,16 +571,26 @@ void drawStatus() {
 }
 
 // wisps: particles born on a dropper ring's edge that spiral up and fade
-struct Wisp { bool alive = false; String id; float theta, radius, rise, life, seed; };
-constexpr int WISP_MAX = 240;
+struct Wisp { bool alive = false; String id; float theta, radius, rise, life, seed; int frame = 0; };
+constexpr int WISP_MAX = 120;
 Wisp wisps[WISP_MAX];
+
+// trail dots: each wisp drops one every few frames; they linger and fade
+struct TrailDot { bool alive = false; int x, y; uint32_t color; float age; };
+constexpr int TRAIL_MAX = 900;
+constexpr float TRAIL_LIFE = 1.0f;
+constexpr int TRAIL_EVERY = 3;          // frames between dots
+TrailDot trail[TRAIL_MAX];
+int trailNext = 0;
 uint32_t lastWispMs = 0;
 
 void spawnWisps(uint32_t now) {
-  // a few wisps per frame, each from a random lit light's ring edge
+  // one wisp per frame (every other frame when pixel-doubled), from a random lit light's ring edge
+  static uint32_t frameNo = 0;
+  if (board::PIXEL_SCALE > 1 && (++frameNo & 1)) return;
   int lit = 0; for (auto& o : orbs) if (o.on) lit++;
   if (!lit) return;
-  for (int k = 0; k < 2; k++) {
+  for (int k = 0; k < 1; k++) {
     int pick = rand() % lit;
     Orb* src = nullptr;
     for (auto& o : orbs) { if (!o.on) continue; if (pick-- == 0) { src = &o; break; } }
@@ -589,7 +599,7 @@ void spawnWisps(uint32_t now) {
       if (w.alive) continue;
       w.alive = true; w.id = src->id;
       w.theta = (rand() % 628) / 100.f;
-      w.radius = 9.f * SX; w.rise = 0.f; w.life = 0.f;
+      w.radius = 9.f * SX; w.rise = 0.f; w.life = 0.f; w.frame = rand() % TRAIL_EVERY;
       w.seed = (rand() % 100) / 100.f;
       break;
     }
@@ -623,7 +633,20 @@ void drawWisps(float dt, bool advance) {
     float a = fminf(1.f, w.life / 0.3f);            // quick fade-in, then full white
     int X = sx(o->x) + (int)roundf(w.radius * cosf(w.theta));
     int Y = sy(o->y, 0) + (int)roundf(w.radius * sinf(w.theta) * SQUASH) - (int)w.rise;
-    canvas.drawPixel(X, Y, blend(C_BG, C_WHITE, a));
+    canvas.drawPixel(X, Y, blend(C_BG, C_WHITE, a));    // the wisp itself is white
+    if (advance && (++w.frame % TRAIL_EVERY) == 0) {      // ... and drops a dot in its light's colour
+      TrailDot& d = trail[trailNext]; trailNext = (trailNext + 1) % TRAIL_MAX;
+      d.alive = true; d.x = X; d.y = Y; d.color = o->color; d.age = 0.f;
+    }
+  }
+}
+
+void drawTrail(float dt, bool advance) {
+  for (auto& d : trail) {
+    if (!d.alive) continue;
+    if (advance) { d.age += dt; if (d.age >= TRAIL_LIFE) { d.alive = false; continue; } }
+    float a = 1.f - d.age / TRAIL_LIFE;
+    canvas.drawPixel(d.x, d.y, blend(C_BG, d.color, a));
   }
 }
 
@@ -653,6 +676,7 @@ void render(uint32_t now) {
     clearFrame();                                         // the floor cache fills the disc itself
     pushFloorCache();
     drawRipples(now);
+    drawTrail(wispDt, band == 0);
     drawWisps(wispDt, band == 0);
 
     // painter's order: far (top of screen) first; dragged/selected orb last
@@ -674,7 +698,8 @@ void render(uint32_t now) {
     drawReadout();
     drawRotReadout();
     drawStatus();
-    frame.pushSprite(0, viewY);
+    if (board::PIXEL_SCALE == 1) frame.pushSprite(0, viewY);
+    else { frame.setPivot(0, 0); frame.pushRotateZoom(&lcd, 0, viewY * board::PIXEL_SCALE, 0.f, board::PIXEL_SCALE, board::PIXEL_SCALE); }
   }
   viewY = 0;
 }
@@ -854,7 +879,7 @@ void begin() {
   lcd.setFont(&fonts::Font2);
   lcd.setTextDatum(textdatum_t::middle_center);
   lcd.setTextColor(C_ZINC400, C_BG);
-  lcd.drawString("screenbox", W / 2, H / 2);
+  lcd.drawString("screenbox", lcd.width() / 2, lcd.height() / 2);
 
   frame.setColorDepth(16);
   frame.setPsram(false);                       // internal RAM if it fits (fast), else PSRAM
@@ -878,6 +903,7 @@ void loop() {
   uint32_t now = millis();
   uint16_t tx, ty;
   bool touched = lcd.getTouch(&tx, &ty);
+  tx /= board::PIXEL_SCALE; ty /= board::PIXEL_SCALE;   // logical pixels
   if (touched && !wasTouched)      onDown(tx, ty, now);
   else if (touched && wasTouched)  onMove(tx, ty, now);
   else if (!touched && wasTouched) onUp(tx, ty, now);
