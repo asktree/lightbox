@@ -10,6 +10,7 @@
     "mcp": "pnpm --filter @lightbox/mcp dev",
     "musicbox": "pnpm --filter @lightbox/musicbox dev",
     "screenbox:flash": "pnpm --filter @lightbox/screenbox flash",
+    "screenbox:ota": "pnpm --filter @lightbox/screenbox flash:ota",
     "screenbox:monitor": "pnpm --filter @lightbox/screenbox monitor",
     "kill": "pkill -f 'tsx watch src/index' ; pkill -f 'vite' ; true",
     "redev": "pnpm kill && sleep 1 && pnpm dev"

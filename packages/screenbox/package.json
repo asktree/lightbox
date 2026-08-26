@@ -2,10 +2,11 @@
   "name": "@lightbox/screenbox",
   "version": "0.1.0",
   "private": true,
-  "description": "ESP32-S3 touch-screen control panel firmware (Wireless-Tag WT32S3-28S PRO). PlatformIO/C++ — package.json exists for workspace discovery and pnpm scripts only.",
+  "description": "ESP32-S3 touch-screen control panel firmware (Wireless-Tag WT32S3-28S PRO). PlatformIO/C++ \u2014 package.json exists for workspace discovery and pnpm scripts only.",
   "scripts": {
     "compile": "pio run",
     "flash": "pio run -t upload",
+    "flash:ota": "pio run -e wt32s3_28s_pro_ota -t upload",
     "monitor": "pio device monitor",
     "clean": "pio run -t clean"
   }

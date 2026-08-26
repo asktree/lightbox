@@ -3,6 +3,8 @@
 #include <HTTPClient.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
+#include <ESPmDNS.h>
+#include <ArduinoOTA.h>
 #include <map>
 #include "secrets.h"
 
@@ -23,6 +25,18 @@ static volatile uint32_t   s_version = 0;
 static volatile Status     s_status = Status::Booting;
 static WebSocketsClient    s_ws;
 static bool                s_wsConnected = false;
+static String              s_host;          // resolved LIGHTBOX_HOST (IP as text)
+
+// LIGHTBOX_HOST may be an IP or an mDNS name like "hearth.local".
+static bool resolveHost() {
+  String h = LIGHTBOX_HOST;
+  if (!h.endsWith(".local")) { s_host = h; return true; }
+  IPAddress ip = MDNS.queryHost(h.substring(0, h.length() - 6), 3000);
+  if (ip == IPAddress()) { Serial.printf("[net] mDNS: %s not found yet\n", h.c_str()); return false; }
+  s_host = ip.toString();
+  Serial.printf("[net] mDNS: %s -> %s\n", h.c_str(), s_host.c_str());
+  return true;
+}
 
 // Pending outbound state per light, coalesced so a fast drag becomes ~10 PUTs/s.
 struct Pending {
@@ -146,7 +160,7 @@ static void onWsEvent(WStype_t type, uint8_t* payload, size_t length) {
 
 static bool fetchLights() {
   HTTPClient http;
-  String url = String("http://") + LIGHTBOX_HOST + ":" + LIGHTBOX_PORT + "/api/lights";
+  String url = String("http://") + s_host + ":" + LIGHTBOX_PORT + "/api/lights";
   http.setTimeout(4000);
   if (!http.begin(url)) return false;
   int code = http.GET();
@@ -179,7 +193,7 @@ static void flushPending() {
     HTTPClient http;
     http.setReuse(true);
     http.setTimeout(2000);
-    String url = String("http://") + LIGHTBOX_HOST + ":" + LIGHTBOX_PORT + "/api/lights/" + kv.first;
+    String url = String("http://") + s_host + ":" + LIGHTBOX_PORT + "/api/lights/" + kv.first;
     if (!http.begin(url)) continue;
     http.addHeader("Content-Type", "application/json");
     int code = http.PUT(json);
@@ -196,8 +210,8 @@ static void netTask(void*) {
   Serial.printf("[net] connecting to '%s'\n", WIFI_SSID);
 
   uint32_t wifiStart = millis();
-  bool wsStarted = false, fetched = false;
-  uint32_t lastFetchTry = 0;
+  bool wsStarted = false, fetched = false, servicesStarted = false, hostResolved = false;
+  uint32_t lastFetchTry = 0, lastResolveTry = 0;
 
   for (;;) {
     if (!WiFi.isConnected()) {
@@ -239,13 +253,32 @@ static void netTask(void*) {
       fetched = false;
     }
 
+    if (!servicesStarted) {
+      // Advertise as screenbox.local and accept over-the-air firmware uploads
+      // (pio run -e wt32s3_28s_pro_ota -t upload) so flashing doesn't need USB.
+      MDNS.begin("screenbox");
+      ArduinoOTA.setHostname("screenbox");
+      ArduinoOTA.onStart([] { Serial.println("[ota] update starting"); });
+      ArduinoOTA.onEnd([] { Serial.println("[ota] done, rebooting"); });
+      ArduinoOTA.onError([](ota_error_t e) { Serial.printf("[ota] error %d\n", (int)e); });
+      ArduinoOTA.begin();
+      servicesStarted = true;
+    }
+    ArduinoOTA.handle();
+
+    if (!hostResolved) {
+      if (millis() - lastResolveTry > 3000) { lastResolveTry = millis(); hostResolved = resolveHost(); }
+      vTaskDelay(pdMS_TO_TICKS(50));
+      continue;
+    }
+
     if (!fetched && millis() - lastFetchTry > 3000) {
       lastFetchTry = millis();
       fetched = fetchLights();
     }
 
     if (!wsStarted) {
-      s_ws.begin(LIGHTBOX_HOST, LIGHTBOX_PORT, "/ws");
+      s_ws.begin(s_host, LIGHTBOX_PORT, "/ws");
       s_ws.onEvent(onWsEvent);
       s_ws.setReconnectInterval(3000);
       wsStarted = true;

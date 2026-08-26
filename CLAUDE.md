@@ -12,6 +12,7 @@ pnpm client     # Run client only
 pnpm musicbox   # Run musicbox only
 pnpm build      # Build all packages
 pnpm screenbox:flash    # Build + flash the ESP32 touch panel over USB-C
+pnpm screenbox:ota      # Build + flash the panel over Wi-Fi (screenbox.local)
 pnpm screenbox:monitor  # Serial output from the panel
 pnpm kill       # Kill all dev processes
 pnpm redev      # Kill and restart dev (named `redev` to avoid pnpm's `restart`
@@ -65,7 +66,12 @@ part of `pnpm dev`/`pnpm build` — it has its own `compile`/`flash`/`monitor`
 scripts that wrap PlatformIO (`pip3 install platformio intelhex`).
 
 - Flash over the board's own USB-C port (shows up as `/dev/cu.usbmodem*`,
-  Espressif USB JTAG/serial). No BOOT button dance needed.
+  Espressif USB JTAG/serial). No BOOT button dance needed. Once online it
+  also accepts OTA uploads as `screenbox.local` (`pnpm screenbox:ota`).
+- Wi-Fi/server config lives in gitignored `packages/screenbox/include/secrets.h`
+  (template: `secrets.example.h`). The panel should point at **hearth**, the
+  always-on server Mac (`LIGHTBOX_HOST "hearth.local"`). Setup steps for a
+  session on hearth: `packages/screenbox/README.md` → "Running it from hearth".
 - Pin map + LovyanGFX display/touch config: `packages/screenbox/src/board.h`.
   Datasheet in `packages/screenbox/docs/`.
 - Search the web for "ZX2D80CE02S" or "SC05_X", not "WT32S3-28S PRO".
