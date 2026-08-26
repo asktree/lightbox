@@ -1,5 +1,6 @@
 import { v3 } from 'node-hue-api';
 import type { Light, LightState, LightDriver, Brand, Capability } from '@lightbox/shared';
+import { hsToXy, xyToHs, clipToGamut, GAMUTS, type Gamut } from '@lightbox/shared';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
@@ -275,11 +276,11 @@ export class HueDriver implements LightDriver {
         lightState.ct(Math.max(153, Math.min(500, mired)));
         // Don't set color when setting temperature
       } else if (state.color !== undefined) {
-        // Convert standard HSV hue to Hue's proprietary hue scale
-        // Hue API: Red=0, Green=25500, Blue=46920 (not linear with standard HSV)
-        const hueApiValue = this.hsvHueToHueApi(state.color.h);
-        lightState.hue(hueApiValue);
-        lightState.sat(Math.round(state.color.s * 2.54));
+        // The UI shows sRGB colours. Send the exact chromaticity of that sRGB
+        // colour as CIE xy (clipped to this bulb's gamut) instead of Hue's
+        // hue/sat, whose scale is bulb-defined and doesn't match the wheel.
+        const xy = clipToGamut(hsToXy(state.color.h, state.color.s), this.gamutFor(hueId));
+        lightState.xy(xy.x, xy.y);
       }
       // Hue uses 100ms units. Default is 4 (400ms) which feels laggy.
       // Use 0 for instant response unless explicitly specified.
@@ -426,10 +427,7 @@ export class HueDriver implements LightDriver {
     }
 
     if (v2Light.color !== undefined && v2Light.color.xy) {
-      // Convert CIE xy to HSV (approximate)
-      const { x, y } = v2Light.color.xy;
-      const hs = this.xyToHs(x, y);
-      state.color = hs;
+      state.color = xyToHs({ x: v2Light.color.xy.x, y: v2Light.color.xy.y });
       hasData = true;
     }
 
@@ -439,51 +437,6 @@ export class HueDriver implements LightDriver {
     }
 
     return hasData ? state : null;
-  }
-
-  private xyToHs(x: number, y: number): { h: number; s: number } {
-    // Convert CIE xy to approximate HSV
-    // This is a simplified conversion - CIE xy to RGB to HSV
-    const z = 1 - x - y;
-    const Y = 1; // Brightness normalized
-    const X = (Y / y) * x;
-    const Z = (Y / y) * z;
-
-    // XYZ to sRGB (D65)
-    let r = X * 3.2406 - Y * 1.5372 - Z * 0.4986;
-    let g = -X * 0.9689 + Y * 1.8758 + Z * 0.0415;
-    let b = X * 0.0557 - Y * 0.2040 + Z * 1.0570;
-
-    // Gamma correction
-    r = r > 0.0031308 ? 1.055 * Math.pow(r, 1 / 2.4) - 0.055 : 12.92 * r;
-    g = g > 0.0031308 ? 1.055 * Math.pow(g, 1 / 2.4) - 0.055 : 12.92 * g;
-    b = b > 0.0031308 ? 1.055 * Math.pow(b, 1 / 2.4) - 0.055 : 12.92 * b;
-
-    // Clamp
-    r = Math.max(0, Math.min(1, r));
-    g = Math.max(0, Math.min(1, g));
-    b = Math.max(0, Math.min(1, b));
-
-    // RGB to HSV
-    const max = Math.max(r, g, b);
-    const min = Math.min(r, g, b);
-    const d = max - min;
-
-    let h = 0;
-    const s = max === 0 ? 0 : d / max;
-
-    if (d !== 0) {
-      switch (max) {
-        case r: h = ((g - b) / d + (g < b ? 6 : 0)) / 6; break;
-        case g: h = ((b - r) / d + 2) / 6; break;
-        case b: h = ((r - g) / d + 4) / 6; break;
-      }
-    }
-
-    return {
-      h: Math.round(h * 360),
-      s: Math.round(s * 100),
-    };
   }
 
   private getCapabilities(hueLight: any): Capability[] {
@@ -505,9 +458,12 @@ export class HueDriver implements LightDriver {
     if (hueState.bri !== undefined) {
       state.brightness = Math.round(hueState.bri / 2.54);
     }
-    if (hueState.hue !== undefined && hueState.sat !== undefined) {
+    if (Array.isArray(hueState.xy) && hueState.xy.length === 2) {
+      state.color = xyToHs({ x: hueState.xy[0], y: hueState.xy[1] });
+    } else if (hueState.hue !== undefined && hueState.sat !== undefined) {
+      // very old firmware without xy: fall back to Hue's own hue/sat scale
       state.color = {
-        h: this.hueApiToHsvHue(hueState.hue),
+        h: Math.round((hueState.hue / 65535) * 360),
         s: Math.round(hueState.sat / 2.54),
       };
     }
@@ -518,34 +474,16 @@ export class HueDriver implements LightDriver {
     return state;
   }
 
-  // Convert standard HSV hue (0-360) to Hue API value (0-65535)
-  // Hue API uses non-linear mapping: Red=0, Green=25500, Blue=46920
-  private hsvHueToHueApi(h: number): number {
-    h = ((h % 360) + 360) % 360; // Normalize to 0-360
-
-    if (h <= 120) {
-      // Red (0°) to Green (120°) → 0 to 25500
-      return Math.round((h / 120) * 25500);
-    } else if (h <= 240) {
-      // Green (120°) to Blue (240°) → 25500 to 46920
-      return Math.round(25500 + ((h - 120) / 120) * (46920 - 25500));
-    } else {
-      // Blue (240°) to Red (360°) → 46920 to 65535
-      return Math.round(46920 + ((h - 240) / 120) * (65535 - 46920));
+  /** Gamut triangle reported by the bridge for this bulb (defaults to Gamut C). */
+  private gamutFor(hueId: string | number): Gamut {
+    const raw = this.lights.get(String(hueId));
+    const ctl = raw?.capabilities?.control ?? raw?._data?.capabilities?.control ?? raw?.data?.capabilities?.control;
+    const pts: number[][] | undefined = ctl?.colorgamut;
+    if (pts && pts.length === 3) {
+      return { r: { x: pts[0][0], y: pts[0][1] }, g: { x: pts[1][0], y: pts[1][1] }, b: { x: pts[2][0], y: pts[2][1] } };
     }
-  }
-
-  // Convert Hue API value (0-65535) to standard HSV hue (0-360)
-  private hueApiToHsvHue(hueApi: number): number {
-    if (hueApi <= 25500) {
-      // 0 to 25500 → Red (0°) to Green (120°)
-      return Math.round((hueApi / 25500) * 120);
-    } else if (hueApi <= 46920) {
-      // 25500 to 46920 → Green (120°) to Blue (240°)
-      return Math.round(120 + ((hueApi - 25500) / (46920 - 25500)) * 120);
-    } else {
-      // 46920 to 65535 → Blue (240°) to Red (360°)
-      return Math.round(240 + ((hueApi - 46920) / (65535 - 46920)) * 120);
-    }
+    if (ctl?.colorgamuttype === 'A') return GAMUTS.hueA;
+    if (ctl?.colorgamuttype === 'B') return GAMUTS.hueB;
+    return GAMUTS.hueC;
   }
 }

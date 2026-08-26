@@ -157,3 +157,7 @@ export {
   positionToColor,
   findClosestPointOnTrack,
 } from './palette-utils.js';
+
+// Colour maths (CIE xy, gamuts, whites). Canonical UI model stays HSV h/s;
+// drivers use these to talk to bulbs accurately.
+export * from './color.js';

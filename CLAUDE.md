@@ -143,7 +143,7 @@ SQLite database at `packages/server/data/lightbox.db`
 - [x] **Tuya integration** - Local control via tinytuya
 - [ ] **Snapshots** - Quick save of current light positions from wheel view (next priority)
 - [ ] **Automations** - Time-based triggers with snapshot/palette actions
-- [ ] **Color accuracy** - Switch to xy color space with gamut handling per bulb type
+- [x] **Color accuracy** - Hue driver speaks xy (sRGB-exact, gamut-clipped); shared colour lib
 - [ ] **Audio reactive** - Sync to Sonos playback
 - [ ] **Agent chat** - Claude-powered assistant for natural language light control
 
@@ -183,21 +183,23 @@ Animated color paths on the wheel:
 - WebSocket broadcasts: `room_state`, `palette_positions`, `position_update`
 - REST API: `/api/rooms/:roomId/play`, `/api/rooms/:roomId/pause`, etc.
 
-## Color Accuracy Notes
+## Color Accuracy
 
-Current: Using Hue's proprietary hs scale (Red=0, Green=25500, Blue=46920)
-- Not standard HSV - requires piecewise conversion
-- Color/temperature are mutually exclusive modes
+The UI model is HSV `{h, s}` on a wheel (angle = hue, radius = saturation, V=100) and
+the wheel renders sRGB. **Accuracy = the bulb shows the sRGB colour you see on the wheel.**
 
-**Known Issues:**
-- SUNVIE Tuya lights and Hue lights are on different color spaces
-- Hue colors don't map perfectly to our UI but close enough to be usable
-- Need to investigate proper color space conversion per-brand
-
-Future improvement: Use CIE xy color space with per-bulb gamut handling
-- Different Hue bulbs have Gamut A, B, or C (different color triangles)
-- Colors outside gamut get clipped to nearest point
-- More accurate but more complex
+- Colour maths lives in `packages/shared/src/color.ts`: `hsToXy`/`xyToHs` (via sRGB),
+  `xyToRgb`/`rgbToXy`, gamut triangles (`GAMUTS.hueC` — every current Hue bulb on the
+  bridge is Gamut C — plus `hueA`, `hueB`, `srgb`) with `clipToGamut`, and whites
+  (`kelvinToXy`, `xyToKelvin`, `planckianLocus`). Also `spectralLocus()` if a CIE
+  diagram view is ever wanted (we tried it; too green-heavy to be a useful UI).
+- **Hue driver sends native `xy`** = chromaticity of the sRGB colour, clipped to the bulb's
+  reported gamut — *not* Hue's `hue`/`sat`, whose scale is bulb-defined and doesn't match
+  the wheel. Inbound (v1 state and v2 EventStream) reads `xy` back through the exact
+  inverse, so round trips are the identity and Hue matches WiZ/Tuya, which get the same
+  sRGB. (Old code sent a piecewise hue/sat guess and read xy back through a different
+  path, so pins twitched after every drag — the client's 1 s echo cooldown hid it.)
+- WiZ/Govee: `hsvToRgb` → sRGB bytes. Tuya: HSV natively (its scale is close to sRGB HSV).
 
 ## Tuya Transition Behavior
 
