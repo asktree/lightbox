@@ -11,6 +11,8 @@ pnpm server     # Run server only
 pnpm client     # Run client only
 pnpm musicbox   # Run musicbox only
 pnpm build      # Build all packages
+pnpm screenbox:flash    # Build + flash the ESP32 touch panel over USB-C
+pnpm screenbox:monitor  # Serial output from the panel
 pnpm kill       # Kill all dev processes
 pnpm redev      # Kill and restart dev (named `redev` to avoid pnpm's `restart`
                 # lifecycle which implicitly requires `stop`/`start` scripts)
@@ -50,8 +52,25 @@ packages/
 ├── shared/    # Types & utilities (build first)
 ├── server/    # Express + WebSocket + SQLite
 ├── client/    # React + Vite + Tailwind
-└── mcp/       # MCP server for Claude
+├── mcp/       # MCP server for Claude
+└── screenbox/ # ESP32-S3 touch-panel firmware (PlatformIO/C++, not JS)
 ```
+
+## Screenbox (physical touch panel)
+
+Firmware for a Wireless-Tag **WT32S3-28S PRO** (internal model `ZX2D80CE02S`,
+PanelLan `SC05_X`): ESP32-S3, 8 MB flash / 2 MB PSRAM, 2.8" 240×320 ST7789 on
+an 8-bit 8080 bus, FT5x06 touch. Lives in `packages/screenbox/` and is **not**
+part of `pnpm dev`/`pnpm build` — it has its own `compile`/`flash`/`monitor`
+scripts that wrap PlatformIO (`pip3 install platformio intelhex`).
+
+- Flash over the board's own USB-C port (shows up as `/dev/cu.usbmodem*`,
+  Espressif USB JTAG/serial). No BOOT button dance needed.
+- Pin map + LovyanGFX display/touch config: `packages/screenbox/src/board.h`.
+  Datasheet in `packages/screenbox/docs/`.
+- Search the web for "ZX2D80CE02S" or "SC05_X", not "WT32S3-28S PRO".
+- Vendor's ZXACC-ESPDB burn tool (plugs into the 7-pin debug header) is only a
+  fallback for a bricked USB port.
 
 ## Light Integrations
 
