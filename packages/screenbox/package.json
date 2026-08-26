@@ -7,6 +7,8 @@
     "compile": "pio run",
     "flash": "pio run -t upload",
     "flash:ota": "pio run -e wt32s3_28s_pro_ota -t upload",
+    "flash:35": "pio run -e wt32_sc01_plus -t upload",
+    "flash:35:ota": "pio run -e wt32_sc01_plus_ota -t upload",
     "monitor": "pio device monitor",
     "clean": "pio run -t clean"
   }

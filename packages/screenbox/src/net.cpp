@@ -57,15 +57,29 @@ struct Pending {
 static std::map<String, Pending> s_pending;
 static constexpr uint32_t SEND_INTERVAL_MS = 80;
 
-// Lights the user is actively dragging: inbound server echoes are dropped for
-// them, plus a 1 s cooldown after release (same as the web client).
-static std::map<String, uint32_t> s_ignoreUntil;   // id -> millis (UINT32_MAX = controlling)
-static bool ignoring(const String& id) {
-  auto it = s_ignoreUntil.find(id);
-  if (it == s_ignoreUntil.end()) return false;
-  if (it->second == UINT32_MAX || millis() < it->second) return true;
-  s_ignoreUntil.erase(it);
-  return false;
+// Echo policy. While a light is being dragged, inbound updates for it are
+// dropped. After release we keep dropping until the server echoes back the
+// LAST value we sent (the bridge's EventStream can replay intermediate states
+// for well over a second), with a safety timeout so external changes still
+// get through.
+struct Control { bool active = false; uint32_t deadline = 0; bool hasColor = false; int h = 0, s = 0; };
+static std::map<String, Control> s_control;
+static constexpr uint32_t ECHO_TIMEOUT_MS = 3000;
+
+// Returns true if this inbound state should be ignored. `incoming` may be null
+// (when we only know the id).
+static bool ignoring(const String& id, const Light* incoming) {
+  auto it = s_control.find(id);
+  if (it == s_control.end()) return false;
+  Control& c = it->second;
+  if (c.active) return true;
+  if (millis() >= c.deadline) { s_control.erase(it); return false; }
+  if (incoming && c.hasColor && incoming->hasColor &&
+      abs(incoming->h - c.h) <= 2 && abs(incoming->s - c.s) <= 2) {
+    s_control.erase(it);                     // that's my final command coming back
+    return false;
+  }
+  return true;                               // stale intermediate echo
 }
 
 static int roomIndex(const char* id) {
@@ -118,7 +132,7 @@ static void applyLightsArray(JsonArrayConst arr) {
 
   xSemaphoreTake(s_mutex, portMAX_DELAY);
   for (auto& l : compact)                      // keep local state for lights being dragged
-    if (ignoring(l.id))
+    if (ignoring(l.id, &l))
       for (auto& old : s_lights) if (old.id == l.id) { l = old; break; }
   s_lights = compact;
   s_version++;
@@ -131,7 +145,7 @@ static void applyLightUpdate(JsonObjectConst o) {
   if (!id || roomIndex(id) < 0) return;
   Light l = parseLight(o);
   xSemaphoreTake(s_mutex, portMAX_DELAY);
-  if (ignoring(l.id)) { xSemaphoreGive(s_mutex); return; }
+  if (ignoring(l.id, &l)) { xSemaphoreGive(s_mutex); return; }
   for (auto& existing : s_lights) {
     if (existing.id == l.id) { existing = l; s_version++; break; }
   }
@@ -265,8 +279,8 @@ static void netTask(void*) {
     if (!servicesStarted) {
       // Advertise as screenbox.local and accept over-the-air firmware uploads
       // (pio run -e wt32s3_28s_pro_ota -t upload) so flashing doesn't need USB.
-      MDNS.begin("screenbox");
-      ArduinoOTA.setHostname("screenbox");
+      MDNS.begin(SCREENBOX_HOSTNAME);
+      ArduinoOTA.setHostname(SCREENBOX_HOSTNAME);
       ArduinoOTA.onStart([] { Serial.println("[ota] update starting"); });
       ArduinoOTA.onEnd([] { Serial.println("[ota] done, rebooting"); });
       ArduinoOTA.onError([](ota_error_t e) { Serial.printf("[ota] error %d\n", (int)e); });
@@ -330,12 +344,12 @@ uint32_t version() { return s_version; }
 // and queue the change for the net task.
 void startControlling(const String& id) {
   xSemaphoreTake(s_mutex, portMAX_DELAY);
-  s_ignoreUntil[id] = UINT32_MAX;
+  Control& c = s_control[id]; c.active = true; c.hasColor = false;
   xSemaphoreGive(s_mutex);
 }
 void stopControlling(const String& id) {
   xSemaphoreTake(s_mutex, portMAX_DELAY);
-  s_ignoreUntil[id] = millis() + 1000;
+  Control& c = s_control[id]; c.active = false; c.deadline = millis() + ECHO_TIMEOUT_MS;
   xSemaphoreGive(s_mutex);
 }
 
@@ -343,6 +357,8 @@ void setColor(const String& id, int h, int s) {
   xSemaphoreTake(s_mutex, portMAX_DELAY);
   for (auto& l : s_lights) if (l.id == id) { l.hasColor = true; l.h = h; l.s = s; l.hasTemp = false; s_version++; break; }
   Pending& p = s_pending[id]; p.hasColor = true; p.h = h; p.s = s; p.hasTemp = false;
+  auto it = s_control.find(id);
+  if (it != s_control.end()) { it->second.hasColor = true; it->second.h = h; it->second.s = s; }
   xSemaphoreGive(s_mutex);
 }
 void setTemperature(const String& id, int kelvin) {

@@ -15,11 +15,11 @@ import argparse
 import numpy as np
 from scipy import ndimage
 
-N = 208                 # output size; must match 2*R in ui.cpp
+N = 208                 # output size; must match 2*WHEEL_R of the board (see --size)
 N_SIM = 175             # simulate smaller and upscale -> corridor scale (higher = finer)
 F, K = 0.029, 0.057     # feed / kill: "worms" / labyrinth regime
 DU, DV = 0.16, 0.08
-RADIAL_BIAS = -0.55     # >0: corridors run radially (spokes); <0: tangentially (rings)
+RADIAL_BIAS = -0.7      # >0: corridors run radially (spokes); <0: tangentially (rings)
 STEPS = 6000
 SEED = 7
 SDF_SCALE = 16          # 1/16 px resolution in the uint8 field
@@ -80,10 +80,16 @@ def upscale(a, n):
     return rows[:, i0] * (1 - f2) + rows[:, i1] * f2
 
 def main():
+    global N, N_SIM
     ap = argparse.ArgumentParser()
     ap.add_argument('--preview')
-    ap.add_argument('--out', default='src/labyrinth.h')
+    ap.add_argument('--size', type=int, default=N, help='field size = 2 * wheel radius')
+    ap.add_argument('--out')
     args = ap.parse_args()
+    if args.size != N:
+        N_SIM = round(N_SIM * args.size / N)      # keep corridor scale relative to the wheel
+        N = args.size
+    args.out = args.out or f'src/labyrinth_{N}.h'
 
     V = upscale(simulate(), N)
     yy, xx = np.mgrid[0:N, 0:N]

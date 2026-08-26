@@ -8,7 +8,7 @@
 #include <math.h>
 #include "board.h"
 #include "net.h"
-#include "labyrinth.h"
+#include SCREENBOX_LAB_HEADER
 
 namespace ui {
 namespace {
@@ -21,21 +21,52 @@ LGFX_Sprite    wheelSolid(&lcd);
 LGFX_Sprite    floorCache(&lcd);  // last composite; reused while nothing changes (PSRAM)
 uint32_t       floorSig = 0;
 
+// Band rendering: the frame is drawn in BANDS horizontal strips through one
+// internal-RAM sprite (fast to draw into, DMA to push) so big screens don't
+// have to stream a whole PSRAM frame buffer every frame.
+constexpr int BANDS  = (board::LCD_W * board::LCD_H * 2 > 200000) ? 2 : 1;
+constexpr int BAND_H = board::LCD_H / BANDS;
+int viewY = 0;                    // screen y of the current band's top row
+
+// Drawing goes through this so every call is offset into the current band.
+struct Canvas {
+  LGFX_Sprite& s;
+  void fillRect(int x, int y, int w, int h, uint32_t c)       { s.fillRect(x, y - viewY, w, h, c); }
+  void drawRect(int x, int y, int w, int h, uint32_t c)       { s.drawRect(x, y - viewY, w, h, c); }
+  void fillRoundRect(int x, int y, int w, int h, int r, uint32_t c) { s.fillRoundRect(x, y - viewY, w, h, r, c); }
+  void drawRoundRect(int x, int y, int w, int h, int r, uint32_t c) { s.drawRoundRect(x, y - viewY, w, h, r, c); }
+  void drawPixel(int x, int y, uint32_t c)                    { s.drawPixel(x, y - viewY, c); }
+  void drawFastVLine(int x, int y, int h, uint32_t c)         { s.drawFastVLine(x, y - viewY, h, c); }
+  void fillCircle(int x, int y, int r, uint32_t c)            { s.fillCircle(x, y - viewY, r, c); }
+  void drawEllipse(int x, int y, int rx, int ry, uint32_t c)  { s.drawEllipse(x, y - viewY, rx, ry, c); }
+  void fillArc(int x, int y, int r0, int r1, float a0, float a1, uint32_t c) { s.fillArc(x, y - viewY, r0, r1, a0, a1, c); }
+  void fillEllipseArc(int x, int y, int rx0, int rx1, int ry0, int ry1, float a0, float a1, uint32_t c) { s.fillEllipseArc(x, y - viewY, rx0, rx1, ry0, ry1, a0, a1, c); }
+  void drawString(const char* str, int x, int y)              { s.drawString(str, x, y - viewY); }
+  void setFont(const lgfx::IFont* f)                          { s.setFont(f); }
+  void setTextSize(float sz)                                  { s.setTextSize(sz); }
+  void setTextDatum(textdatum_t d)                            { s.setTextDatum(d); }
+  void setTextColor(uint32_t c)                               { s.setTextColor(c); }
+};
+Canvas canvas{frame};
+
 constexpr int W = board::LCD_W, H = board::LCD_H;
+constexpr float SX = W / 240.f, SY = H / 320.f;   // layout was designed on 240x320
+constexpr int TS = board::TEXT_SCALE;
+#define UI_FONT board::uiFont()
 
 // --- scene / projection ------------------------------------------------------
 // World: x right, y "into the screen" (toward the top), z up. Orthographic
 // camera pitched so the floor squashes vertically by SQUASH.
-constexpr int   R      = 104;                 // wheel radius, world units == px
+constexpr int   R      = board::WHEEL_R;      // wheel radius, world units == px
 constexpr float SQUASH = 0.72f;
 constexpr int   RX = R, RY = (int)(R * SQUASH + 0.5f);
-constexpr int   CX = W / 2, CY = 218;         // floor centre on screen
-constexpr int   ZMAX = 78;                    // orb height at brightness 100
-constexpr int   ORB_R = 10, HIT_R = 24;
-constexpr int   GLOW_PX = 8;                  // halo drawn outside the floor rim
+constexpr int   CX = W / 2, CY = (int)(218 * SY);   // floor centre on screen
+constexpr int   ZMAX = (int)(78 * SY);              // orb height at brightness 100
+constexpr int   ORB_R = (int)(10 * SX), HIT_R = (int)(24 * SX);   // ORB_R = half-size when awake; 30 % smaller dormant
 
-constexpr int BAR_X = 22, BAR_Y = 14, BAR_W = 170, BAR_H = 6;
-constexpr int READOUT_Y = 34;
+constexpr int BAR_X = (int)(22 * SX), BAR_Y = (int)(14 * SY), BAR_W = (int)(170 * SX), BAR_H = (int)(6 * SY);
+constexpr int READOUT_Y = (int)(34 * SY);
+constexpr int LINE_H = (int)(11 * SY);            // readout line spacing
 constexpr int STATUS_Y = H - 5;
 constexpr uint32_t HOLD_GRACE_MS  = 500;    // hold this long before the ring starts
 constexpr uint32_t HOLD_CHARGE_MS = 500;    // ring fill time -> toggle
@@ -57,6 +88,7 @@ constexpr uint32_t C_RED     = 0xf87171;
 struct Orb {
   String id, name;
   int h = 0, s = 0, bri = 0;
+  float hf = 0, sf = 0;            // unrounded hue/sat (drag smoothness); h/s are what we send
   bool on = false;
   uint32_t color = 0;
   float x = 0, y = 0, z = 0;       // current (animated) world position
@@ -83,6 +115,8 @@ uint32_t lastFrameMs = 0;
 
 struct Ratio { String id; float ratio; };
 std::vector<Ratio> barRatios;
+bool barSingle = false;                           // bar drag targets the selected light only
+constexpr int BAR_DROP = (int)(5 * SY);           // the per-light slider sits this far below the global one
 
 // --- wheel rotation (grab the bottom rim and turn the dial) -------------------
 // wheelRot = how far the disc is turned: hue h is drawn at angle h + wheelRot.
@@ -100,20 +134,24 @@ constexpr float RIM_IN = 0.80f, RIM_OUT = 1.18f;  // grab band, in wheel radii
 // --- floor "wake" state --------------------------------------------------------
 float    floorFill = 0.f;                         // 0 = dormant lines, 1 = solid
 constexpr uint32_t FLOOR_AWAKE_MS = 1200;         // stays solid this long after the last touch
-constexpr float PORTHOLE_R = 9.f;                 // solid colour inside each dropper ring
-constexpr float THICK_IN = 14.f, THICK_OUT = 34.f; // thicker lines near a light, easing back to thin
+constexpr float THICK_OUT = 36.f * SX;            // lines are thickest at a light, easing out (cubic) to normal by THICK_OUT
 // labyrinth line half-widths (px): dormant, near a light, fully awake (gaps closed)
-constexpr float LINE_THIN = 0.55f, LINE_NEAR = 1.6f;
+constexpr float LINE_THIN = 0.55f;
 constexpr float SLIVER_HALF = 0.5f;               // black "inverse path" left along gap centre-lines when awake
 uint32_t renderAccumUs = 0, renderFrames = 0;
 
 struct Ripple { float wx, wy; uint32_t start; uint32_t color; };
 std::vector<Ripple> ripples;
 
+// labels are collected while drawing orbs and painted afterwards, on top
+struct Label { int x, y; String text; uint32_t color; float alpha; };
+std::vector<Label> labels;
+
+
 // --- dithered fades ----------------------------------------------------------
 // Text doesn't pop in and out: it dissolves through a 4x4 Bayer pattern.
 LGFX_Sprite scratch(&lcd);          // small internal-RAM sprite for glyph masks
-constexpr int SCRATCH_W = 220, SCRATCH_H = 14;
+constexpr int SCRATCH_W = 300, SCRATCH_H = 20;
 const uint8_t BAYER[4][4] = {{0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
 
 struct Fader {
@@ -131,8 +169,9 @@ String lastStatusText;
 void ditherText(int x, int y, const char* s, uint32_t color, textdatum_t datum, float alpha, bool shadow) {
   if (alpha <= 0.02f) return;
   const int level = (int)(alpha * 16.f + 0.5f);
-  scratch.setFont(&fonts::Font0);
-  int w = scratch.textWidth(s) + 2, h = 10;
+  scratch.setFont(UI_FONT);
+  scratch.setTextSize(TS);
+  int w = scratch.textWidth(s) + 2, h = scratch.fontHeight() + 2;
   if (w > SCRATCH_W) w = SCRATCH_W;
   scratch.fillRect(0, 0, w, h, 0);
   scratch.setTextDatum(textdatum_t::top_left);
@@ -153,8 +192,8 @@ void ditherText(int x, int y, const char* s, uint32_t color, textdatum_t datum, 
       if (!scratch.readPixel(px, py)) continue;
       int sx = X0 + px, sy = Y0 + py;
       if (level >= 16 || BAYER[sy & 3][sx & 3] < level) {
-        if (shadow) frame.drawPixel(sx + 1, sy + 1, 0x000000);
-        frame.drawPixel(sx, sy, color);
+        if (shadow) canvas.drawPixel(sx + 1, sy + 1, 0x000000);
+        canvas.drawPixel(sx, sy, color);
       }
     }
   }
@@ -183,9 +222,16 @@ uint32_t blend(uint32_t a, uint32_t b, float t) {   // a*(1-t) + b*t
 }
 
 // hue/sat -> world floor coords (web hsToPosition, centred)
-void hsToWorld(int h, int s, float& wx, float& wy) {
-  float a = (h - 90) * (float)M_PI / 180.f, d = s / 100.f * R;
+void hsToWorldF(float h, float s, float& wx, float& wy) {
+  float a = (h - 90.f) * (float)M_PI / 180.f, d = s / 100.f * R;
   wx = d * cosf(a); wy = d * sinf(a);
+}
+void hsToWorld(int h, int s, float& wx, float& wy) { hsToWorldF(h, s, wx, wy); }
+void worldToHsF(float wx, float wy, float& h, float& s) {
+  float dist = sqrtf(wx * wx + wy * wy);
+  float ang = atan2f(wy, wx) * 180.f / (float)M_PI + 90.f;
+  h = fmodf(fmodf(ang, 360.f) + 360.f, 360.f);
+  s = fminf(100.f, dist / R * 100.f);
 }
 void worldToHs(float wx, float wy, int& h, int& s) {
   float dist = sqrtf(wx * wx + wy * wy);
@@ -197,7 +243,7 @@ inline int   sx(float wx)           { return CX + (int)roundf(wx); }
 inline int   sy(float wy, float z)  { return CY + (int)roundf(wy * SQUASH - z); }
 
 // Where an orb with hue h / sat s sits on the (possibly rotated) wheel.
-void orbWorld(const Orb& o, float& wx, float& wy) { hsToWorld((int)o.h, o.s, wx, wy); float a = wheelRot * (float)M_PI / 180.f; float c = cosf(a), s = sinf(a); float rx = wx * c - wy * s, ry = wx * s + wy * c; wx = rx; wy = ry; }
+void orbWorld(const Orb& o, float& wx, float& wy) { hsToWorldF(o.hf, o.sf, wx, wy); float a = wheelRot * (float)M_PI / 180.f; float c = cosf(a), s = sinf(a); float rx = wx * c - wy * s, ry = wx * s + wy * c; wx = rx; wy = ry; }
 float normDeg(float d) { d = fmodf(d, 360.f); if (d < 0) d += 360.f; return d; }
 float normDegSigned(float d) { d = normDeg(d); return d > 180.f ? d - 360.f : d; }
 float easeInOut(float t) { t = fmaxf(0.f, fminf(1.f, t)); return t < 0.5f ? 2 * t * t : 1 - powf(-2 * t + 2, 2) / 2; }
@@ -216,7 +262,7 @@ void syncOrbs() {
     Orb o;
     if (Orb* prev = findOrb(l.id)) o = *prev;
     else { o.id = l.id; o.phase = (float)(rand() % 628) / 100.f; o.fresh = true; }
-    o.name = l.name; o.h = l.h; o.s = l.s; o.bri = l.brightness; o.on = l.on;
+    o.name = l.name; o.h = l.h; o.s = l.s; o.hf = l.h; o.sf = l.s; o.bri = l.brightness; o.on = l.on;
     o.color = hsvToRgb888(l.h, l.s, 100);
     orbWorld(o, o.tx, o.ty);
     o.tz = l.on ? l.brightness / 100.f * ZMAX : 0;
@@ -267,13 +313,15 @@ void buildFloor() {
 // Composite the wheel into `frame`: rotate-then-squash sampling of the three
 // layers, choosing per pixel by distance to the nearest light's floor point
 // and the global wake level (Bayer-dithered). Hot loop: integer fixed-point.
-uint32_t floorSignature() {
+// Signature of everything that changes the whole disc (not orb positions).
+uint32_t floorGlobalSig() {
   uint32_t h = 2166136261u;
   auto mix = [&](int v) { h ^= (uint32_t)v; h *= 16777619u; };
   mix((int)(floorFill * 64.f + 0.5f)); mix((int)(wheelRot * 4.f)); mix((int)orbs.size());
-  for (auto& o : orbs) { mix((int)lroundf(o.x)); mix((int)lroundf(o.y)); }
   return h;
 }
+struct OrbPos { int x, y; };
+std::vector<OrbPos> prevOrbPos;
 
 // Copy the cached composite (disc rows only) into the frame.
 void pushFloorCache() {
@@ -281,24 +329,21 @@ void pushFloorCache() {
   uint16_t* dst = (uint16_t*)frame.getBuffer();
   const int CW = RX * 2;
   const float R2in = (R - 1.5f) * (R - 1.5f);
-  for (int y = CY - RY; y < CY + RY; y++) {
+  for (int y = max(CY - RY, viewY); y < min(CY + RY, viewY + BAND_H); y++) {
     float v = (y + 0.5f - CY) / SQUASH;
     float rem = R2in - v * v;
     if (rem <= 0) continue;
     int hw = (int)sqrtf(rem);
     int xl = max(CX - RX, CX - hw), xr = min(CX + RX - 1, CX + hw);
-    memcpy(dst + y * W + xl, src + (y - (CY - RY)) * CW + (xl - (CX - RX)), (xr - xl + 1) * 2);
+    memcpy(dst + (y - viewY) * W + xl, src + (y - (CY - RY)) * CW + (xl - (CX - RX)), (xr - xl + 1) * 2);
   }
 }
 
 // Composite the wheel: rotate-then-squash sampling of the solid wheel, carved
 // into labyrinth lines whose half-width T varies per pixel:
-//   dormant -> LINE_THIN, near a light -> LINE_NEAR, inside a dropper ring or
-//   when awake -> wide enough to close the gaps (solid). Edges Bayer-dithered.
-__attribute__((optimize("O2"))) void blitFloor() {
-  uint32_t sig = floorSignature();
-  if (sig == floorSig) { pushFloorCache(); return; }
-  floorSig = sig;
+//   dormant -> LINE_THIN; near a light or when awake -> wide enough to close
+//   the gaps, leaving only the black inverse path. Edges Bayer-dithered.
+__attribute__((optimize("O2"))) void compositeRegion(int y0, int y1, int x0, int x1) {
   const uint16_t* solid = (const uint16_t*)wheelSolid.getBuffer();
   uint16_t* dst = (uint16_t*)floorCache.getBuffer();
   const int CW = RX * 2;
@@ -311,16 +356,17 @@ __attribute__((optimize("O2"))) void blitFloor() {
   const float T_FULL = LAB_DMAX + 1.f;
   const float ease = floorFill * floorFill * (3.f - 2.f * floorFill);          // smoothstep
   const int tBase = (int)((LINE_THIN + (T_FULL - LINE_THIN) * ease) * LAB_SCALE);
-  const int tNear = (int)(LINE_NEAR * LAB_SCALE), tFull = (int)(T_FULL * LAB_SCALE);
+  const int tFull = (int)(T_FULL * LAB_SCALE);
   const int sliver16Half = (int)(SLIVER_HALF * LAB_SCALE);
   const bool fullyAwake = tBase >= tFull;
 
   int ox[12], oy[12]; int n = 0;
   for (auto& o : orbs) if (n < 12) { ox[n] = (int)lroundf(o.x); oy[n] = (int)lroundf(o.y); n++; }
-  const int ph2 = (int)(PORTHOLE_R * PORTHOLE_R), ti2 = (int)(THICK_IN * THICK_IN), to2 = (int)(THICK_OUT * THICK_OUT);
+  const int tPeak = tFull - 1;                     // thick enough to close the gaps (the sliver stays)
+  const int to2 = (int)(THICK_OUT * THICK_OUT);
   const int R2in = (int)((R - 1.5f) * (R - 1.5f));
 
-  for (int y = CY - RY; y < CY + RY; y++) {
+  for (int y = max(y0, CY - RY); y < min(y1, CY + RY); y++) {
     const float vf = (y + 0.5f - CY) / SQUASH;
     const int v = (int)lroundf(vf);
     const int32_t vs = (int32_t)(vf * 65536.f);
@@ -335,7 +381,7 @@ __attribute__((optimize("O2"))) void blitFloor() {
       spanL = min(spanL, ox[i] - hw); spanR = max(spanR, ox[i] + hw);
     }
 
-    for (int x = CX - RX; x < CX + RX; x++) {
+    for (int x = max(x0, CX - RX); x < min(x1, CX + RX); x++) {
       const int u = x - CX;
       if (u * u + v * v > R2in) continue;
       const int32_t uf = ((int32_t)u << 16) + 32768;
@@ -353,27 +399,42 @@ __attribute__((optimize("O2"))) void blitFloor() {
       if (u >= spanL && u <= spanR) {
         int d2 = 1 << 30;
         for (int i = 0; i < n; i++) { int dx = u - ox[i], dy = v - oy[i]; int q = dx * dx + dy * dy; if (q < d2) d2 = q; }
-        if (d2 < ph2) T = tFull;
-        else if (d2 < ti2) T = max(T, tNear);
-        else if (d2 < to2) { float tt = (THICK_OUT - sqrtf((float)d2)) / (THICK_OUT - THICK_IN); T = max(T, tBase + (int)((tNear - tBase) * tt)); }
+        if (d2 < to2) { float tt = 1.f - sqrtf((float)d2) / THICK_OUT; tt = tt * tt * tt; T = max(T, tBase + (int)((tPeak - tBase) * tt)); }   // ease-out (cubic)
       }
-      // coverage: dist <= T (and outside the inverse path unless in a porthole),
-      // anti-aliased over 1 px and Bayer-dithered
+      // coverage: dist <= T and outside the inverse path, anti-aliased over 1 px, Bayer-dithered
       const int d16 = (int)pgm_read_byte(&LAB_DIST[idx]);
-      int cover16 = T - d16 + 8;                                // 0..16 over one px
-      if (T != tFull) cover16 = min(cover16, sliver16);         // portholes (T == tFull) stay solid
+      int cover16 = min(T - d16 + 8, sliver16);                 // 0..16 over one px
       drow[x] = (cover16 > 16 || (cover16 > 0 && b < cover16)) ? solid[idx] : bg565;
     }
   }
-  pushFloorCache();
+}
+
+void updateFloorCache() {
+  uint32_t sig = floorGlobalSig();
+  std::vector<OrbPos> cur; cur.reserve(orbs.size());
+  for (auto& o : orbs) cur.push_back({(int)lroundf(o.x), (int)lroundf(o.y)});
+  if (sig != floorSig || prevOrbPos.size() != cur.size()) {
+    compositeRegion(0, H, 0, W);                          // everything changed
+  } else {
+    // only orbs moved: recompose the patches around old + new positions
+    const int pad = (int)THICK_OUT + 2;
+    for (size_t i = 0; i < cur.size(); i++) {
+      if (cur[i].x == prevOrbPos[i].x && cur[i].y == prevOrbPos[i].y) continue;
+      int ux0 = min(cur[i].x, prevOrbPos[i].x) - pad, ux1 = max(cur[i].x, prevOrbPos[i].x) + pad;
+      int vy0 = min(cur[i].y, prevOrbPos[i].y) - pad, vy1 = max(cur[i].y, prevOrbPos[i].y) + pad;
+      compositeRegion(CY + (int)floorf(vy0 * SQUASH) - 1, CY + (int)ceilf(vy1 * SQUASH) + 2, CX + ux0, CX + ux1 + 1);
+    }
+  }
+  floorSig = sig; prevOrbPos = cur;
 }
 
 // --- drawing -----------------------------------------------------------------
 void text(int x, int y, const char* s, uint32_t c, textdatum_t d = textdatum_t::top_left) {
-  frame.setFont(&fonts::Font0);
-  frame.setTextDatum(d);
-  frame.setTextColor(c);
-  frame.drawString(s, x, y);
+  canvas.setFont(UI_FONT);
+  canvas.setTextSize(TS);
+  canvas.setTextDatum(d);
+  canvas.setTextColor(c);
+  canvas.drawString(s, x, y);
 }
 void shadowText(int x, int y, const char* s, uint32_t c, textdatum_t d) {
   text(x + 1, y + 1, s, 0x000000, d);
@@ -381,18 +442,38 @@ void shadowText(int x, int y, const char* s, uint32_t c, textdatum_t d) {
 }
 
 void drawBar(uint32_t now) {
-  int m = maxBrightness();
-  int fillW = BAR_W * m / 100;
-  frame.fillRoundRect(BAR_X, BAR_Y, BAR_W, BAR_H, BAR_H / 2, C_ZINC800);
-  for (int i = 1; i < 10; i++) frame.drawFastVLine(BAR_X + BAR_W * i / 10, BAR_Y + BAR_H + 2, 2, C_ZINC700);
-  if (fillW > 0) frame.fillRoundRect(BAR_X, BAR_Y, max(fillW, BAR_H), BAR_H, BAR_H / 2, blend(C_ZINC50, C_PURPLE, 0.25f));
-  int tx = BAR_X + fillW;
-  bool active = hold == Hold::Bar;
-  frame.fillRoundRect(tx - 2, BAR_Y - 4, 4, BAR_H + 8, 2, active ? C_PURPLE : C_WHITE);
-  char buf[8]; snprintf(buf, sizeof buf, "%3d", m);
-  text(BAR_X + BAR_W + 8, BAR_Y + BAR_H / 2, buf, active ? C_WHITE : C_ZINC400, textdatum_t::middle_left);
-  text(BAR_X + BAR_W + 26, BAR_Y + BAR_H / 2, "%", C_ZINC500, textdatum_t::middle_left);
-  text(BAR_X, BAR_Y - 2, "LEVEL", C_ZINC500, textdatum_t::bottom_left);   // 8px glyphs -> top at y=4
+  Orb* sel = findOrb(selectedId);
+  const bool single = sel != nullptr;
+  const bool active = hold == Hold::Bar;
+  char buf[8];
+
+  // global bar (greyed out and inert while a light is selected)
+  {
+    int m = maxBrightness();
+    int fillW = BAR_W * m / 100;
+    canvas.fillRoundRect(BAR_X, BAR_Y, BAR_W, BAR_H, BAR_H / 2, single ? blend(C_BG, C_ZINC800, 0.6f) : C_ZINC800);
+    for (int i = 1; i < 10; i++) canvas.drawFastVLine(BAR_X + BAR_W * i / 10, BAR_Y + BAR_H + 2, 2, single ? blend(C_BG, C_ZINC700, 0.5f) : C_ZINC700);
+    if (fillW > 0) canvas.fillRoundRect(BAR_X, BAR_Y, max(fillW, BAR_H), BAR_H, BAR_H / 2, single ? C_ZINC700 : blend(C_ZINC50, C_PURPLE, 0.25f));
+    if (!single) {
+      int tx = BAR_X + fillW;
+      canvas.fillRoundRect(tx - 2, BAR_Y - 4, 4, BAR_H + 8, 2, active ? C_PURPLE : C_WHITE);
+      snprintf(buf, sizeof buf, "%d%%", m);
+      text(BAR_X + BAR_W + 8, BAR_Y + BAR_H / 2, buf, active ? C_WHITE : C_ZINC400, textdatum_t::middle_left);
+    }
+  }
+  text(BAR_X, BAR_Y - 2, single ? "LEVEL  (global paused)" : "LEVEL", C_ZINC500, textdatum_t::bottom_left);
+
+  // per-light slider, overlapping just below
+  if (single) {
+    int y = BAR_Y + BAR_DROP;
+    int fillW = BAR_W * sel->bri / 100;
+    canvas.fillRoundRect(BAR_X, y, BAR_W, BAR_H, BAR_H / 2, C_ZINC800);
+    if (fillW > 0) canvas.fillRoundRect(BAR_X, y, max(fillW, BAR_H), BAR_H, BAR_H / 2, sel->on ? sel->color : C_ZINC700);
+    int tx = BAR_X + fillW;
+    canvas.fillRoundRect(tx - 2, y - 4, 4, BAR_H + 8, 2, active ? C_PURPLE : C_WHITE);
+    snprintf(buf, sizeof buf, "%d%%", sel->bri);
+    text(BAR_X + BAR_W + 8, y + BAR_H / 2, buf, active ? C_WHITE : C_ZINC400, textdatum_t::middle_left);
+  }
 }
 
 String lastReadoutId;   // keep showing the last orb while it fades out
@@ -401,7 +482,7 @@ void drawRotReadout() {
   if (!rotFader.visible()) return;
   char buf[24]; snprintf(buf, sizeof buf, "HUE %+d", (int)roundf(-normDegSigned(rotShown)));
   ditherText(CX, READOUT_Y, "TURN", C_ZINC400, textdatum_t::top_center, rotFader.alpha(), false);
-  ditherText(CX, READOUT_Y + 11, buf, C_WHITE, textdatum_t::top_center, rotFader.alpha(), false);
+  ditherText(CX, READOUT_Y + LINE_H, buf, C_WHITE, textdatum_t::top_center, rotFader.alpha(), false);
 }
 
 void drawReadout() {
@@ -413,65 +494,66 @@ void drawReadout() {
   if (name.length() > 18) name = name.substring(0, 18);
   float a = readoutFader.alpha();
   ditherText(CX, READOUT_Y, name.c_str(), dragging ? C_WHITE : C_ZINC400, textdatum_t::top_center, a, false);
-  ditherText(CX, READOUT_Y + 11, buf, dragging ? C_PURPLE : C_ZINC500, textdatum_t::top_center, a, false);
+  ditherText(CX, READOUT_Y + LINE_H, buf, dragging ? C_PURPLE : C_ZINC500, textdatum_t::top_center, a, false);
 }
 
 void drawRipples(uint32_t now) {
   for (auto it = ripples.begin(); it != ripples.end();) {
     float t = (now - it->start) / 450.f;
-    if (t >= 1.f) { it = ripples.erase(it); continue; }
+    if (t >= 1.f) { if (viewY == 0) { it = ripples.erase(it); } else { ++it; } continue; }
     float e = 1.f - (1.f - t) * (1.f - t);         // ease-out
     int rx = 4 + (int)(30 * e), ry = (int)(rx * SQUASH);
-    frame.drawEllipse(sx(it->wx), sy(it->wy, 0), rx, ry, blend(C_BG, it->color, 1.f - t));
+    canvas.drawEllipse(sx(it->wx), sy(it->wy, 0), rx, ry, blend(C_BG, it->color, 1.f - t));
     ++it;
   }
 }
+
+int orbHalf() { float e = floorFill * floorFill * (3.f - 2.f * floorFill); return (int)roundf(ORB_R * (0.7f + 0.3f * e)); }
 
 void drawOrb(Orb& o, uint32_t now) {
   const bool sel = (o.id == selectedId);
   const bool drag = sel && dragging;
   const float bob = o.on ? sinf(now * 0.0016f + o.phase) * 1.5f : 0.f;
   const int X = sx(o.x), Yf = sy(o.y, 0), Y = sy(o.y, o.z + bob);
+  const int r = orbHalf();
 
   // dropper ring on the floor: hollow, with a white point at the centre
-  frame.drawEllipse(X, Yf, 9, 5, blend(C_BG, C_WHITE, o.on ? 0.8f : 0.25f));
-  frame.fillRect(X - 1, Yf - 1, 2, 2, o.on ? C_WHITE : blend(C_BG, C_WHITE, 0.4f));
+  canvas.drawEllipse(X, Yf, (int)(9 * SX), (int)(5 * SX), blend(C_BG, C_WHITE, o.on ? 0.8f : 0.25f));
+  canvas.fillRect(X - 1, Yf - 1, 2, 2, o.on ? C_WHITE : blend(C_BG, C_WHITE, 0.4f));
 
-  // marching dotted projection line
-  if (o.on && Y + ORB_R + 3 < Yf - 3) {
-    const int period = drag ? 5 : 7;
-    const int off = (now / (drag ? 28 : 55)) % period;
-    uint32_t dot = blend(C_BG, C_WHITE, 0.75f);
-    for (int y = Y + ORB_R + 3 + off; y < Yf - 3; y += period) frame.fillRect(X, y, 2, 2, dot);
+  // projection line: 1 px dots, 1 on / 3 off, drifting slowly upward
+  if (o.on && Y + r + 1 < Yf - 2) {
+    const int off = (now / 120) % 4;
+    for (int y = Yf - 2 - off; y > Y + r + 1; y -= 4) canvas.drawPixel(X, y, C_WHITE);
   }
 
-  // the orb
+  // the handle: a square
   if (o.on) {
-    frame.fillCircle(X, Y, ORB_R + 4, blend(C_BG, o.color, 0.18f));   // faint halo
-    frame.fillCircle(X, Y, ORB_R, o.color);
-    frame.drawCircle(X, Y, ORB_R, C_WHITE);
-    frame.drawCircle(X, Y, ORB_R + 1, blend(C_BG, C_WHITE, 0.5f));
+    canvas.fillRect(X - r, Y - r, 2 * r + 1, 2 * r + 1, o.color);
+    canvas.drawRect(X - r, Y - r, 2 * r + 1, 2 * r + 1, C_WHITE);             // white border
+    canvas.drawRect(X - r - 1, Y - r - 1, 2 * r + 3, 2 * r + 3, 0x000000);   // black keyline outside it
   } else {
-    frame.fillCircle(X, Y, ORB_R, C_ZINC800);
-    frame.drawCircle(X, Y, ORB_R, blend(C_BG, C_WHITE, 0.45f));
+    canvas.fillRect(X - r, Y - r, 2 * r + 1, 2 * r + 1, C_ZINC800);
+    canvas.drawRect(X - r, Y - r, 2 * r + 1, 2 * r + 1, blend(C_BG, C_WHITE, 0.45f));
   }
 
-  // floating name when nothing is selected (dissolves in/out)
+  // floating name when nothing is selected (painted later, on top of every handle)
   if (o.on && namesFader.visible()) {
     String n = o.name; n.toLowerCase();
-    ditherText(X, Y - ORB_R - 5, n.c_str(), blend(C_BG, C_WHITE, 0.85f), textdatum_t::bottom_center, namesFader.alpha(), true);
+    labels.push_back({X, Y - r - 5, n, blend(C_BG, C_WHITE, 0.85f), namesFader.alpha()});
   }
 
-  // selection ring (pulsing) / long-press charge ring
+  // selection frame (pulsing) / long-press charge ring
   if (sel) {
     float pulse = 0.55f + 0.45f * sinf(now * 0.006f);
-    frame.drawCircle(X, Y, ORB_R + (drag ? 7 : 5), blend(C_BG, C_WHITE, pulse));
+    int g = drag ? 7 : 5;
+    canvas.drawRect(X - r - g, Y - r - g, 2 * (r + g) + 1, 2 * (r + g) + 1, blend(C_BG, C_WHITE, pulse));
   }
   if (hold == Hold::Orb && holdId == o.id && !dragging && !longFired && now - downMs > HOLD_GRACE_MS) {
     float p = fminf(1.f, (now - downMs - HOLD_GRACE_MS) / (float)HOLD_CHARGE_MS);
     // thick ring, radius chosen to poke out around a fingertip
-    frame.fillArc(X, Y, ORB_R + 14, ORB_R + 20, 0, 360, blend(C_BG, C_WHITE, 0.18f));
-    frame.fillArc(X, Y, ORB_R + 14, ORB_R + 20, -90, -90 + (int)(p * 360), C_WHITE);
+    canvas.fillArc(X, Y, r + 14, r + 20, 0, 360, blend(C_BG, C_WHITE, 0.18f));
+    canvas.fillArc(X, Y, r + 14, r + 20, -90, -90 + (int)(p * 360), C_WHITE);
   }
 }
 
@@ -482,36 +564,119 @@ void drawStatus() {
     char buf[24]; snprintf(buf, sizeof buf, "%d OFFLINE", offlineCount);
     ditherText(CX, STATUS_Y, buf, C_ZINC700, textdatum_t::bottom_center, roomFader.alpha(), false);
   }
-  frame.fillCircle(W - 7, STATUS_Y - 4, 2, online ? C_GREEN : C_RED);
+  canvas.fillCircle(W - 7, STATUS_Y - 4, 2, online ? C_GREEN : C_RED);
   String st = lastStatusText; st.toUpperCase();
   ditherText(W - 13, STATUS_Y, st.c_str(), C_ZINC500, textdatum_t::bottom_right, statusFader.alpha(), false);
-  if (!online) frame.drawRoundRect(0, 0, W, H, 4, C_RED);
+  if (!online) canvas.drawRoundRect(0, 0, W, H, 4, C_RED);
+}
+
+// wisps: particles born on a dropper ring's edge that spiral up and fade
+struct Wisp { bool alive = false; String id; float theta, radius, rise, life, seed; };
+constexpr int WISP_MAX = 240;
+Wisp wisps[WISP_MAX];
+uint32_t lastWispMs = 0;
+
+void spawnWisps(uint32_t now) {
+  // a few wisps per frame, each from a random lit light's ring edge
+  int lit = 0; for (auto& o : orbs) if (o.on) lit++;
+  if (!lit) return;
+  for (int k = 0; k < 2; k++) {
+    int pick = rand() % lit;
+    Orb* src = nullptr;
+    for (auto& o : orbs) { if (!o.on) continue; if (pick-- == 0) { src = &o; break; } }
+    if (!src) return;
+    for (auto& w : wisps) {
+      if (w.alive) continue;
+      w.alive = true; w.id = src->id;
+      w.theta = (rand() % 628) / 100.f;
+      w.radius = 9.f * SX; w.rise = 0.f; w.life = 0.f;
+      w.seed = (rand() % 100) / 100.f;
+      break;
+    }
+  }
+}
+
+void drawWisps(float dt, bool advance) {
+  const float converge = 0.30f * ZMAX;             // height by which a wisp has closed in on the line
+  for (auto& w : wisps) {
+    if (!w.alive) continue;
+    Orb* o = findOrb(w.id);
+    if (!o || !o->on) { w.alive = false; continue; }
+    if (advance) {
+      w.life += dt;
+      // slow climb with a little surging; spin speed wanders
+      w.rise  += dt * (11.f + 6.f * w.seed) * SY * (0.8f + 0.4f * sinf(w.life * 2.1f + w.seed * 9.f));
+      w.theta += dt * (1.4f + 1.2f * w.seed) * (0.7f + 0.6f * sinf(w.life * 1.3f + w.seed * 5.f));
+    }
+    float k = fminf(1.f, w.rise / converge);
+    k = k * k * (3.f - 2.f * k);                    // ease in-out: lingers wide, then closes (no cone)
+    // never dead centre: a wandering orbit of 1.5..4 px around the line ...
+    float wander = 2.7f + 1.3f * sinf(w.life * 1.7f + w.seed * 11.f);
+    float excursion = (w.seed > 0.7f ? 4.f : 0.f) * sinf(w.life * 0.9f);   // some wisps roam wider
+    // ... that braids into a near-unified strand over the top ~30 % of the climb
+    float f = w.rise / fmaxf(o->z, 1.f);
+    float tight = fmaxf(0.f, fminf(1.f, (f - 0.6f) / 0.25f)); tight = tight * tight * (3.f - 2.f * tight);
+    wander *= 1.f - 0.92f * tight;                                           // ~0.3 px orbit at the top
+    excursion *= 1.f - 0.85f * tight;                                        // a few still poke out
+    w.radius = 9.f * SX * (1.f - k) + wander + fabsf(excursion) * (1.f - k * 0.5f);
+    if (advance && w.rise > o->z + 2.f) { w.alive = false; continue; }   // reached the handle
+    float a = fminf(1.f, w.life / 0.3f);            // quick fade-in, then full white
+    int X = sx(o->x) + (int)roundf(w.radius * cosf(w.theta));
+    int Y = sy(o->y, 0) + (int)roundf(w.radius * sinf(w.theta) * SQUASH) - (int)w.rise;
+    canvas.drawPixel(X, Y, blend(C_BG, C_WHITE, a));
+  }
+}
+
+float wispDt = 0.f;
+void clearFrame() {
+  uint16_t* dst = (uint16_t*)frame.getBuffer();
+  const float R2in = (R - 1.5f) * (R - 1.5f);
+  for (int y = viewY; y < viewY + BAND_H; y++) {
+    uint16_t* row = dst + (y - viewY) * W;
+    float v = (y + 0.5f - CY) / SQUASH;
+    float rem = R2in - v * v;
+    if (y < CY - RY || y >= CY + RY || rem <= 0) { memset(row, 0, W * 2); continue; }
+    int hw = (int)sqrtf(rem);
+    int xl = max(CX - RX, CX - hw), xr = min(CX + RX - 1, CX + hw);
+    memset(row, 0, xl * 2);                               // left of the disc
+    memset(row + xr + 1, 0, (W - xr - 1) * 2);            // right of the disc
+  }
 }
 
 void render(uint32_t now) {
-  frame.fillScreen(C_BG);
   uint32_t t0 = micros();
-  blitFloor();
+  updateFloorCache();                                     // once per frame
   renderAccumUs += micros() - t0; renderFrames++;
-  if (rotPhase == RotPhase::Dragging) {
-    // rim highlight under the finger
-    int a0 = (int)(rimTouchAngle - 90.f - 18.f), a1 = a0 + 36;   // fillArc uses screen angles (0 = right)
-    frame.fillEllipseArc(CX, CY, RX + 2, RX - 1, RY + 2, RY - 1, a0, a1, blend(C_BG, C_WHITE, 0.9f));
+
+  for (int band = 0; band < BANDS; band++) {
+    viewY = band * BAND_H;
+    clearFrame();                                         // the floor cache fills the disc itself
+    pushFloorCache();
+    drawRipples(now);
+    drawWisps(wispDt, band == 0);
+
+    // painter's order: far (top of screen) first; dragged/selected orb last
+    std::vector<Orb*> order;
+    for (auto& o : orbs) order.push_back(&o);
+    std::sort(order.begin(), order.end(), [](Orb* a, Orb* b) { return a->y < b->y; });
+    labels.clear();
+    for (Orb* o : order) if (o->id != selectedId) drawOrb(*o, now);
+    if (Orb* o = findOrb(selectedId)) drawOrb(*o, now);
+    for (auto& L : labels) {
+      scratch.setFont(UI_FONT);
+      scratch.setTextSize(TS);
+      int half = scratch.textWidth(L.text.c_str()) / 2 + 3;
+      int x = constrain(L.x, half, W - half);            // push in from the edges
+      ditherText(x, L.y, L.text.c_str(), L.color, textdatum_t::bottom_center, L.alpha, true);
+    }
+
+    drawBar(now);
+    drawReadout();
+    drawRotReadout();
+    drawStatus();
+    frame.pushSprite(0, viewY);
   }
-  drawRipples(now);
-
-  // painter's order: far (top of screen) first; dragged/selected orb last
-  std::vector<Orb*> order;
-  for (auto& o : orbs) order.push_back(&o);
-  std::sort(order.begin(), order.end(), [](Orb* a, Orb* b) { return a->y < b->y; });
-  for (Orb* o : order) if (o->id != selectedId) drawOrb(*o, now);
-  if (Orb* o = findOrb(selectedId)) drawOrb(*o, now);
-
-  drawBar(now);
-  drawReadout();
-  drawRotReadout();
-  drawStatus();
-  frame.pushSprite(0, 0);
+  viewY = 0;
 }
 
 void animate(float dt) {
@@ -537,6 +702,7 @@ void animate(float dt) {
     }
     default: break;
   }
+  spawnWisps(now); wispDt = dt;
   const bool wheelMoving = rotPhase != RotPhase::Idle;
   const bool awake = hold != Hold::None || wheelMoving || (now - lastInteractMs < FLOOR_AWAKE_MS);
   floorFill += ((awake ? 1.f : 0.f) - floorFill) * fminf(1.f, dt * (awake ? 7.f : 3.f));
@@ -566,8 +732,12 @@ Orb* orbAt(int x, int y, uint32_t now) {
 }
 
 void applyBar(int x) {
-  int newMax = constrain((x - BAR_X) * 100 / BAR_W, 1, 100);
-  for (auto& r : barRatios) net::setBrightness(r.id, max(1, (int)roundf(newMax * r.ratio)));
+  int v = constrain((x - BAR_X) * 100 / BAR_W, 1, 100);
+  if (barSingle) {
+    if (Orb* o = findOrb(selectedId)) { o->bri = v; net::setBrightness(o->id, v); }
+    return;
+  }
+  for (auto& r : barRatios) net::setBrightness(r.id, max(1, (int)roundf(v * r.ratio)));
 }
 
 void onDown(int x, int y, uint32_t now) {
@@ -577,8 +747,10 @@ void onDown(int x, int y, uint32_t now) {
     grabDX = sx(o->x) - x; grabDY = sy(o->y, o->z) - y;
     return;
   }
-  if (y <= BAR_Y + BAR_H + 16 && x >= BAR_X - 12 && x <= BAR_X + BAR_W + 12) {
+  if (y <= BAR_Y + BAR_DROP + BAR_H + 16 && x >= BAR_X - 12 && x <= BAR_X + BAR_W + 12) {
     hold = Hold::Bar;
+    barSingle = selectedId.length() > 0 && findOrb(selectedId) != nullptr;   // selected light -> its own slider; global is paused
+    lastInteractMs = now;
     barRatios.clear();
     int m = maxBrightness();
     for (auto& l : lights) if (l.on && l.reachable) barRatios.push_back({l.id, m > 0 ? (float)l.brightness / m : 1.f});
@@ -598,7 +770,7 @@ void onDown(int x, int y, uint32_t now) {
       rotOrbs.clear();
       for (auto& o : orbs) {
         if (!o.on) continue;
-        rotOrbs.push_back({o.id, normDeg(o.h + wheelRot)});   // screen angle it must keep
+        rotOrbs.push_back({o.id, normDeg(o.hf + wheelRot)});  // screen angle it must keep
         net::startControlling(o.id);
       }
       return;
@@ -625,10 +797,12 @@ void onMove(int x, int y, uint32_t now) {
     // finger + grab offset -> floor coords at the orb's (locked) height
     float wx = (x + grabDX) - CX;
     float wy = ((y + grabDY) - CY + o->z) / SQUASH;
-    int h, s; worldToHs(wx, wy, h, s);
-    hsToWorld(h, s, o->x, o->y);           // clamps to the rim
-    o->tx = o->x; o->ty = o->y; o->h = h; o->s = s; o->color = hsvToRgb888(h, s, 100);
-    net::setColor(o->id, h, s);
+    float hf, sf; worldToHsF(wx, wy, hf, sf);
+    o->hf = hf; o->sf = sf;
+    hsToWorldF(hf, sf, o->x, o->y);        // clamps to the rim, no integer steps
+    o->tx = o->x; o->ty = o->y;
+    int h = (int)roundf(hf) % 360, s = (int)roundf(sf);
+    if (h != o->h || s != o->s) { o->h = h; o->s = s; o->color = hsvToRgb888(hf, sf, 100); net::setColor(o->id, h, s); }
   } else if (hold == Hold::Bar) {
     applyBar(x);
   } else if (hold == Hold::Rim) {
@@ -640,8 +814,9 @@ void onMove(int x, int y, uint32_t now) {
     for (auto& ro : rotOrbs) {
       Orb* o = findOrb(ro.id);
       if (!o) continue;
-      int h = (int)roundf(normDeg(ro.angle0 - wheelRot)) % 360;
-      if (h != o->h) { o->h = h; o->color = hsvToRgb888(h, o->s, 100); net::setColor(o->id, h, o->s); }
+      o->hf = normDeg(ro.angle0 - wheelRot);
+      int h = (int)roundf(o->hf) % 360;
+      if (h != o->h) { o->h = h; o->color = hsvToRgb888(o->hf, o->sf, 100); net::setColor(o->id, h, o->s); }
     }
   }
 }
@@ -683,11 +858,16 @@ void begin() {
 
   frame.setColorDepth(16);
   frame.setPsram(false);                       // internal RAM if it fits (fast), else PSRAM
-  if (!frame.createSprite(W, H)) {
+  if (!frame.createSprite(W, BAND_H)) {
     frame.setPsram(true);
-    if (!frame.createSprite(W, H)) Serial.println("[ui] frame sprite alloc FAILED");
-    else Serial.println("[ui] frame in PSRAM");
-  } else Serial.println("[ui] frame in internal RAM");
+    if (!frame.createSprite(W, BAND_H)) {
+      Serial.println("[ui] frame sprite alloc FAILED (no PSRAM?) — halting");
+      lcd.setTextColor(C_RED, C_BG);
+      lcd.drawString("no PSRAM - check board env", W / 2, H / 2 + 20);
+      for (;;) delay(1000);
+    }
+    Serial.println("[ui] frame band in PSRAM");
+  } else Serial.printf("[ui] frame band in internal RAM (%d band%s of %d rows)\n", BANDS, BANDS > 1 ? "s" : "", BAND_H);
   buildFloor();
   scratch.setColorDepth(16);
   scratch.createSprite(SCRATCH_W, SCRATCH_H);
