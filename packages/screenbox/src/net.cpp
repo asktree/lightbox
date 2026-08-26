@@ -19,6 +19,14 @@ static const char* ROOM_LIGHT_IDS[] = {
 };
 static constexpr size_t ROOM_LIGHT_COUNT = sizeof(ROOM_LIGHT_IDS) / sizeof(ROOM_LIGHT_IDS[0]);
 
+// Short names for the panel (server names are long / inconsistent)
+static const char* DISPLAY_NAMES[ROOM_LIGHT_COUNT] = {
+  "couch lamp", "iris",
+  nullptr, "under tv",
+  nullptr, nullptr,
+  "kitchen",
+};
+
 static SemaphoreHandle_t   s_mutex;
 static std::vector<Light>  s_lights;
 static volatile uint32_t   s_version = 0;
@@ -70,6 +78,7 @@ static Light parseLight(JsonObjectConst o) {
   Light l;
   l.id    = o["id"].as<const char*>();
   l.name  = o["name"].as<const char*>();
+  { int idx = roomIndex(l.id.c_str()); if (idx >= 0 && DISPLAY_NAMES[idx]) l.name = DISPLAY_NAMES[idx]; }
   l.brand = o["brand"].as<const char*>();
   l.reachable = o["reachable"] | false;
   for (JsonVariantConst c : o["capabilities"].as<JsonArrayConst>()) {
