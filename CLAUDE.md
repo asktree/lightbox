@@ -9,6 +9,9 @@ pipeline, and audio-reactive light drives.
 pnpm install
 pnpm dev        # Run all packages in dev mode (see Dev Server Management)
 pnpm build      # Build all packages
+pnpm screenbox:flash    # Build + flash the ESP32 touch panel over USB-C
+pnpm screenbox:ota      # Build + flash the panel over Wi-Fi (screenbox.local)
+pnpm screenbox:monitor  # Serial output from the panel
 pnpm kill       # Kill all dev processes
 pnpm redev      # Kill and restart dev (named `redev` to avoid pnpm's `restart`
                 # lifecycle which implicitly requires `stop`/`start` scripts)
@@ -41,7 +44,8 @@ packages/
 ├── musicbox2/      # Spotify console UI :5175
 ├── music-scraper/  # Python: scraper CLI, ingest (zotify+demucs), autopilot daemon
 ├── twinklybox/     # WLED/DDP patterns :3010/:5180
-└── curtainbox/     # Govee curtain client :3020/:5190
+├── curtainbox/     # Govee curtain client :3020/:5190
+└── screenbox/      # ESP32-S3 touch-panel firmware (PlatformIO/C++, not JS)
 ```
 
 ## Dev Server Management (for Claude)
@@ -119,6 +123,27 @@ Latency: per-light offsets come from mic/webcam ground-truth measurement
 from eyeballed sliders. Mic/camera probes must run from a GUI-session
 process (TCC silently zeroes them over ssh).
 
+## Screenbox (physical touch panel)
+
+Firmware for a Wireless-Tag **WT32S3-28S PRO** (internal model `ZX2D80CE02S`,
+PanelLan `SC05_X`): ESP32-S3, 8 MB flash / 2 MB PSRAM, 2.8" 240×320 ST7789 on
+an 8-bit 8080 bus, FT5x06 touch. Lives in `packages/screenbox/` and is **not**
+part of `pnpm dev`/`pnpm build` — it has its own `compile`/`flash`/`monitor`
+scripts that wrap PlatformIO (`pip3 install platformio intelhex`).
+
+- Flash over the board's own USB-C port (shows up as `/dev/cu.usbmodem*`,
+  Espressif USB JTAG/serial). No BOOT button dance needed. Once online it
+  also accepts OTA uploads as `screenbox.local` (`pnpm screenbox:ota`).
+- Wi-Fi/server config lives in gitignored `packages/screenbox/include/secrets.h`
+  (template: `secrets.example.h`). The panel should point at **hearth**, the
+  always-on server Mac (`LIGHTBOX_HOST "hearth.local"`). Setup steps for a
+  session on hearth: `packages/screenbox/README.md` → "Running it from hearth".
+- Pin map + LovyanGFX display/touch config: `packages/screenbox/src/board.h`.
+  Datasheet in `packages/screenbox/docs/`.
+- Search the web for "ZX2D80CE02S" or "SC05_X", not "WT32S3-28S PRO".
+- Vendor's ZXACC-ESPDB burn tool (plugs into the 7-pin debug header) is only a
+  fallback for a bricked USB port.
+
 ## Light Integrations
 
 ### Hue (via Bridge)
@@ -166,12 +191,24 @@ polling once earned a 13.5h extended 429 — hence idle polling decay and
 retries=0 (urllib3's in-call Retry-After sleep is what wedged the daemon).
 Token cache is shared across processes; writes are atomic (temp+rename).
 
-## Color Accuracy Notes
+## Color Accuracy
 
-- Hue's proprietary hs scale (Red=0, Green=25500, Blue=46920), not standard
-  HSV; color/temperature mutually exclusive modes
-- SUNVIE Tuya and Hue are on different color spaces; close enough for now
-- Future: CIE xy with per-bulb gamut handling (Hue gamuts A/B/C)
+The UI model is HSV `{h, s}` on a wheel (angle = hue, radius = saturation, V=100) and
+the wheel renders sRGB. **Accuracy = the bulb shows the sRGB colour you see on the wheel.**
+
+- Colour maths lives in `packages/shared/src/color.ts`: `hsToXy`/`xyToHs` (via sRGB),
+  `xyToRgb`/`rgbToXy`, gamut triangles (`GAMUTS.hueC` — every current Hue bulb on the
+  bridge is Gamut C — plus `hueA`, `hueB`, `srgb`) with `clipToGamut`, and whites
+  (`kelvinToXy`, `xyToKelvin`, `planckianLocus`). Also `spectralLocus()` if a CIE
+  diagram view is ever wanted (we tried it; too green-heavy to be a useful UI).
+- **Hue driver sends native `xy`** = chromaticity of the sRGB colour, clipped to the bulb's
+  reported gamut — *not* Hue's `hue`/`sat`, whose scale is bulb-defined and doesn't match
+  the wheel. Inbound (v1 state and v2 EventStream) reads `xy` back through the exact
+  inverse, so round trips are the identity and Hue matches WiZ/Tuya, which get the same
+  sRGB. (Old code sent a piecewise hue/sat guess and read xy back through a different
+  path, so pins twitched after every drag — the client's 1 s echo cooldown hid it.)
+- WiZ/Govee: `hsvToRgb` → sRGB bytes. Tuya: HSV natively (its scale is close to sRGB HSV).
+- Hue colour/temperature modes are mutually exclusive.
 
 ## Open Threads
 
