@@ -25,7 +25,7 @@ constexpr float CORE_T0   = 0.81f;                     // brightest point along 
 constexpr float BAR_T     = CORE_T0 + (1.f - CORE_T0) * 0.25f;   // where the crossbar sits
 float CORE_T = CORE_T0;                                // runtime: teardrop mode moves the core down to the bar
 // modes (tap outside the centre: left half cycles cross, right half toggles flame)
-int  crossMode = 2;                                    // 0 gash, 2 cross (core lowered to the bar, teardrop halo, crossbar)
+int  crossMode = 0;                                    // 0 gash, 2 cross (core lowered to the bar, teardrop halo, crossbar)
 int  flameMode = 1;                                    // 0 steady, 1 candle (mostly full, dips to 85%), 2 flame (ragged, skewed bright), 3 strobe
 float flick = 1.f;                                     // per-frame flame multiplier
 bool  rockOn = true;                                   // boat camera (bottom-band tap toggles)
