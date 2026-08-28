@@ -24,6 +24,10 @@
     "comet_b:35:ota": "pio run -e comet_b35_ota -t upload",
     "comet_c:28:ota": "pio run -e comet_c28_ota -t upload",
     "comet_c:35:ota": "pio run -e comet_c35_ota -t upload",
+    "tunnel:28:ota": "pio run -e tunnel28_ota -t upload",
+    "tunnel:35:ota": "pio run -e tunnel35_ota -t upload",
+    "picture:28:ota": "pio run -e picture28_ota -t upload",
+    "picture:35:ota": "pio run -e picture35_ota -t upload",
     "monitor": "pio device monitor"
   }
 }
