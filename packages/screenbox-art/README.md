@@ -19,7 +19,7 @@ reflashable over the air — no USB needed once a panel is online.
 | `comet` | vertical light streak in a starry sky, spray with trails, sparkle-field ocean, boat-rock camera. Greyscale. | drag = look around; look all the way up |
 | `comet_d` / `comet_d3` | comet, 1-bit / 3-level ordered dither | tap toggles 2 <-> 3 levels |
 | `comet_r` / `comet_b` | comet through a red / blue tone curve (white -> tint -> black) | |
-| `comet_c` | comet with a bank of tone curves (`tools/gen_curves.py` -> `src/comet/curves.h`); boots on `abyss` | centre tap cycles palettes |
+| `comet_c` | comet with a bank of tone curves (`tools/gen_curves.py` -> `src/comet/curves.h`); boots on `abyss` | centre tap: palette · left: gash/cross · right: steady/candle/flame/strobe · bottom band: boat rock on/off |
 
 Tone curves for `comet_c` are designed in the **Comet Tone Curves** web tool
 (a claude.ai artifact: live JS port of the sketch + R/G/B spline editors +

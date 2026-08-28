@@ -21,7 +21,14 @@ constexpr int   WATER_H   = H - HORIZON;
 constexpr float LINE_TOP  = H * 0.086f;                // whole streak shifted down (gap to water -33%)
 constexpr float LINE_BOT  = H * 0.566f;
 constexpr float LINE_LEN  = LINE_BOT - LINE_TOP;
-constexpr float CORE_T    = 0.81f;                     // brightest point along the line (0 top .. 1 bottom)
+constexpr float CORE_T0   = 0.81f;                     // brightest point along the line (0 top .. 1 bottom)
+constexpr float BAR_T     = CORE_T0 + (1.f - CORE_T0) * 0.25f;   // where the crossbar sits
+float CORE_T = CORE_T0;                                // runtime: teardrop mode moves the core down to the bar
+// modes (tap outside the centre: left half cycles cross, right half toggles flame)
+int  crossMode = 2;                                    // 0 gash, 2 cross (core lowered to the bar, teardrop halo, crossbar)
+int  flameMode = 1;                                    // 0 steady, 1 candle (mostly full, dips to 85%), 2 flame (ragged, skewed bright), 3 strobe
+float flick = 1.f;                                     // per-frame flame multiplier
+bool  rockOn = true;                                   // boat camera (bottom-band tap toggles)
 constexpr float HW_MAX    = W * 0.030f;                // glow half-width at the core
 constexpr float HALO_R    = W * 0.42f;                 // big soft halo radius
 constexpr int   N_STARS   = (W >= 320) ? 1300 : 800;
@@ -83,6 +90,7 @@ inline float sinAt(uint32_t phase) { return sinLut[(phase >> 8) & 0xFF] * (1.f /
 // Tone -> plain RGB565 (for setTextColor, which LGFX converts itself).
 inline uint16_t toneColor565(int g) { uint16_t v = grayRaw[g < 0 ? 0 : g > 255 ? 255 : g]; return swapBytes ? __builtin_bswap16(v) : v; }
 uint32_t labelUntil = 1500;
+const char* modeLabel = nullptr;
 float panX = 0, panY = 0;                              // current look-pan (logical px)
 void buildToneLut();
 void buildLuts() {
@@ -97,7 +105,7 @@ void buildLuts() {
 
 #if COMET_CURVE
 #include "curves.h"                                    // bank from tools/gen_curves.py
-int curveIdx = 7;                                      // boot on abyss; a centre tap cycles
+int curveIdx = 0;                                      // boot on abyss (first in the bank); a centre tap cycles
 #endif
 void buildToneLut() {
   for (int g = 0; g < 256; g++) {
@@ -149,6 +157,7 @@ float coreX = W * 0.5f, coreXTarget = W * 0.5f;
 float breathe = 1.f;
 
 inline float lineY(float t) { return LINE_TOP + t * LINE_LEN; }
+inline void buildStreakProfile() {}                   // profile is evaluated per row from CORE_T
 // half-width of the glow along the line
 inline float halfWidth(float t) {
   float d = (t - CORE_T) / 0.20f;
@@ -160,7 +169,7 @@ inline float halfWidth(float t) {
 inline float peak(float t) {
   float d = (t - CORE_T) / 0.26f;
   float body = expf(-d * d);
-  float head = t < 0.06f ? t / 0.06f : 1.f;           // fade in at the very top
+  float head = (t < 0.06f ? t / 0.06f : 1.f) * flick;   // fade in at the very top; flame flicker
   // the thin upper part stays bright white, ramping up toward the core; only the
   // lower tail below the core dims off
   float floorB = t < 0.3f ? 0.30f + 0.32f * (t / 0.3f)
@@ -218,16 +227,25 @@ void drawStars(float dt, uint32_t now) {
 // 8-bit image and painted with direct writes right after the clear -- no exp,
 // no read-modify-write per pixel. Breathing modulates brightness, not radius.
 constexpr int HALO_D = (int)(HALO_R * 1.08f) * 2 + 1;   // a little margin for the breathe
-uint8_t* haloImg = nullptr;
+uint8_t* haloImg = nullptr;                            // ellipse (default)
+uint8_t* haloTear = nullptr;                           // teardrop: stretched upward, tight below
 void buildHalo() {
   haloImg = (uint8_t*)malloc(HALO_D * HALO_D);
+  haloTear = (uint8_t*)heap_caps_malloc(HALO_D * HALO_D, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!haloTear) haloTear = (uint8_t*)malloc(HALO_D * HALO_D);
   const float c = HALO_D / 2, invR2 = 1.f / (HALO_R * HALO_R);
   for (int y = 0; y < HALO_D; y++) {
-    float dy2 = (y - c) * (y - c) * 0.7f;
+    float dy = y - c;
+    float dy2 = dy * dy * 0.7f;
+    float dyT = dy < 0 ? dy * dy * 0.32f : dy * dy * 1.6f;   // teardrop: tail upward, blunt below
     for (int x = 0; x < HALO_D; x++) {
       float dx = x - c;
       int e = expAt((dx * dx + dy2) * invR2);
       haloImg[y * HALO_D + x] = e < 4 ? 0 : (e * 58) >> 8;   // max ~58 at the centre
+      // the teardrop narrows toward its tail: shrink the x radius above the core
+      float sx = dy < 0 ? 1.f / (1.f + (-dy / c) * 1.1f) : 1.f;
+      int eT = expAt((dx * dx / (sx * sx) + dyT) * invR2);
+      haloTear[y * HALO_D + x] = eT < 4 ? 0 : (eT * 58) >> 8;
     }
   }
 }
@@ -242,7 +260,7 @@ void buildWash() {
 }
 void drawBase() {
   const int cy = (int)lineY(CORE_T), cx = (int)coreX, c = HALO_D / 2;
-  const int gain = (int)(256 * (0.85f + 0.15f * breathe * breathe));
+  const int gain = (int)(256 * (0.85f + 0.15f * breathe * breathe) * flick);
   const int hy0 = max(0, cy - c), hy1 = min(HORIZON - 1, cy + c);
   const int hx0 = max(0, cx - c), hx1 = min(W - 1, cx + c);
   const int washRows = (int)(WASH_L * 4.f);
@@ -253,13 +271,41 @@ void drawBase() {
     bool inHalo = y >= hy0 && y <= hy1;
     if (!inHalo && !washA) continue;                   // stays black from the clear
     uint16_t* row = px(0, y);
-    const uint8_t* src = inHalo ? haloImg + (y - cy + c) * HALO_D + (hx0 - cx + c) : nullptr;
+    const uint8_t* img = crossMode >= 1 ? haloTear : haloImg;
+    const uint8_t* src = inHalo ? img + (y - cy + c) * HALO_D + (hx0 - cx + c) : nullptr;
     for (int x = 0; x < W; x++) {
       int g = 0;
       if (inHalo && x >= hx0 && x <= hx1) g = (src[x - hx0] * gain) >> 8;
       if (washA) g += (washA * washCol[x]) >> 16;
       if (g) row[x] = rawDither(g > 255 ? 255 : g, x, y);
     }
+  }
+}
+
+// Experiment: a short cross-bar through the brightest point, ~10% of the streak's
+// length, as thick as the streak's core, tapering to points at both ends.
+void drawCross() {
+  const float cy = lineY(BAR_T), half = LINE_LEN * 0.125f;   // 25% of the streak's length
+  const int cx = (int)(coreX + 0.5f);
+  for (int dx = -(int)half; dx <= (int)half; dx++) {
+    float u = fabsf(dx) / half;                        // 0 centre .. 1 tip
+    // spike profile like the streak's own: thickest at the crossing, tapering
+    // steadily to needle points, with the same tight gaussian glow -- no blob
+    float hw = (0.35f + HW_MAX * 0.5f * powf(1.f - u, 1.4f)) * breathe;
+    float pk = peak(CORE_T) * (1.f - 0.45f * u);
+    int coreG = (int)(255 * fminf(1.f, pk * 1.15f));
+    float ghw = hw * 1.5f;                             // more skirt than the streak's...
+    float whw = hw * 4.0f;                             // ...plus a faint, wide second skirt
+    int reach = (int)(whw * 3.f) + 1;
+    float invHw2 = 1.f / (ghw * ghw), invWw2 = 1.f / (whw * whw);
+    int x = cx + dx, yc = (int)(cy + 0.5f);
+    for (int dy = -reach; dy <= reach; dy++) {
+      // skirt held to 70% so the hot core stays a single pixel line, like the parent's
+      int e = (expAt(dy * dy * invHw2 * 0.25f) * 7) / 10 + (expAt(dy * dy * invWw2 * 0.25f) * 3) / 10;
+      int g = (int)(pk * e);
+      if (g > 2) plotMax(x, yc + dy, g > 255 ? 255 : g);
+    }
+    plotMax(x, yc, coreG);
   }
 }
 
@@ -289,11 +335,20 @@ struct Drop { float x, y, vx, vy, life, maxLife; uint8_t b; };
 Drop drops[N_SPRAY];
 
 void spawnDrop(Drop& d) {
-  float t = CORE_T + gauss() * 0.16f;
-  if (t < 0.05f) t = 0.05f; if (t > 0.98f) t = 0.98f;
-  float hw = halfWidth(t);
-  d.x = coreX + srand1() * hw * 0.6f;
-  d.y = lineY(t);
+  // origin follows the aura: around the core (lower and tighter in teardrop),
+  // and in cross mode a share is born along the crossbar
+  bool onBar = crossMode == 2 && frand() < 0.35f;
+  if (onBar) {
+    float half = LINE_LEN * 0.125f, u = srand1() * 0.85f;
+    d.x = coreX + u * half;
+    d.y = lineY(BAR_T) + srand1() * (0.35f + HW_MAX * 0.5f * powf(1.f - fabsf(u), 1.4f)) * 0.6f;
+  } else {
+    float t = crossMode >= 1 ? CORE_T + 0.02f + gauss() * 0.11f : CORE_T + gauss() * 0.16f;
+    if (t < 0.05f) t = 0.05f; if (t > 0.98f) t = 0.98f;
+    float hw = halfWidth(t);
+    d.x = coreX + srand1() * hw * 0.6f;
+    d.y = lineY(t);
+  }
   float a = frand() * 6.2832f;
   float sp = 6.f + 50.f * frand() * frand() * (1.f + BIG * 0.5f);
   d.vx = cosf(a) * sp * 1.35f;                         // spray a little wider than tall
@@ -388,11 +443,11 @@ void drawWater(uint32_t now) {
     // are crushed together toward the horizon and spread (and sweep faster on
     // screen) as they reach the viewer; amplitude fades out at the far end
     float dist = 1.f / (0.07f + t);                    // ~14 at the horizon .. ~0.93 at the bottom
-    float zw = dist * 3.2f;                            // world distance in swell wavelengths
+    float zw = dist * 2.13f;                           // world distance in swell wavelengths (50% longer swells)
     float swell = sinAt((uint32_t)(zw * 65536.f) - now * 26) * 0.7f + sinAt((uint32_t)(zw * 2.3f * 65536.f) + now * 41) * 0.3f;
     float swellAmp = (3.f + 9.f * t) * fminf(1.f, t * 4.f);
     int base = 14 + (int)(10.f * (1.f - t)) + (int)(swellAmp * swell);
-    float pool = 70.f * expf(-t / 0.10f);
+    float pool = 70.f * expf(-t / 0.10f) * flick;
     float poolW = W * 0.22f;
     uint16_t* dst = px(0, HORIZON + i);
     for (int x = 0; x < W; x++) {
@@ -411,7 +466,7 @@ void drawWater(uint32_t now) {
       if ((xr() & 511) == 0 || g.x < 0 || g.x >= W) spawnGlint(g);
       continue;
     }
-    int br = (int)(g.b * (s - 0.15f) / 0.85f);
+    int br = (int)(g.b * (s - 0.15f) / 0.85f * (0.35f + 0.65f * flick));   // the streak lights them: they flicker with it
     if (g.kind == 0 && g.t > 0.5f) br = br * 4 / 5;    // near strokes are broader but a bit softer
     int y = HORIZON + (int)(g.t * WATER_H);
     int len = 1 + (int)(g.t * (g.kind ? 9.f : 5.f) * (W / 240.f));
@@ -499,22 +554,59 @@ void loop() {
     if (centre) {                                                    // a tap near the centre cycles the tone curve
       curveIdx = (curveIdx + 1) % N_CURVES;
       buildToneLut();
-      labelUntil = now + 1500;
+      modeLabel = nullptr; labelUntil = now + 1500;
       Serial.printf("[comet] curve -> %s\n", CURVE_NAMES[curveIdx]);
     }
 #endif
+    if (downY > H * 3 / 4) {                                         // bottom band: boat rock on/off
+      rockOn = !rockOn;
+      modeLabel = rockOn ? "rocking" : "still"; labelUntil = now + 1500;
+    } else if (!centre) {
 #if COMET_DITHER
-    if (!centre) { ditherLevels = ditherLevels == 3 ? 2 : 3; Serial.printf("[comet] dither levels -> %d\n", ditherLevels); }
+      ditherLevels = ditherLevels == 3 ? 2 : 3; Serial.printf("[comet] dither levels -> %d\n", ditherLevels);
+#else
+      if (downX < W / 2) {                                           // left: cycle cross mode
+        crossMode = crossMode ? 0 : 2;                                 // gash <-> cross (cross = teardrop halo + bar)
+        CORE_T = crossMode ? BAR_T : CORE_T0;
+        buildStreakProfile();
+        modeLabel = crossMode ? "cross" : "gash"; labelUntil = now + 1500;
+      } else {                                                       // right: toggle flame flicker
+        flameMode = (flameMode + 1) % 4;
+        static const char* fnames[] = {"steady", "candle", "flame", "strobe"};
+        modeLabel = fnames[flameMode]; labelUntil = now + 1500;
+      }
 #endif
+    }
   }
   wasDown = down;
   coreX += (coreXTarget - coreX) * fminf(1.f, 4.f * dt);
   breathe = 1.f + 0.06f * sinf(t * 1.1f) + 0.03f * sinf(t * 2.7f);
+  static uint32_t frameNo = 0; frameNo++;
+  switch (flameMode) {
+    case 1: {  // candle: full power almost all the time, occasional soft dips, never below 85%
+      float n = 0.5f + 0.5f * (0.6f * sinf(t * 11.f) + 0.4f * sinf(t * 17.3f + 1.f));
+      float dip = n * n * n * n;                       // mostly ~0, brief excursions toward 1
+      flick = 1.f - 0.15f * dip - 0.01f * frand();
+      break;
+    }
+    case 2: {  // flame: ragged fast flicker skewed bright -- upward excursions are small, dips are deep
+      float v = 0.16f * sinf(t * 23.f) + 0.10f * sinf(t * 37.f + 1.f) + 0.06f * sinf(t * 7.3f);
+      float gust = 0.96f + 0.04f * sinf(t * 1.7f) * sinf(t * 0.6f + 2.f);
+      flick = (1.f + (v > 0 ? v * 0.15f : v * 1.4f)) * gust + (frand() - 0.5f) * 0.05f;
+      if (flick < 0.5f) flick = 0.5f; if (flick > 1.06f) flick = 1.06f;
+      break;
+    }
+    case 3:    // strobe: ~12 Hz square wave (20% slower than frame-alternate), dim level wobbles slowly
+      flick = ((now / 42) & 1) ? 1.f : 0.55f + 0.15f * sinf(t * 2.3f);
+      break;
+    default: flick = 1.f;
+  }
 
   frame.fillScreen(TFT_BLACK);
   drawBase();                                          // halo + wash: direct writes over black
   drawStars(dt, now);
   drawStreak();
+  if (crossMode == 2) drawCross();
   drawSpray(dt);
   drawWater(now);
 #if COMET_DITHER
@@ -523,7 +615,7 @@ void loop() {
   // the note at the very top of the frame, in the band the camera normally crops:
   // only readable when you look all the way up
   {
-    float a = (panY / PAN_UP - 0.6f) / 0.4f;
+    float a = (panY / PAN_UP - 0.45f) / 0.4f;
     if (a > 0.02f) {
       if (a > 1) a = 1;
       frame.setFont(&fonts::Font2); frame.setTextDatum(textdatum_t::top_center);
@@ -538,15 +630,17 @@ void loop() {
     if (a > 0.02f) {
       frame.setFont(&fonts::Font0); frame.setTextDatum(textdatum_t::bottom_left);
       frame.setTextColor(toneColor565((int)(230 * a)));   // the palette's own colour at 90% tone
-      frame.drawString(CURVE_NAMES[curveIdx], W / 10, H - H / 10);
+      frame.drawString(modeLabel ? modeLabel : CURVE_NAMES[curveIdx], W / 10, H - H / 10);
     }
   }
 #endif
   if (!ota::online()) plot(W - 2, 1, 90);
   // boat POV: slow roll + heave/pitch from a couple of incommensurate swells
-  float roll  = 2.2f * sinf(t * 0.61f) + 0.9f * sinf(t * 1.37f + 1.f);
-  float heave = 5.0f * sinf(t * 0.47f + 2.f) + 2.0f * sinf(t * 1.13f);
-  float sway  = 2.5f * sinf(t * 0.53f + 4.f);
+  static float rockAmt = 1.f;                              // eases in/out so toggling doesn't jolt
+  rockAmt += ((rockOn ? 1.f : 0.f) - rockAmt) * fminf(1.f, dt * 1.5f);
+  float roll  = (2.2f * sinf(t * 0.61f) + 0.9f * sinf(t * 1.37f + 1.f)) * rockAmt;
+  float heave = (5.0f * sinf(t * 0.47f + 2.f) + 2.0f * sinf(t * 1.13f)) * rockAmt;
+  float sway  = (2.5f * sinf(t * 0.53f + 4.f)) * rockAmt;
   float lookRoll = -panX / PAN_MAX_X * 1.2f;               // a touch of lean into the turn
   canvas::presentCamera(roll + lookRoll, sway + panX, heave + panY, CAM_ZOOM);
 

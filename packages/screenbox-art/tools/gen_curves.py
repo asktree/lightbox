@@ -52,6 +52,7 @@ def from_points(p): return mono(p['r']), mono(p['g']), mono(p['b'])
 def swap_rb(p): return {'r': p['b'], 'g': p['g'], 'b': p['r']}
 
 BANK = [
+    ("abyss",     from_points(USER6)),                     # near-black shadows, blue climbs first (default)
     ("silver",    ([g for g in range(256)],)*3),          # plain greyscale
     ("forge",     blackbody(1000, 6500)),                  # black body, 1000 K -> 6500 K
     ("bruise",    from_points(USER1)),                     # muted red, blue surges in the midtones
@@ -59,7 +60,6 @@ BANK = [
     ("fathom",    from_points(USER3)),                     # glacier with darker shadows
     ("orchid",    from_points(USER4)),                     # green pinned to zero: magenta ramp
     ("amber",     from_points(USER5)),                     # warm, blue only in the top quarter
-    ("abyss",     from_points(USER6)),                     # near-black shadows, blue climbs first
     ("cobalt",    from_points(USER7)),                     # pure blue, then snaps to white at ~50%
     ("cinder",    from_points(swap_rb(USER7))),            # cobalt with red and blue swapped
 ]
