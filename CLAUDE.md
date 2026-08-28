@@ -45,7 +45,8 @@ packages/
 ├── music-scraper/  # Python: scraper CLI, ingest (zotify+demucs), autopilot daemon
 ├── twinklybox/     # WLED/DDP patterns :3010/:5180
 ├── curtainbox/     # Govee curtain client :3020/:5190
-└── screenbox/      # ESP32-S3 touch-panel firmware (PlatformIO/C++, not JS)
+├── screenbox/      # ESP32-S3 touch-panel firmware (PlatformIO/C++, not JS)
+└── screenbox-art/  # Generative art sketches for the same panels (fish, comet)
 ```
 
 ## Dev Server Management (for Claude)
@@ -143,6 +144,11 @@ scripts that wrap PlatformIO (`pip3 install platformio intelhex`).
 - Search the web for "ZX2D80CE02S" or "SC05_X", not "WT32S3-28S PRO".
 - Vendor's ZXACC-ESPDB burn tool (plugs into the 7-pin debug header) is only a
   fallback for a bricked USB port.
+- PlatformIO on hearth lives in a venv (`~/.local/bin/pio`); Homebrew pip
+  refuses global installs.
+- `packages/screenbox-art/` holds art sketches (`pnpm art:<sketch>:<28|35>`)
+  that reuse the board configs + secrets and keep OTA alive. Flashing one
+  replaces the control UI on that panel until `pnpm screenbox[35]:ota`.
 
 ## Light Integrations
 

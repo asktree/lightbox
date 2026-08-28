@@ -1,0 +1,29 @@
+{
+  "name": "@lightbox/screenbox-art",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Generative art sketches for the screenbox ESP32-S3 touch panels (PlatformIO/C++). Shares board configs + secrets with ../screenbox.",
+  "scripts": {
+    "fish:28": "pio run -e fish28 -t upload",
+    "fish:28:ota": "pio run -e fish28_ota -t upload",
+    "fish:35": "pio run -e fish35 -t upload",
+    "fish:35:ota": "pio run -e fish35_ota -t upload",
+    "comet:28": "pio run -e comet28 -t upload",
+    "comet:28:ota": "pio run -e comet28_ota -t upload",
+    "comet:35": "pio run -e comet35 -t upload",
+    "comet:35:ota": "pio run -e comet35_ota -t upload",
+    "fish3d:28:ota": "pio run -e fish3d28_ota -t upload",
+    "fish3d:35:ota": "pio run -e fish3d35_ota -t upload",
+    "comet_d:28:ota": "pio run -e comet_d28_ota -t upload",
+    "comet_d:35:ota": "pio run -e comet_d35_ota -t upload",
+    "comet_d3:28:ota": "pio run -e comet_d3_28_ota -t upload",
+    "comet_d3:35:ota": "pio run -e comet_d3_35_ota -t upload",
+    "comet_r:28:ota": "pio run -e comet_r28_ota -t upload",
+    "comet_r:35:ota": "pio run -e comet_r35_ota -t upload",
+    "comet_b:28:ota": "pio run -e comet_b28_ota -t upload",
+    "comet_b:35:ota": "pio run -e comet_b35_ota -t upload",
+    "comet_c:28:ota": "pio run -e comet_c28_ota -t upload",
+    "comet_c:35:ota": "pio run -e comet_c35_ota -t upload",
+    "monitor": "pio device monitor"
+  }
+}
