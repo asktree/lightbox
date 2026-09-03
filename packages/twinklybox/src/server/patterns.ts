@@ -646,7 +646,7 @@ export function renderDebugCorners(out: Uint8Array, ctx: PatternContext, _p: Deb
   const H = Math.floor(N / W);
   if (W < 2 || H < 2) return;
 
-  // Two stacked halves (top = Ubert rows, bottom = Doggert rows). For a single
+  // Two stacked halves (top = couch1 rows, bottom = window rows). For a single
   // box H/2 still works — you just get two banded sets of corners.
   const halfH = Math.floor(H / 2);
   const mark = (row: number, col: number, r: number, g: number, b: number) => {

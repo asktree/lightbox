@@ -1,6 +1,6 @@
 // Hardware config. There is exactly one kind of device — a Govee curtain
 // matrix rewired to an ESP32 — so this is compile-time, not runtime config.
-// Values read off the old WLED setup on Ubert (cfg.json, Sep 2026):
+// Values read off the old WLED setup on couch1 (cfg.json, Sep 2026):
 //   960 LEDs, one 32x30 panel, row-major from top-left (no serpentine),
 //   WS2812-class chip on GPIO 16, RGB byte order, 2A power budget.
 #pragma once

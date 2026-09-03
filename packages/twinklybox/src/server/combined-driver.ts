@@ -23,13 +23,13 @@ export class CombinedWledDriver implements LedDriver {
   private readonly topBytes: number;
   private readonly topW: number;
   private readonly topH: number;
-  // Both panels (Ubert top, Doggert bottom) are mounted rotated 180°, so each
+  // Both panels (couch1 top, window bottom) are mounted rotated 180°, so each
   // half of the frame is rotated 180° (full pixel-order reversal) before
   // sending. Per-box, in place — the boxes keep their top/bottom positions.
   private rotate180 = true;
   private topScratch: Uint8Array | null = null;
   private bottomScratch: Uint8Array | null = null;
-  // Doggert's on-box timecode buffer holds frames ~500ms. When only one box
+  // window's on-box timecode buffer holds frames ~500ms. When only one box
   // buffers, we software-delay the OTHER box by this much so the two halves
   // display at the same wall-clock time (no temporal tear at the seam).
   private static readonly MATCH_DELAY_MS = 500;
@@ -94,7 +94,7 @@ export class CombinedWledDriver implements LedDriver {
     this.top.setBufferMode(on, opts);
     this.bottom.setBufferMode(on, opts);
   }
-  // Per-box buffer control — e.g. Doggert (bottom) buffers while Ubert (top)
+  // Per-box buffer control — e.g. window (bottom) buffers while couch1 (top)
   // runs stock DDP because its usermod isn't loaded.
   setBufferModeEach(top: boolean, bottom: boolean, opts?: { port?: number }): void {
     this.top.setBufferMode(top, opts);

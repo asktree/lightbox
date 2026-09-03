@@ -149,9 +149,14 @@ static void handleUpdateUpload() {
 void netBegin(bool safeMode) {
   gSafe = safeMode;
 
+#ifdef IGLED_NAME
+  // Per-device builds (couch1, window) bake in their name/hostname.
+  snprintf(hostname, sizeof(hostname), "%s", IGLED_NAME);
+#else
   uint8_t mac[6];
   WiFi.macAddress(mac);
   snprintf(hostname, sizeof(hostname), "igled-%02x%02x%02x", mac[3], mac[4], mac[5]);
+#endif
 
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(hostname);

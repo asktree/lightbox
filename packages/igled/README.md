@@ -1,7 +1,7 @@
 # igled
 
-From-scratch ESP32 firmware for the two Govee curtain matrices (Ubert /
-Doggert: 32×30 WS2812 on GPIO 16, plain ESP32, 4MB flash). Replaces WLED.
+From-scratch ESP32 firmware for the two Govee curtain matrices (couch1 /
+window: 32×30 WS2812 on GPIO 16, plain ESP32, 4MB flash). Replaces WLED.
 
 Two modes, interleaved automatically:
 
@@ -25,8 +25,9 @@ Two modes, interleaved automatically:
 | `GET /api/stats` | stream buffer depth/delay/drops, heap |
 | `POST /update` | firmware OTA: `curl -F "update=@firmware.bin" http://<box>/update` |
 
-Also ArduinoOTA (espota, port 3232) for `pio run -e igled_ota -t upload`.
-mDNS: `igled-<mac3>.local` — Ubert is `igled-17a9ec.local`.
+Also ArduinoOTA (espota, port 3232): `pnpm --filter @lightbox/igled ota:couch1`
+(or `ota:window`). Per-device builds bake in the name — mDNS `couch1.local` /
+`window.local` (generic `igled` env falls back to `igled-<mac>.local`).
 
 ## Boot safety (the boxes are hard to reach)
 
@@ -41,11 +42,11 @@ WLED's own OTA updater accepts any app image (OTA is unlocked on our boxes):
 
 ```bash
 pnpm igled:build
-curl -F "update=@packages/igled/.pio/build/igled/firmware.bin" http://wled-17a9ec.local/update
+curl -F "update=@packages/igled/.pio/build/couch1/firmware.bin" http://couch1.local/update
 ```
 
 The flash partition table stays WLED's (app0/app1 1.5MB each — plenty).
-After reboot the box comes up as `igled-17a9ec.local`. **There is no
+After reboot the box comes up as `couch1.local`. **There is no
 automatic rollback** — if the new image crash-loops, safe mode is the net;
 if it can't even reach safe mode, it's ladder + USB. Flash the healthier box
 first and verify before doing the second.

@@ -142,7 +142,7 @@ export default function App() {
   const [mdOriginX, setMdOriginX] = usePersistedState('md.originX', 0.5);
   const [mdOriginY, setMdOriginY] = usePersistedState('md.originY', 0.5);
   const [mdOriginZ, setMdOriginZ] = usePersistedState('md.originZ', 0.5);
-  // Display 2 (stack bottom = Doggert) — the two curtains are separate
+  // Display 2 (stack bottom = window) — the two curtains are separate
   // displays, so B gets its own complete visual param set (one object, one
   // persisted key). Audio interpretation (normMode/bandMode/minMaxGain)
   // stays shared with display 1. The server additionally offsets B's noise
@@ -197,8 +197,8 @@ export default function App() {
 
   // WLED timecode buffer (jitter absorption on-box). Persisted + re-asserted on
   // load so it survives server restarts, which rebuild the driver buffer-off.
-  // Per-box buffer: top = Ubert, bottom = Doggert. Doggert defaults ON (its
-  // usermod works); Ubert OFF (stock firmware). Re-asserted on load.
+  // Per-box buffer: top = couch1, bottom = window. window defaults ON (its
+  // usermod works); couch1 OFF (stock firmware). Re-asserted on load.
   const [bufferTop, setBufferTop] = usePersistedState('wled.bufferTop', false);
   const [bufferBottom, setBufferBottom] = usePersistedState('wled.bufferBottom', true);
   useEffect(() => { api('/buffer', { top: bufferTop, bottom: bufferBottom }).catch(() => {}); }, [bufferTop, bufferBottom]);
@@ -305,7 +305,7 @@ export default function App() {
   const [debugCorners, setDebugCorners] = useState(false);
 
   // Push pattern updates to the server whenever any param changes. `a` drives
-  // display 1 (Ubert); `b` overrides display 2 (Doggert) where it has its own
+  // display 1 (couch1); `b` overrides display 2 (window) where it has its own
   // controls (megadrome hue/origin), otherwise mirrors `a`.
   useEffect(() => {
     const a = debugCorners ? { kind: 'debugcorners' } : buildPattern();
@@ -397,7 +397,7 @@ export default function App() {
           {(['stack', 'wled', 'twinkly', 'serial'] as DriverKind[]).map((k) => (
             <button key={k}
               onClick={() => setTargetKind(k)}
-              title={k === 'stack' ? 'Drive both curtains as one tall display (Ubert on top, Doggert below). No host needed.' : undefined}
+              title={k === 'stack' ? 'Drive both curtains as one tall display (couch1 on top, window below). No host needed.' : undefined}
               className={`px-2 py-1 rounded ${targetKind === k ? 'bg-purple-600 text-white' : 'bg-zinc-800 hover:bg-zinc-700'}`}
             >{k === 'stack' ? '▦ stack' : k}</button>
           ))}
@@ -640,11 +640,11 @@ export default function App() {
               );
             })()}
 
-            {/* Two separate displays: display 1 (Ubert) uses the individual
-                md* states; display 2 (Doggert) has its own full set in mdB.
+            {/* Two separate displays: display 1 (couch1) uses the individual
+                md* states; display 2 (window) has its own full set in mdB.
                 normMode/bandMode/minMaxGain (audio interpretation, above)
                 are shared. */}
-            <div className="text-[10px] font-mono text-zinc-400 pt-1 border-t border-zinc-800">display 1 · Ubert (top)</div>
+            <div className="text-[10px] font-mono text-zinc-400 pt-1 border-t border-zinc-800">display 1 · couch1 (top)</div>
             <Slider label="hue offset" min={0} max={360} step={1} value={mdHueOffset} onChange={setMdHueOffset} accentHue={mdHueOffset} />
             <Slider label="hue range" min={-360} max={360} step={1} value={mdHueRange} onChange={setMdHueRange} />
             <Slider label="originX" min={0} max={1} step={0.01} value={mdOriginX} onChange={setMdOriginX} />
@@ -669,7 +669,7 @@ export default function App() {
             <Slider label="spin (rev/s)" min={-0.5} max={0.5} step={0.005} value={mdSpinSpeed} onChange={setMdSpinSpeed} onZero={() => setMdSpinSpeed(0)} />
             <Slider label="d speed" min={-5} max={5} step={0.02} value={mdDSpeed} onChange={setMdDSpeed} onZero={() => setMdDSpeed(0)} />
 
-            <div className="text-[10px] font-mono text-zinc-400 pt-1 border-t border-zinc-800">display 2 · Doggert (bottom)</div>
+            <div className="text-[10px] font-mono text-zinc-400 pt-1 border-t border-zinc-800">display 2 · window (bottom)</div>
             <Slider label="hue offset" min={0} max={360} step={1} value={mdB.hueOffset} onChange={updB('hueOffset')} accentHue={mdB.hueOffset} />
             <Slider label="hue range" min={-360} max={360} step={1} value={mdB.hueRange} onChange={updB('hueRange')} />
             <Slider label="originX" min={0} max={1} step={0.01} value={mdB.originX} onChange={updB('originX')} />
@@ -749,19 +749,19 @@ export default function App() {
 
         {/* Per-box timecode buffer (on-box 500ms jitter buffer, UDP 4049).
             Each box independently: only works on a box whose usermod is loaded
-            (Doggert). Ubert runs stock, so its buffer does nothing. */}
+            (window). couch1 runs stock, so its buffer does nothing. */}
         <div className="flex items-center gap-2 text-[11px] font-mono">
           <span className="text-zinc-500">🪣 buffer</span>
           <button
             onClick={() => setBufferTop(!bufferTop)}
             className={`px-2 py-1 rounded ${bufferTop ? 'bg-indigo-600 text-white' : 'bg-zinc-800 hover:bg-zinc-700'}`}
-            title="Buffer Ubert (top). Ubert is on stock firmware, so this currently has no effect until its usermod is reflashed."
-          >Ubert {bufferTop ? 'on' : 'off'}</button>
+            title="Buffer couch1 (top). couch1 is on stock firmware, so this currently has no effect until its usermod is reflashed."
+          >couch1 {bufferTop ? 'on' : 'off'}</button>
           <button
             onClick={() => setBufferBottom(!bufferBottom)}
             className={`px-2 py-1 rounded ${bufferBottom ? 'bg-indigo-600 text-white' : 'bg-zinc-800 hover:bg-zinc-700'}`}
-            title="Buffer Doggert (bottom). Its usermod is loaded, so this gives jitter-free playback."
-          >Doggert {bufferBottom ? 'on' : 'off'}</button>
+            title="Buffer window (bottom). Its usermod is loaded, so this gives jitter-free playback."
+          >window {bufferBottom ? 'on' : 'off'}</button>
           <span className="text-[10px] text-zinc-600">per-box · 500ms on-box jitter buffer</span>
         </div>
 

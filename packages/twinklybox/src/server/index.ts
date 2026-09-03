@@ -31,13 +31,13 @@ let currentPattern: Pattern | null = null;
 let currentPatternB: Pattern | null = null;
 
 // Known targets we might auto-connect to. First match wins on boot.
-// 'stack' = both curtains as one tall display (Ubert on top, Doggert below).
+// 'stack' = both curtains as one tall display (couch1 on top, window below).
 type TargetKind = 'twinkly' | 'wled' | 'serial' | 'stack';
 
 // The stacked display: two WLED boxes resolved by mDNS name (DHCP-proof).
 // top renders the upper rows. If only one is reachable, stack falls back to
 // driving that single box.
-const STACK = { top: 'wled-17a9ec.local', bottom: 'wled-ee1570.local' }; // Ubert / Doggert
+const STACK = { top: 'couch1.local', bottom: 'window.local' }; // couch1 / window
 // Tried in order on boot; first reachable wins. `serial` is listed first so
 // that once the USB-C cable is plugged in it's preferred (wired = no WiFi
 // jitter); if no cable is present its connect() throws and we fall through
@@ -51,7 +51,7 @@ const KNOWN_TARGETS: { kind: TargetKind; host: string }[] = [
 // Server-level buffer preference (NOT on the driver — drivers are rebuilt on
 // every reconnect/restart and would lose it). Re-applied to whatever WLED
 // driver is current via applyBufferPref().
-// Per-box buffer preference (top = Ubert, bottom = Doggert). For a single
+// Per-box buffer preference (top = couch1, bottom = window). For a single
 // (non-stack) WLED driver, bufferTop is the one flag. Server-level so it
 // survives reconnects/restarts; re-applied via applyBufferPref().
 let bufferTop = false;
@@ -208,7 +208,7 @@ app.post('/api/buffer', (req, res) => {
   if (typeof req.body?.top === 'boolean') bufferTop = req.body.top;
   if (typeof req.body?.bottom === 'boolean') bufferBottom = req.body.bottom;
   applyBufferPref();
-  console.log(`[driver] buffer top(Ubert)=${bufferTop} bottom(Doggert)=${bufferBottom}`);
+  console.log(`[driver] buffer top(couch1)=${bufferTop} bottom(window)=${bufferBottom}`);
   res.json({ top: bufferTop, bottom: bufferBottom, port: bufferPort ?? null });
 });
 
@@ -317,8 +317,8 @@ setInterval(() => { void sampleWledPing(); }, PING_EVERY_MS).unref();
 
 app.get('/api/boxhealth', async (_req, res) => {
   const [top, bottom] = await Promise.all([
-    boxHealth(STACK.top, 'Ubert (top)'),
-    boxHealth(STACK.bottom, 'Doggert (bottom)'),
+    boxHealth(STACK.top, 'couch1 (top)'),
+    boxHealth(STACK.bottom, 'window (bottom)'),
   ]);
   res.json({ top, bottom });
 });

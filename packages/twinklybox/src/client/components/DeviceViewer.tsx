@@ -15,8 +15,8 @@ const FRAME_HZ = 30;
 // Rolling delay buffer for preview frames. The preview polls the server's
 // *current* rendered frame, which reflects the audio already delayed by
 // syscapDelay (the bus holds captured audio before release). The actual lights
-// get that same frame but additionally held ~500ms (Doggert's on-box buffer /
-// Ubert's matching software delay). So to make preview == lights == the music
+// get that same frame but additionally held ~500ms (window's on-box buffer /
+// couch1's matching software delay). So to make preview == lights == the music
 // you hear, we hold preview frames by that same box delay and no more.
 class FrameDelay {
   private q: { t: number; buf: Uint8Array }[] = [];
