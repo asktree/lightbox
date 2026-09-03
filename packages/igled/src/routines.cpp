@@ -61,6 +61,10 @@ static void applyDither(CRGB* fb) {
   for (uint32_t i = 0; i < NUM_LEDS * 3; i++) {
     uint8_t f = fxFrac[i];
     if (!f) continue;
+    // Below code 8 the 1-LSB alternation is >6% contrast at our ~15Hz
+    // effective dither rate — visible as blinking on single dim pixels.
+    // Round statically there instead.
+    if (raw[i] < 8) { if (f >= 128 && raw[i] < 255) raw[i]++; continue; }
     uint8_t t = (uint8_t)(hash3(i, 0, 7) + phase);
     if (f > t && raw[i] < 255) raw[i]++;
   }

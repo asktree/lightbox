@@ -7,6 +7,9 @@
 // itself is just in-memory server state the panels can read back.
 import { Router } from 'express';
 import { lookup } from 'node:dns/promises';
+import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { LightManager } from '../lib/light-manager.js';
 import { hsToXy, xyToKelvin, kelvinToXy, xyToHs } from '@lightbox/shared';
 
@@ -57,12 +60,46 @@ async function setCurtains(mode: Mode): Promise<Record<string, boolean>> {
   return results;
 }
 
-let mode: Mode = 'color';
+// --- per-light position memory ----------------------------------------------
+// Toggling modes shouldn't be a lossy conversion round-trip: each light
+// remembers its last wheel position (h/s) and its last bar position (kelvin)
+// and returns to it. The nearest-blackbody conversion is only the fallback
+// for a light that has never been in that mode. Persisted (atomically) so
+// tsx-watch restarts don't forget.
+interface AmbienceState {
+  mode: Mode;
+  lastColor: Record<string, { h: number; s: number }>;
+  lastKelvin: Record<string, number>;
+}
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const STATE_FILE = join(__dirname, '../../data/state/ambience.json');
+
+function loadState(): AmbienceState {
+  try {
+    const s = JSON.parse(readFileSync(STATE_FILE, 'utf8')) as AmbienceState;
+    if (s.mode === 'color' || s.mode === 'normal') {
+      return { mode: s.mode, lastColor: s.lastColor ?? {}, lastKelvin: s.lastKelvin ?? {} };
+    }
+  } catch { /* first run / unreadable — start fresh */ }
+  return { mode: 'color', lastColor: {}, lastKelvin: {} };
+}
+
+function saveState(s: AmbienceState): void {
+  try {
+    mkdirSync(dirname(STATE_FILE), { recursive: true });
+    writeFileSync(STATE_FILE + '.tmp', JSON.stringify(s, null, 2));
+    renameSync(STATE_FILE + '.tmp', STATE_FILE);
+  } catch (e) {
+    console.error('[ambience] state save failed:', (e as Error).message);
+  }
+}
+
+const state = loadState();
 
 export function createAmbienceRouter(lightManager: LightManager): Router {
   const router = Router();
 
-  router.get('/', (_req, res) => res.json({ mode }));
+  router.get('/', (_req, res) => res.json({ mode: state.mode }));
 
   router.post('/', async (req, res) => {
     const m = req.body?.mode as Mode;
@@ -81,26 +118,37 @@ export function createAmbienceRouter(lightManager: LightManager): Router {
       try {
         if (m === 'normal') {
           if (!light.capabilities.includes('temperature')) continue;
-          // Land at the blackbody point nearest the light's current color.
-          let k = light.state.temperature;
-          if (k === undefined && light.state.color) {
-            k = xyToKelvin(hsToXy(light.state.color.h, light.state.color.s));
+          // Remember where this light sat on the wheel, then return it to its
+          // last bar position (fall back: nearest blackbody to current color).
+          if (light.state.color) state.lastColor[id] = { h: light.state.color.h, s: light.state.color.s };
+          let k = state.lastKelvin[id];
+          if (k === undefined) {
+            k = light.state.temperature
+              ?? (light.state.color ? xyToKelvin(hsToXy(light.state.color.h, light.state.color.s)) : 2700);
           }
-          k = Math.max(KELVIN_MIN, Math.min(KELVIN_MAX, Math.round(k ?? 2700)));
+          k = Math.max(KELVIN_MIN, Math.min(KELVIN_MAX, Math.round(k)));
           await lightManager.setLightState(id, { temperature: k }, 400);
         } else {
-          // Only lights currently in CT mode need converting back.
-          if (light.state.temperature === undefined || !light.capabilities.includes('color')) continue;
-          const { h, s } = xyToHs(kelvinToXy(light.state.temperature));
-          await lightManager.setLightState(id, { color: { h: Math.round(h), s: Math.round(s) } }, 400);
+          if (!light.capabilities.includes('color')) continue;
+          // Remember the bar position, then return to the last wheel position
+          // (fall back: chromaticity of the current color temperature).
+          if (light.state.temperature !== undefined) state.lastKelvin[id] = light.state.temperature;
+          let c = state.lastColor[id];
+          if (!c) {
+            if (light.state.temperature === undefined) continue;   // already in color mode, nothing remembered
+            const { h, s } = xyToHs(kelvinToXy(light.state.temperature));
+            c = { h: Math.round(h), s: Math.round(s) };
+          }
+          await lightManager.setLightState(id, { color: c }, 400);
         }
         changed.push(id);
       } catch { /* one flaky light shouldn't block the mode switch */ }
     }
 
-    mode = m;
+    state.mode = m;
+    saveState(state);
     const curtains = await setCurtains(m);
-    res.json({ mode, changed, curtains });
+    res.json({ mode: state.mode, changed, curtains });
   });
 
   return router;

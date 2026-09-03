@@ -176,6 +176,12 @@ export class FrameLoop {
       for (let i = 0; i < b.length; i++) {
         const g = lut[b[i]];
         const base = g | 0;
+        // Only dither where the 1-LSB modulation is invisible. At our 30fps
+        // the alternation is ~15Hz, and between codes N and N+1 the contrast
+        // is ~1/(2N+1) — below N=8 that's >6% at 15Hz on single pixels,
+        // which reads as flicker. Down there, plain rounding (tiny, brief
+        // steps at near-black) beats a visibly blinking dot.
+        if (base < 8) { b[i] = g - base >= 0.5 ? base + 1 : base; continue; }
         let t = phase + off[i & 1023];
         if (t >= 1) t -= 1;
         b[i] = g - base > t ? base + 1 : base;
