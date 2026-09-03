@@ -64,7 +64,12 @@ constexpr int   CX = W / 2, CY = (int)(218 * SY);   // floor centre on screen
 constexpr int   ZMAX = (int)(78 * SY);              // orb height at brightness 100
 constexpr int   ORB_R = (int)(10 * SX), HIT_R = (int)(24 * SX);   // ORB_R = half-size when awake; 30 % smaller dormant
 
-constexpr int BAR_X = (int)(22 * SX), BAR_Y = (int)(14 * SY), BAR_W = (int)(170 * SX), BAR_H = (int)(6 * SY);
+// Brightness rail: a vertical spine along the left edge; one row per light
+// (plus a global row on top), each light's distance to the right = brightness.
+constexpr int RAIL_X    = (int)(12 * SX);
+constexpr int RAIL_W    = (int)(52 * SX);   // 0..100% of travel
+constexpr int RAIL_Y0   = (int)(50 * SY);
+constexpr int RAIL_STEP = (int)(14 * SY);
 constexpr int READOUT_Y = (int)(34 * SY);
 constexpr int LINE_H = (int)(11 * SY);            // readout line spacing
 constexpr int STATUS_Y = H - 5;
@@ -130,9 +135,8 @@ bool     wasTouched = false;
 uint32_t lastFrameMs = 0;
 
 struct Ratio { String id; float ratio; };
-std::vector<Ratio> barRatios;
-bool barSingle = false;                           // bar drag targets the selected light only
-constexpr int BAR_DROP = (int)(5 * SY);           // the per-light slider sits this far below the global one
+std::vector<Ratio> barRatios;                     // global-row drag scales lights proportionally
+int curtainsBri = 78;                             // twinkle val as 0-100 (~200/255)
 
 // --- wheel rotation (grab the bottom rim and turn the dial) -------------------
 // wheelRot = how far the disc is turned: hue h is drawn at angle h + wheelRot.
@@ -327,11 +331,11 @@ void syncOrbs() {
     Orb o;
     if (Orb* prev = findOrb("curtains")) o = *prev;
     else { o.id = "curtains"; o.phase = (float)(rand() % 628) / 100.f; o.fresh = true; }
-    o.name = "curtains"; o.on = true; o.bri = 100;
+    o.name = "curtains"; o.on = true; o.bri = curtainsBri;
     o.kf = curtainsKf; o.kelvin = (int)roundf(curtainsKf);
     o.color = kelvinToRgb888(o.kf);
     orbWorld(o, o.tx, o.ty);
-    o.tz = 0.55f * ZMAX;                     // fixed height — no brightness to show
+    o.tz = curtainsBri / 100.f * ZMAX;       // height = twinkle brightness
     if (o.fresh) { o.x = o.tx; o.y = o.ty; o.z = -ORB_R * 2; o.fresh = false; }
     next.push_back(o);
   }
@@ -507,38 +511,31 @@ void shadowText(int x, int y, const char* s, uint32_t c, textdatum_t d) {
   text(x, y, s, c, d);
 }
 
-void drawBar(uint32_t now) {
-  Orb* sel = findOrb(selectedId);
-  const bool single = sel != nullptr;
+// The brightness rail: global row on top (proportional scaling, like the old
+// LEVEL bar), then one row per orb — including the curtains pin, whose row
+// drives the twinkle routine's brightness. Marker distance right = level.
+void drawRail() {
+  const int rows = 1 + (int)orbs.size();
   const bool active = hold == Hold::Bar;
   char buf[8];
-
-  // global bar (greyed out and inert while a light is selected)
-  {
-    int m = maxBrightness();
-    int fillW = BAR_W * m / 100;
-    canvas.fillRoundRect(BAR_X, BAR_Y, BAR_W, BAR_H, BAR_H / 2, single ? blend(C_BG, C_ZINC800, 0.6f) : C_ZINC800);
-    for (int i = 1; i < 10; i++) canvas.drawFastVLine(BAR_X + BAR_W * i / 10, BAR_Y + BAR_H + 2, 2, single ? blend(C_BG, C_ZINC700, 0.5f) : C_ZINC700);
-    if (fillW > 0) canvas.fillRoundRect(BAR_X, BAR_Y, max(fillW, BAR_H), BAR_H, BAR_H / 2, single ? C_ZINC700 : blend(C_ZINC50, C_PURPLE, 0.25f));
-    if (!single) {
-      int tx = BAR_X + fillW;
-      canvas.fillRoundRect(tx - 2, BAR_Y - 4, 4, BAR_H + 8, 2, active ? C_PURPLE : C_WHITE);
-      snprintf(buf, sizeof buf, "%d%%", m);
-      text(BAR_X + BAR_W + 8, BAR_Y + BAR_H / 2, buf, active ? C_WHITE : C_ZINC400, textdatum_t::middle_left);
+  text(RAIL_X, RAIL_Y0 - RAIL_STEP / 2 - 3, "LEVEL", C_ZINC500, textdatum_t::bottom_left);
+  canvas.drawFastVLine(RAIL_X, RAIL_Y0 - RAIL_STEP / 2, rows * RAIL_STEP, C_ZINC700);
+  const int half = (int)(3 * SX);
+  for (int r = 0; r < rows; r++) {
+    const int cy = RAIL_Y0 + r * RAIL_STEP;
+    canvas.fillRect(RAIL_X, cy, RAIL_W, 1, C_ZINC800);   // row track
+    int v; uint32_t col; bool on = true; const String id = r == 0 ? String("*") : orbs[r - 1].id;
+    if (r == 0) { v = maxBrightness(); col = blend(C_ZINC50, C_PURPLE, 0.25f); }
+    else { Orb& o = orbs[r - 1]; v = o.bri; on = o.on; col = on ? o.color : C_ZINC700; }
+    const int mx = RAIL_X + RAIL_W * v / 100;
+    const int h2 = r == 0 ? half + 1 : half;
+    canvas.fillRect(mx - h2, cy - h2, 2 * h2 + 1, 2 * h2 + 1, col);
+    canvas.drawRect(mx - h2, cy - h2, 2 * h2 + 1, 2 * h2 + 1, blend(C_BG, C_WHITE, on ? 0.7f : 0.3f));
+    if (active && holdId == id) {
+      canvas.drawRect(mx - h2 - 2, cy - h2 - 2, 2 * h2 + 5, 2 * h2 + 5, C_WHITE);
+      snprintf(buf, sizeof buf, "%d%%", v);
+      text(RAIL_X + RAIL_W + 8, cy, buf, C_WHITE, textdatum_t::middle_left);
     }
-  }
-  text(BAR_X, BAR_Y - 2, "LEVEL", C_ZINC500, textdatum_t::bottom_left);
-
-  // per-light slider, overlapping just below
-  if (single) {
-    int y = BAR_Y + BAR_DROP;
-    int fillW = BAR_W * sel->bri / 100;
-    canvas.fillRoundRect(BAR_X, y, BAR_W, BAR_H, BAR_H / 2, C_ZINC800);
-    if (fillW > 0) canvas.fillRoundRect(BAR_X, y, max(fillW, BAR_H), BAR_H, BAR_H / 2, sel->on ? sel->color : C_ZINC700);
-    int tx = BAR_X + fillW;
-    canvas.fillRoundRect(tx - 2, y - 4, 4, BAR_H + 8, 2, active ? C_PURPLE : C_WHITE);
-    snprintf(buf, sizeof buf, "%d%%", sel->bri);
-    text(BAR_X + BAR_W + 8, y + BAR_H / 2, buf, active ? C_WHITE : C_ZINC400, textdatum_t::middle_left);
   }
 }
 
@@ -555,8 +552,7 @@ void drawReadout() {
   Orb* o = findOrb(selectedId.length() ? selectedId : lastReadoutId);
   if (!o || !readoutFader.visible()) return;
   char buf[64];
-  if (normalMode && o->id == "curtains") snprintf(buf, sizeof buf, "%04dK  TWINKLE", o->kelvin);
-  else if (normalMode) snprintf(buf, sizeof buf, "%04dK  B %03d", o->kelvin, o->bri);
+  if (normalMode) snprintf(buf, sizeof buf, "%04dK  B %03d", o->kelvin, o->bri);
   else snprintf(buf, sizeof buf, "H %03d  S %03d  B %03d", o->h, o->s, o->bri);
   String name = o->name; name.toUpperCase();
   if (name.length() > 18) name = name.substring(0, 18);
@@ -809,7 +805,7 @@ void render(uint32_t now) {
       ditherText(x, L.y, L.text.c_str(), L.color, textdatum_t::bottom_center, L.alpha, true);
     }
 
-    drawBar(now);
+    drawRail();
     drawReadout();
     drawRotReadout();
     drawStatus();
@@ -872,13 +868,18 @@ Orb* orbAt(int x, int y, uint32_t now) {
   return best;
 }
 
-void applyBar(int x) {
-  int v = constrain((x - BAR_X) * 100 / BAR_W, 1, 100);
-  if (barSingle) {
-    if (Orb* o = findOrb(selectedId)) { o->bri = v; net::setBrightness(o->id, v); }
+void applyRail(const String& id, int x) {
+  int v = constrain((x - RAIL_X) * 100 / RAIL_W, 1, 100);
+  if (id == "*") {
+    for (auto& r : barRatios) net::setBrightness(r.id, max(1, (int)roundf(v * r.ratio)));
     return;
   }
-  for (auto& r : barRatios) net::setBrightness(r.id, max(1, (int)roundf(v * r.ratio)));
+  Orb* o = findOrb(id);
+  if (!o) return;
+  o->bri = v;
+  o->tz = o->on ? v / 100.f * ZMAX : 0;    // orb height tracks the drag live
+  if (id == "curtains") { curtainsBri = v; net::setCurtainsVal((int)roundf(v * 2.55f)); }
+  else net::setBrightness(id, v);
 }
 
 void onDown(int x, int y, uint32_t now) {
@@ -887,21 +888,26 @@ void onDown(int x, int y, uint32_t now) {
     int dx = x - MODE_CX, dy = y - MODE_CY, rr = MODE_R + 8;
     if (dx * dx + dy * dy <= rr * rr) { toggleMode(now); return; }
   }
+  // Rail markers win inside the rail column (checked before orbs so a light
+  // parked at the left of the wheel can't shadow its own brightness row).
+  if (x >= RAIL_X - 10 && x <= RAIL_X + RAIL_W + (int)(14 * SX)) {
+    const int rows = 1 + (int)orbs.size();
+    int r = (y - RAIL_Y0 + RAIL_STEP / 2) / max(1, RAIL_STEP);
+    if (y >= RAIL_Y0 - RAIL_STEP / 2 && r >= 0 && r < rows) {
+      hold = Hold::Bar;
+      holdId = r == 0 ? "*" : orbs[r - 1].id;
+      if (holdId == "*") {
+        barRatios.clear();
+        int m = maxBrightness();
+        for (auto& l : lights) if (l.on && l.reachable) barRatios.push_back({l.id, m > 0 ? (float)l.brightness / m : 1.f});
+      }
+      applyRail(holdId, x);
+      return;
+    }
+  }
   if (Orb* o = orbAt(x, y, now)) {
     hold = Hold::Orb; holdId = o->id; selectedId = o->id;
     grabDX = sx(o->x) - x; grabDY = sy(o->y, o->z) - y;
-    return;
-  }
-  if (y <= BAR_Y + BAR_DROP + BAR_H + 16 && x >= BAR_X - 12 && x <= BAR_X + BAR_W + 12) {
-    hold = Hold::Bar;
-    // selected light -> its own slider; global is paused (curtains pseudo-orb
-    // has no lightbox brightness, so it never gets a per-light slider)
-    barSingle = selectedId.length() > 0 && selectedId != "curtains" && findOrb(selectedId) != nullptr;
-    lastInteractMs = now;
-    barRatios.clear();
-    int m = maxBrightness();
-    for (auto& l : lights) if (l.on && l.reachable) barRatios.push_back({l.id, m > 0 ? (float)l.brightness / m : 1.f});
-    applyBar(x);
     return;
   }
   if (!normalMode) {
@@ -969,7 +975,7 @@ void onMove(int x, int y, uint32_t now) {
     int h = (int)roundf(hf) % 360, s = (int)roundf(sf);
     if (h != o->h || s != o->s) { o->h = h; o->s = s; o->color = hsvToRgb888(hf, sf, 100); net::setColor(o->id, h, s); }
   } else if (hold == Hold::Bar) {
-    applyBar(x);
+    applyRail(holdId, x);
   } else if (hold == Hold::Rim) {
     float wx = x - CX, wy = (y - CY) / SQUASH;
     float a = atan2f(wy, wx) * 180.f / (float)M_PI;

@@ -67,7 +67,7 @@ async function postRoutine(body: object): Promise<Record<string, boolean>> {
   return results;
 }
 
-async function setCurtains(mode: Mode, twinkleKelvin: number): Promise<Record<string, boolean>> {
+async function setCurtains(mode: Mode, twinkleKelvin: number, twinkleVal: number): Promise<Record<string, boolean>> {
   // An active twinklybox stream would paint over the native routine.
   await fetch(`${TWINKLYBOX}/api/stream/stop`, {
     method: 'POST',
@@ -75,7 +75,7 @@ async function setCurtains(mode: Mode, twinkleKelvin: number): Promise<Record<st
   }).catch(() => {});
 
   if (mode === 'normal') {
-    return postRoutine({ kind: 'twinkle', rgb: kelvinToRgbBytes(twinkleKelvin) });
+    return postRoutine({ kind: 'twinkle', rgb: kelvinToRgbBytes(twinkleKelvin), val: twinkleVal });
   }
   return postRoutine({ kind: 'soap' });
 }
@@ -91,6 +91,7 @@ interface AmbienceState {
   lastColor: Record<string, { h: number; s: number }>;
   lastKelvin: Record<string, number>;
   curtainsKelvin: number;    // the twinkle dots' blackbody color (normal mode)
+  curtainsVal: number;       // the twinkle dots' peak brightness, 0-255
 }
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = join(__dirname, '../../data/state/ambience.json');
@@ -99,10 +100,10 @@ function loadState(): AmbienceState {
   try {
     const s = JSON.parse(readFileSync(STATE_FILE, 'utf8')) as AmbienceState;
     if (s.mode === 'color' || s.mode === 'normal') {
-      return { mode: s.mode, lastColor: s.lastColor ?? {}, lastKelvin: s.lastKelvin ?? {}, curtainsKelvin: s.curtainsKelvin ?? 2900 };
+      return { mode: s.mode, lastColor: s.lastColor ?? {}, lastKelvin: s.lastKelvin ?? {}, curtainsKelvin: s.curtainsKelvin ?? 2900, curtainsVal: s.curtainsVal ?? 200 };
     }
   } catch { /* first run / unreadable — start fresh */ }
-  return { mode: 'color', lastColor: {}, lastKelvin: {}, curtainsKelvin: 2900 };
+  return { mode: 'color', lastColor: {}, lastKelvin: {}, curtainsKelvin: 2900, curtainsVal: 200 };
 }
 
 function saveState(s: AmbienceState): void {
@@ -120,22 +121,24 @@ const state = loadState();
 export function createAmbienceRouter(lightManager: LightManager): Router {
   const router = Router();
 
-  router.get('/', (_req, res) => res.json({ mode: state.mode, curtainsKelvin: state.curtainsKelvin }));
+  router.get('/', (_req, res) => res.json({ mode: state.mode, curtainsKelvin: state.curtainsKelvin, curtainsVal: state.curtainsVal }));
 
-  // Slide the twinkle dots along the blackbody locus (screenbox drags the
-  // curtains pin on the kelvin bar). Applies live; save is debounced so a
-  // drag doesn't hammer the disk.
+  // The twinkle dots' color (kelvin, along the blackbody locus) and/or peak
+  // brightness (val 0-255) — screenbox drags the curtains pin / its rail row.
+  // Applies live; save is debounced so a drag doesn't hammer the disk.
   let saveTimer: NodeJS.Timeout | null = null;
   router.post('/twinkle', async (req, res) => {
     const k = Number(req.body?.kelvin);
-    if (!Number.isFinite(k)) {
-      res.status(400).json({ error: 'kelvin required' });
+    const v = Number(req.body?.val);
+    if (!Number.isFinite(k) && !Number.isFinite(v)) {
+      res.status(400).json({ error: 'kelvin and/or val required' });
       return;
     }
-    state.curtainsKelvin = Math.max(KELVIN_MIN, Math.min(KELVIN_MAX, Math.round(k)));
+    if (Number.isFinite(k)) state.curtainsKelvin = Math.max(KELVIN_MIN, Math.min(KELVIN_MAX, Math.round(k)));
+    if (Number.isFinite(v)) state.curtainsVal = Math.max(0, Math.min(255, Math.round(v)));
     if (!saveTimer) saveTimer = setTimeout(() => { saveTimer = null; saveState(state); }, 1000);
-    const curtains = await postRoutine({ kind: 'twinkle', rgb: kelvinToRgbBytes(state.curtainsKelvin) });
-    res.json({ kelvin: state.curtainsKelvin, curtains });
+    const curtains = await postRoutine({ kind: 'twinkle', rgb: kelvinToRgbBytes(state.curtainsKelvin), val: state.curtainsVal });
+    res.json({ kelvin: state.curtainsKelvin, val: state.curtainsVal, curtains });
   });
 
   router.post('/', async (req, res) => {
@@ -183,7 +186,7 @@ export function createAmbienceRouter(lightManager: LightManager): Router {
 
     state.mode = m;
     saveState(state);
-    const curtains = await setCurtains(m, state.curtainsKelvin);
+    const curtains = await setCurtains(m, state.curtainsKelvin, state.curtainsVal);
     res.json({ mode: state.mode, changed, curtains });
   });
 

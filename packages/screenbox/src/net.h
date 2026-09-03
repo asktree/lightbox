@@ -44,8 +44,9 @@ void setOn(const String& id, bool on);
 // Ambience mode: POSTs /api/ambience with this room's light ids. The server
 // flips the lights (CT mode <-> color) and switches the curtains' routine.
 void setMode(bool normal);
-// Slide the curtains' twinkle color along the blackbody locus (normal mode).
-// Coalesced like light commands; POSTs /api/ambience/twinkle.
+// Curtains twinkle routine (normal mode): color along the blackbody locus,
+// brightness 0-255. Coalesced like light commands; POSTs /api/ambience/twinkle.
 void setCurtainsKelvin(int kelvin);
+void setCurtainsVal(int val);
 
 }  // namespace net
