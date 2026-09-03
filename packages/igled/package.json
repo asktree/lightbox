@@ -1,0 +1,12 @@
+{
+  "name": "@lightbox/igled",
+  "version": "0.1.0",
+  "private": true,
+  "description": "From-scratch ESP32 firmware for the Govee curtain matrices (replaces WLED): buffered DDP listener + native routines",
+  "scripts": {
+    "compile": "pio run -e igled",
+    "flash": "pio run -e igled -t upload",
+    "flash:ota": "pio run -e igled_ota -t upload",
+    "monitor": "pio device monitor -b 115200"
+  }
+}
