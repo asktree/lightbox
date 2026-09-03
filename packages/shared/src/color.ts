@@ -183,6 +183,31 @@ export function kelvinToXy(K: number): XY {
   return { x, y };
 }
 
+/**
+ * Exact blackbody chromaticity at any temperature: Planck's law integrated
+ * against the CIE 1931 CMFs. Unlike kelvinToXy (Kim approximation, valid
+ * 1667K+), this holds all the way down into ember territory (1000K).
+ * Memoized per 10K.
+ */
+const _bbCache = new Map<number, XY>();
+export function blackbodyXy(K: number): XY {
+  const key = Math.round(Math.max(500, K) / 10) * 10;
+  const hit = _bbCache.get(key);
+  if (hit) return hit;
+  let X = 0, Y = 0, Z = 0;
+  for (let lam = 380; lam <= 780; lam += 5) {
+    const l = lam * 1e-9;
+    // Planck spectral radiance, arbitrary scale (c2 = h*c/kB = 1.4388e-2 m·K)
+    const M = 1 / (l ** 5 * (Math.exp(0.0143877688 / (l * key)) - 1));
+    const c = cmf1931(lam);
+    X += M * c.X; Y += M * c.Y; Z += M * c.Z;
+  }
+  const s = X + Y + Z;
+  const xy = { x: X / s, y: Y / s };
+  _bbCache.set(key, xy);
+  return xy;
+}
+
 /** Approximate CCT of a chromaticity (McCamy 1992). Only meaningful near the locus. */
 export function xyToKelvin(xy: XY): number {
   const n = (xy.x - 0.332) / (0.1858 - xy.y);

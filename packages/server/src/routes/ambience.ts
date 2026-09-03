@@ -11,13 +11,13 @@ import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { LightManager } from '../lib/light-manager.js';
-import { hsToXy, xyToKelvin, kelvinToXy, xyToHs, xyToRgb } from '@lightbox/shared';
+import { hsToXy, xyToKelvin, blackbodyXy, xyToHs, xyToLinearRgb } from '@lightbox/shared';
 
 type Mode = 'color' | 'normal';
 
-// 1700K floor: below CT hardware's 2000K limit, into ember territory — the
-// LightManager emulates sub-2000K with the color engine (planckian xy).
-const KELVIN_MIN = 1700;
+// 1000K floor: below CT hardware's 2000K limit, into ember/coal territory —
+// the LightManager emulates sub-2000K with the color engine (planckian xy).
+const KELVIN_MIN = 1000;
 const KELVIN_MAX = 6500;
 
 // The two igled curtain boxes. Their native routine is what shows whenever
@@ -36,11 +36,16 @@ async function resolveIp(host: string): Promise<string> {
   return address;
 }
 
-// Blackbody color as 0-255 RGB bytes at full brightness (the boxes' twinkle
-// uses this as its dot color — exact planckian chromaticity, no HSV detour).
+// Blackbody color as 0-255 RGB bytes for the LED strips. LINEAR light, not
+// sRGB: WS2812 PWM is linear in the byte value, so gamma-encoded sRGB bytes
+// render the low channels far too bright (2900K came out yellow-white).
+// Normalized so the peak channel is 255 (brightest version of that
+// chromaticity — the twinkle's own envelope handles brightness).
 function kelvinToRgbBytes(k: number): { r: number; g: number; b: number } {
-  const { r, g, b } = xyToRgb(kelvinToXy(Math.max(1667, k)));
-  return { r: Math.round(r * 255), g: Math.round(g * 255), b: Math.round(b * 255) };
+  let { r, g, b } = xyToLinearRgb(blackbodyXy(Math.max(1000, k)));
+  r = Math.max(0, r); g = Math.max(0, g); b = Math.max(0, b);
+  const m = Math.max(r, g, b, 1e-6);
+  return { r: Math.round((r / m) * 255), g: Math.round((g / m) * 255), b: Math.round((b / m) * 255) };
 }
 
 async function postRoutine(body: object): Promise<Record<string, boolean>> {
@@ -168,8 +173,7 @@ export function createAmbienceRouter(lightManager: LightManager): Router {
           let c = state.lastColor[id];
           if (!c) {
             if (light.state.temperature === undefined) continue;   // already in color mode, nothing remembered
-            const { h, s } = xyToHs(kelvinToXy(light.state.temperature));
-            c = { h: Math.round(h), s: Math.round(s) };
+            c = xyToHs(blackbodyXy(light.state.temperature));
           }
           await lightManager.setLightState(id, { color: c }, 400);
         }

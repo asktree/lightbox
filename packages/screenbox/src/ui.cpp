@@ -89,9 +89,9 @@ constexpr uint32_t C_RED     = 0xf87171;
 // lights ride it as pins (Hue renders CT with its warm-white diodes). The
 // toggle also switches the curtains (soap <-> twinkle) via the server.
 bool normalMode = false;
-// 1700K floor: CT hardware stops at 2000K; below that the server emulates the
-// blackbody chromaticity with the color engine (ember territory).
-constexpr int KELVIN_MIN = 1700, KELVIN_MAX = 6500;
+// 1000K floor: CT hardware stops at 2000K; below that the server emulates the
+// blackbody chromaticity with the color engine (ember/coal territory).
+constexpr int KELVIN_MIN = 1000, KELVIN_MAX = 6500;
 float curtainsKf = 2900.f;    // the curtains' twinkle color (bar position)
 constexpr int MODE_R  = (int)(9 * SX);              // circular mode button,
 constexpr int MODE_CX = W - 12;                     // above the online dot
@@ -274,9 +274,21 @@ uint32_t kelvinToRgb888(float kelvin) {
   auto c8 = [](float v) { return (uint32_t)fmaxf(0.f, fminf(255.f, roundf(v))); };
   return (c8(r) << 16) | (c8(g) << 8) | c8(b);
 }
-// kelvin <-> bar position (world x; the bar spans the wheel's width, wy = 0)
-float kelvinToWx(float k) { return ((k - KELVIN_MIN) / (float)(KELVIN_MAX - KELVIN_MIN) * 2.f - 1.f) * KB_HALF_W; }
-float wxToKelvin(float wx) { float f = (wx / KB_HALF_W + 1.f) / 2.f; return KELVIN_MIN + fmaxf(0.f, fminf(1.f, f)) * (KELVIN_MAX - KELVIN_MIN); }
+// kelvin <-> bar position (world x; the bar spans the wheel's width, wy = 0).
+// The bar is linear in MIRED (1e6/K), the perceptually-uniform CCT scale —
+// linear-in-kelvin crams all the visible change into the warm end, which made
+// low-range drags feel like big steps.
+constexpr float MIRED_WARM = 1e6f / KELVIN_MIN;   // left end
+constexpr float MIRED_COOL = 1e6f / KELVIN_MAX;   // right end
+float kelvinToWx(float k) {
+  float m = 1e6f / fmaxf(1.f, k);
+  float f = (MIRED_WARM - m) / (MIRED_WARM - MIRED_COOL);   // 0 = warm/left
+  return (fmaxf(0.f, fminf(1.f, f)) * 2.f - 1.f) * KB_HALF_W;
+}
+float wxToKelvin(float wx) {
+  float f = fmaxf(0.f, fminf(1.f, (wx / KB_HALF_W + 1.f) / 2.f));
+  return 1e6f / (MIRED_WARM - f * (MIRED_WARM - MIRED_COOL));
+}
 
 // Where an orb sits: on the kelvin bar in normal mode, else on the (possibly
 // rotated) wheel by hue/sat.
@@ -713,15 +725,11 @@ void drawKelvinBar() {
   const int x0 = CX - KB_HALF_W, x1 = CX + KB_HALF_W;
   const int yTop = CY - KB_HALF_H, h = KB_HALF_H * 2;
   for (int x = x0; x <= x1; x++) {
-    uint32_t c = kelvinToRgb888(wxToKelvin((float)(x - CX)));
-    // soften the ends so the bar reads as an object, not a screen glitch
-    int edge = min(x - x0, x1 - x);
-    if (edge < 4) c = blend(C_BG, c, 0.35f + 0.65f * (edge / 4.f));
-    canvas.drawFastVLine(x, yTop, h, c);
+    canvas.drawFastVLine(x, yTop, h, kelvinToRgb888(wxToKelvin((float)(x - CX))));
   }
   canvas.drawRoundRect(x0 - 2, yTop - 2, (x1 - x0) + 5, h + 4, 3, blend(C_BG, C_WHITE, 0.3f));
   // ticks (2000 marks where real CT diodes end and emulation begins)
-  const int ticks[4] = {2000, 2700, 4000, 5500};
+  const int ticks[5] = {1500, 2000, 2700, 4000, 5500};
   char buf[8];
   for (int k : ticks) {
     int x = CX + (int)roundf(kelvinToWx((float)k));

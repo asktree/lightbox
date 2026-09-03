@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 import type { Light, LightState, LightDriver, Group, Palette, PaletteNode, DebugLogEntry, DeviceDiagnostics, LightSettings } from '@lightbox/shared';
-import { kelvinToXy, xyToHs } from '@lightbox/shared';
+import { blackbodyXy, xyToHs } from '@lightbox/shared';
 import { HueDriver } from '../drivers/hue.js';
 import { GoveeDriver } from '../drivers/govee.js';
 import { TuyaDriver } from '../drivers/tuya.js';
@@ -225,16 +225,17 @@ export class LightManager extends EventEmitter {
     // 2000K, but the blackbody locus keeps going. Below the floor we render
     // the planckian chromaticity with the color engine instead (mostly the
     // red+green diodes), while the light keeps *reporting* `temperature` so
-    // kelvin UIs keep it on the bar. Locus approximation is valid to 1667K.
+    // kelvin UIs keep it on the bar. blackbodyXy is exact down to 1000K, and
+    // h/s stay FRACTIONAL — integer rounding here made low-kelvin drags step
+    // visibly (1° of hue at full saturation is a big jump).
     let driverState = state;
     if (
       state.temperature !== undefined &&
       state.temperature < 2000 &&
       light.capabilities.includes('color')
     ) {
-      const k = Math.max(1667, state.temperature);
-      const { h, s } = xyToHs(kelvinToXy(k));
-      const color = { h: Math.round(h), s: Math.round(s) };
+      const k = Math.max(1000, state.temperature);
+      const color = xyToHs(blackbodyXy(k));
       driverState = { ...state, color };
       delete driverState.temperature;      // hue's setState prefers ct if both present
       state = { ...state, color };         // local state keeps temperature AND color
