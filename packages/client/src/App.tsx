@@ -5,6 +5,7 @@ import { usePalettesStore, useRoomPlayState } from './stores/palettes';
 import { useDebugStore } from './stores/debug';
 import { useWebSocket } from './hooks/useWebSocket';
 import { ColorWheel } from './components/ColorWheel';
+import { KelvinBar } from './components/KelvinBar';
 import { PaletteControls } from './components/PaletteControls';
 import { LightPane } from './components/LightPane';
 import { AgentChat } from './components/AgentChat';
@@ -13,6 +14,10 @@ import { StreamTest } from './components/StreamTest';
 import { WizTest } from './components/WizTest';
 
 type View = 'grid' | 'wheel' | 'stream' | 'wiz';
+
+// Set via .env.roommate (`vite --mode roommate`, :5176): pins the UI to one
+// room and hides owner-only chrome (room switcher, stream/wiz/debug, agent).
+const LOCKED_ROOM = (import.meta.env.VITE_LOCKED_ROOM as string | undefined) || null;
 
 export default function App() {
   useWebSocket();
@@ -27,9 +32,11 @@ export default function App() {
 
   const [view, setView] = useState<View>(() => {
     const saved = localStorage.getItem('lightbox:viewMode');
-    return saved === 'grid' || saved === 'wheel' || saved === 'stream' || saved === 'wiz' ? saved : 'wheel';
+    const allowed = LOCKED_ROOM ? ['grid', 'wheel'] : ['grid', 'wheel', 'stream', 'wiz'];
+    return saved && allowed.includes(saved) ? (saved as View) : 'wheel';
   });
   const [currentRoom, setCurrentRoom] = useState<string>(() => {
+    if (LOCKED_ROOM) return LOCKED_ROOM;
     const saved = localStorage.getItem('lightbox:currentRoom');
     return saved && saved in ROOMS ? saved : 'bedroom';
   });
@@ -67,6 +74,11 @@ export default function App() {
   const reachableLights = lightsList.filter((l) => l.reachable);
   const unreachableLights = lightsList.filter((l) => !l.reachable);
   const colorLights = reachableLights.filter((l) => l.capabilities.includes('color'));
+  const tempLights = reachableLights.filter((l) => l.capabilities.includes('temperature'));
+
+  // Cross-zone drag: wheel and kelvin bar drop-test against each other.
+  const wheelZoneRef = useRef<HTMLDivElement | null>(null);
+  const kelvinZoneRef = useRef<HTMLDivElement | null>(null);
 
   // Global brightness for the room - value is the max brightness among ON lights
   const brightnessCapableLights = reachableLights.filter((l) => l.capabilities.includes('brightness'));
@@ -168,20 +180,26 @@ export default function App() {
         )}
 
         <div className="flex items-center gap-4">
-          {/* Room selector */}
-          <div className="flex bg-zinc-800 rounded-lg p-1">
-            {Object.entries(ROOMS).map(([key, room]) => (
-              <button
-                key={key}
-                onClick={() => setCurrentRoom(key)}
-                className={`px-3 py-1 text-sm rounded-md transition-all ${
-                  currentRoom === key ? 'bg-purple-600 text-white' : 'text-zinc-400'
-                }`}
-              >
-                {room.name}
-              </button>
-            ))}
-          </div>
+          {/* Room selector (fixed label when locked to a single room) */}
+          {LOCKED_ROOM ? (
+            <span className="px-3 py-1 text-sm rounded-md bg-purple-600/30 text-purple-300">
+              {roomConfig?.name ?? LOCKED_ROOM}
+            </span>
+          ) : (
+            <div className="flex bg-zinc-800 rounded-lg p-1">
+              {Object.entries(ROOMS).map(([key, room]) => (
+                <button
+                  key={key}
+                  onClick={() => setCurrentRoom(key)}
+                  className={`px-3 py-1 text-sm rounded-md transition-all ${
+                    currentRoom === key ? 'bg-purple-600 text-white' : 'text-zinc-400'
+                  }`}
+                >
+                  {room.name}
+                </button>
+              ))}
+            </div>
+          )}
 
           {/* View toggle */}
           <div className="flex bg-zinc-800 rounded-lg p-1">
@@ -201,33 +219,39 @@ export default function App() {
             >
               Wheel
             </button>
-            <button
-              onClick={() => setView('stream')}
-              className={`px-3 py-1 text-sm rounded-md transition-all ${
-                view === 'stream' ? 'bg-zinc-600 text-white' : 'text-zinc-400'
-              }`}
-            >
-              Stream
-            </button>
-            <button
-              onClick={() => setView('wiz')}
-              className={`px-3 py-1 text-sm rounded-md transition-all ${
-                view === 'wiz' ? 'bg-zinc-600 text-white' : 'text-zinc-400'
-              }`}
-            >
-              WiZ
-            </button>
+            {!LOCKED_ROOM && (
+              <>
+                <button
+                  onClick={() => setView('stream')}
+                  className={`px-3 py-1 text-sm rounded-md transition-all ${
+                    view === 'stream' ? 'bg-zinc-600 text-white' : 'text-zinc-400'
+                  }`}
+                >
+                  Stream
+                </button>
+                <button
+                  onClick={() => setView('wiz')}
+                  className={`px-3 py-1 text-sm rounded-md transition-all ${
+                    view === 'wiz' ? 'bg-zinc-600 text-white' : 'text-zinc-400'
+                  }`}
+                >
+                  WiZ
+                </button>
+              </>
+            )}
           </div>
 
           {/* Debug toggle */}
-          <button
-            onClick={() => setDebugOpen(!debugOpen)}
-            className={`px-3 py-1 text-sm rounded-md transition-all ${
-              debugOpen ? 'bg-purple-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:text-white'
-            }`}
-          >
-            Debug
-          </button>
+          {!LOCKED_ROOM && (
+            <button
+              onClick={() => setDebugOpen(!debugOpen)}
+              className={`px-3 py-1 text-sm rounded-md transition-all ${
+                debugOpen ? 'bg-purple-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:text-white'
+              }`}
+            >
+              Debug
+            </button>
+          )}
 
           {/* Connection status */}
           <div className="flex items-center gap-2 min-w-[6.5rem]">
@@ -304,8 +328,22 @@ export default function App() {
       {/* Color Wheel View */}
       {view === 'wheel' && (
         <div className="flex flex-col items-center gap-6">
+          {/* Warm/cool white bar — CT-mode drop zone above the wheel */}
+          {tempLights.length > 0 && (
+            <div className="flex-shrink-0 pb-3">
+              <KelvinBar
+                lights={tempLights.filter((l) => l.state.on)}
+                width={Math.min(600, Math.floor(window.innerWidth * 0.65))}
+                zoneRef={kelvinZoneRef}
+                wheelRef={wheelZoneRef}
+                selectedLightId={selectedTrackLight}
+                onLightSelect={setSelectedTrackLight}
+              />
+            </div>
+          )}
+
           {/* Wheel - up to 2/3 viewport width */}
-          <div className="flex-shrink-0">
+          <div className="flex-shrink-0" ref={wheelZoneRef}>
             <ColorWheel
               lights={colorLights}
               size={Math.min(600, Math.floor(window.innerWidth * 0.65))}
@@ -313,6 +351,7 @@ export default function App() {
               onLightSelect={setSelectedTrackLight}
               roomId={currentRoom}
               previewPaletteId={hoveredPaletteId}
+              kelvinBarRef={kelvinZoneRef}
             />
           </div>
 
@@ -367,10 +406,10 @@ export default function App() {
       <PaletteControls roomId={currentRoom} onHoverPalette={setHoveredPaletteId} />
 
       {/* Agent Chat */}
-      <AgentChat />
+      {!LOCKED_ROOM && <AgentChat />}
 
       {/* Debug Panel */}
-      {debugOpen && (
+      {!LOCKED_ROOM && debugOpen && (
         <DebugPanel
           filterDevices={view === 'stream' || !roomConfig?.lightIds.length ? undefined : lightsList.map((l) => l.name)}
         />

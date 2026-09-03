@@ -1,10 +1,13 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
-export default defineConfig({
+// `--mode roommate` serves the same app on :5176 with .env.roommate applied
+// (VITE_LOCKED_ROOM pins the UI to one room for the roommate-facing view).
+export default defineConfig(({ mode }) => ({
   plugins: [react()],
   server: {
-    port: 5173,
+    host: true,
+    port: mode === 'roommate' ? 5176 : 5173,
     proxy: {
       '/api': 'http://localhost:3001',
       '/ws': {
@@ -13,4 +16,4 @@ export default defineConfig({
       },
     },
   },
-});
+}));

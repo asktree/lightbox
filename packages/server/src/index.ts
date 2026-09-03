@@ -32,6 +32,7 @@ import { createAutopilotRouter, ensureAutopilotRunning, startAutopilotWatchdog }
 import { createStreamingRouter } from './routes/streaming.js';
 import { createAudioSyncRouter } from './routes/audio-sync.js';
 import { createStemSyncRouter } from './routes/stem-sync.js';
+import { createPlayheadRouter } from './routes/playhead.js';
 import { resumeStemSync } from './services/stem-sync.js';
 import { createLatencyCalRouter } from './routes/latency-calibration.js';
 import { startServerHeartbeat, finalHeartbeat, isColdBoot, downtimeMs } from './lib/server-heartbeat.js';
@@ -145,6 +146,7 @@ app.use('/api/autopilot', createAutopilotRouter());
 app.use('/api/streaming', createStreamingRouter());
 app.use('/api/audio-sync', createAudioSyncRouter(paletteAnimator));
 app.use('/api/stem-sync', createStemSyncRouter(paletteAnimator));
+app.use('/api/playhead', createPlayheadRouter());
 
 // Health check
 app.get('/api/health', (req, res) => {

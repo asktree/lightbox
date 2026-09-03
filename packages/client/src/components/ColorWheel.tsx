@@ -6,6 +6,7 @@ import { useLightsStore } from '../stores/lights';
 import { usePalettesStore, useRoomPlayState, useRoomPositions } from '../stores/palettes';
 import { useDebugStore } from '../stores/debug';
 import { PaletteTrack } from './PaletteTrack';
+import { xToKelvin } from './KelvinBar';
 
 interface Props {
   lights: Light[];
@@ -18,6 +19,9 @@ interface Props {
   // by PaletteControls hover-preview. Ignored when equal to the active
   // palette (would just double-draw the same path).
   previewPaletteId?: string | null;
+  // Kelvin bar container: dragging a temperature-capable pin inside its
+  // rect switches the light to CT mode (the bar handles the reverse).
+  kelvinBarRef?: React.RefObject<HTMLDivElement | null>;
 }
 
 function hsvToHex(h: number, s: number, v: number = 100): string {
@@ -45,7 +49,7 @@ function hsvToHex(h: number, s: number, v: number = 100): string {
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 }
 
-export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect, roomId, previewPaletteId }: Props) {
+export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect, roomId, previewPaletteId, kelvinBarRef }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [dragging, setDragging] = useState<string | null>(null);
@@ -237,13 +241,29 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect,
   const handleMouseMove = useCallback((e: React.MouseEvent | MouseEvent) => {
     if (!dragging || !containerRef.current) return;
 
+    // Dragged into the kelvin bar → switch to CT mode (temperature-capable
+    // lights only; the bar hands the light back when dragged into the wheel).
+    const bar = kelvinBarRef?.current;
+    if (bar) {
+      const br = bar.getBoundingClientRect();
+      const light = lights.find((l) => l.id === dragging);
+      if (
+        light?.capabilities.includes('temperature') &&
+        e.clientX >= br.left && e.clientX <= br.right &&
+        e.clientY >= br.top && e.clientY <= br.bottom
+      ) {
+        setLightState(dragging, { temperature: xToKelvin(e.clientX, br) }, 50);
+        return;
+      }
+    }
+
     const rect = containerRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
 
     const { h, s } = positionToHs(x, y);
     setLightState(dragging, { color: { h: Math.round(h), s: Math.round(s) } }, 50);
-  }, [dragging, positionToHs, setLightState]);
+  }, [dragging, positionToHs, setLightState, lights, kelvinBarRef]);
 
   const handleMouseUp = useCallback(() => {
     if (dragging) {
@@ -277,9 +297,10 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect,
     }
   }, [onLightSelect, selectedLightId]);
 
-  // Filter to only color-capable, on lights (include disconnected to show faded)
+  // Filter to only color-capable, on lights (include disconnected to show
+  // faded). Lights currently in CT mode live on the kelvin bar, not here.
   const colorLights = lights.filter(
-    (l) => l.capabilities.includes('color') && l.state.on
+    (l) => l.capabilities.includes('color') && l.state.on && l.state.temperature === undefined
   );
 
   // When palette is active, don't show individual light pins (they're on the track)

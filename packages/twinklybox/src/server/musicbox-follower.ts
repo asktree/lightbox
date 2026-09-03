@@ -15,8 +15,10 @@ import { isSyscapActive, syscapFresh, getSyscapBands } from './syscap-source.js'
 import { parseEnvelope, type EnvelopePack } from './envelope-parse.js';
 
 const MUSICBOX_BASE = 'http://localhost:3002';
+const PLAYHEAD_BASE = 'http://localhost:3001';
 const POLL_INTERVAL_MS = 100;
 const PLAYBACK_STALE_MS = 5000;
+const ENVELOPE_RETRY_MS = 10_000;
 
 interface PlaybackResp { trackId: string | null; trackName?: string | null; position: number; playing: boolean; ts: number }
 
@@ -27,6 +29,20 @@ let currentPlaybackReceivedAt = 0;
 // Manual override: when set, follower ignores musicbox /api/playback and
 // uses these values instead. Twinklybox UI exposes this via /api/source.
 let manualOverride: PlaybackResp | null = null;
+
+// Whether the last successful poll came from the lightbox playhead server
+// (:3001, ear-corrected position) vs the raw musicbox local-player state.
+let usingPlayheadServer = false;
+// Audio-output latency the playhead server reported (already subtracted
+// from earPosS — kept only for status display and as the syscap default).
+let audioLatencyMs: number | null = null;
+// Our own command→photon latency (ms). Fed by the WLED ping sampler in
+// index.ts; envelope lookups render this far ahead of the ear position so
+// photons land in step with the sound. 0 until sampled (and for targets we
+// can't measure).
+let lightLatencyMs = 0;
+export function setLightLatencyMs(ms: number) { lightLatencyMs = Math.max(0, Math.round(ms)); }
+export function getAudioLatencyMs(): number | null { return audioLatencyMs; }
 
 // Synthetic dummy audio source. When active, ignore musicbox entirely
 // and generate stem energies from a wave function — useful for testing
@@ -100,6 +116,9 @@ export function getFollowerState() {
     cachedTracks: [...envelopeCache.keys()],
     inferredPosition: inferPosition(),
     playing: currentPlayback.playing,
+    playheadServer: usingPlayheadServer,
+    audioLatencyMs,
+    lightLatencyMs,
   };
 }
 
@@ -133,9 +152,12 @@ async function fetchEnvelope(trackId: string): Promise<EnvelopePack> {
   return parseEnvelope(buf);
 }
 
+let lastEnvelopeAttemptMs = 0;
+
 function getEnvelope(trackId: string): Promise<EnvelopePack> {
   let p = envelopeCache.get(trackId);
   if (!p) {
+    lastEnvelopeAttemptMs = Date.now();
     p = fetchEnvelope(trackId);
     envelopeCache.set(trackId, p);
     p.catch((e) => {
@@ -148,19 +170,41 @@ function getEnvelope(trackId: string): Promise<EnvelopePack> {
 
 // ---- Polling loop ----
 
+function applyPlayback(j: PlaybackResp) {
+  currentPlayback = j;
+  currentPlaybackReceivedAt = Date.now();
+  if (j.trackId && j.trackId !== lastSeenTrackId) {
+    lastSeenTrackId = j.trackId;
+    // Kick a prefetch; consumer (frame-loop) reads from the cache.
+    getEnvelope(j.trackId).catch(() => {});
+  }
+}
+
 async function pollOnce() {
   if (manualOverride) return; // bypass network when in manual scrub mode
+  // Primary: the lightbox playhead server — one ear-corrected playhead for
+  // every fixture (audio-output latency already subtracted, per current
+  // output device, following whichever source stem-sync is configured for:
+  // Spotify autopilot or the local player). Fallback: musicbox's raw
+  // local-player state, for running twinklybox without the lightbox server.
+  try {
+    const r = await fetch(`${PLAYHEAD_BASE}/api/playhead`, { signal: AbortSignal.timeout(2000) });
+    if (r.ok) {
+      const j = (await r.json()) as {
+        trackId: string | null; earPosS: number; playing: boolean;
+        audio?: { latencyMs?: number };
+      };
+      usingPlayheadServer = true;
+      audioLatencyMs = typeof j.audio?.latencyMs === 'number' ? j.audio.latencyMs : null;
+      applyPlayback({ trackId: j.trackId, position: j.earPosS, playing: j.playing, ts: Date.now() });
+      return;
+    }
+  } catch { /* lightbox server down — fall through to musicbox */ }
+  usingPlayheadServer = false;
   try {
     const r = await fetch(`${MUSICBOX_BASE}/api/playback`, { signal: AbortSignal.timeout(2000) });
     if (!r.ok) return;
-    const j = (await r.json()) as PlaybackResp;
-    currentPlayback = j;
-    currentPlaybackReceivedAt = Date.now();
-    if (j.trackId && j.trackId !== lastSeenTrackId) {
-      lastSeenTrackId = j.trackId;
-      // Kick a prefetch; consumer (frame-loop) reads from the cache.
-      getEnvelope(j.trackId).catch(() => {});
-    }
+    applyPlayback((await r.json()) as PlaybackResp);
   } catch {
     // Musicbox not running / unreachable — silently leave state alone.
   }
@@ -250,6 +294,11 @@ export function tickFollower() {
   // for a few hundred ms while the binary streams in.
   const cached = envelopeCache.get(trackId);
   if (!cached) {
+    // No cached fetch — either the first attempt failed (track still
+    // ingesting → 404) and was evicted, or we raced the poll. Retry on a
+    // slow cadence so a track whose stems land mid-play starts driving
+    // lights without needing a track change.
+    if (Date.now() - lastEnvelopeAttemptMs > ENVELOPE_RETRY_MS) getEnvelope(trackId).catch(() => {});
     writeEnergy({ percentile: ZEROS(), minMax: ZEROS() });
     return;
   }
@@ -262,7 +311,10 @@ export function tickFollower() {
     return;
   }
   const env = peek._v;
-  const idxRaw = Math.floor(pos * env.sr);
+  // pos is ear-time (playhead server already subtracted audio-out latency);
+  // look ahead by our own command→photon latency so the frame we send now
+  // shows the moment its photons will actually land.
+  const idxRaw = Math.floor((pos + lightLatencyMs / 1000) * env.sr);
   if (idxRaw < 0 || idxRaw >= env.numSamples) {
     writeEnergy({ percentile: ZEROS(), minMax: ZEROS() });
     return;

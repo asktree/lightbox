@@ -13,7 +13,7 @@ import { SerialDriver } from './serial.js';
 import type { LedDriver } from './led-driver.js';
 import { FrameLoop } from './frame-loop.js';
 import { type Pattern } from './patterns.js';
-import { startFollower, setManualPlayback, getFollowerState, setSynth, type SynthParams } from './musicbox-follower.js';
+import { startFollower, setManualPlayback, getFollowerState, setSynth, setLightLatencyMs, getAudioLatencyMs, type SynthParams } from './musicbox-follower.js';
 import { audioBus, getSmoothing, setSmoothing } from './audio-bus.js';
 import { setMicActive, pushMicFrame, getMicStatus } from './mic-source.js';
 import { startSyscap, stopSyscap, setSyscapDelay, getSyscapStatus } from './syscap-source.js';
@@ -26,6 +26,9 @@ const PORT = 3010;
 let driver: LedDriver | null = null;
 let loop: FrameLoop | null = null;
 let currentPattern: Pattern | null = null;
+// Second-display override (stack targets): same visualizer, its own hue +
+// positional params. null = second display mirrors currentPattern.
+let currentPatternB: Pattern | null = null;
 
 // Known targets we might auto-connect to. First match wins on boot.
 // 'stack' = both curtains as one tall display (Ubert on top, Doggert below).
@@ -34,7 +37,7 @@ type TargetKind = 'twinkly' | 'wled' | 'serial' | 'stack';
 // The stacked display: two WLED boxes resolved by mDNS name (DHCP-proof).
 // top renders the upper rows. If only one is reachable, stack falls back to
 // driving that single box.
-const STACK = { top: 'wled-17a9ec.local', bottom: 'wled-fcac0c.local' }; // Ubert / Doggert
+const STACK = { top: 'wled-17a9ec.local', bottom: 'wled-ee1570.local' }; // Ubert / Doggert
 // Tried in order on boot; first reachable wins. `serial` is listed first so
 // that once the USB-C cable is plugged in it's preferred (wired = no WiFi
 // jitter); if no cable is present its connect() throws and we fall through
@@ -42,7 +45,6 @@ const STACK = { top: 'wled-17a9ec.local', bottom: 'wled-fcac0c.local' }; // Uber
 // uses HTTP for LED count + matrix metadata).
 const KNOWN_TARGETS: { kind: TargetKind; host: string }[] = [
   { kind: 'stack', host: 'stack' },        // both curtains as one display (default)
-  { kind: 'wled', host: '192.168.20.243' },
   { kind: 'twinkly', host: '192.168.11.253' },
 ];
 
@@ -122,6 +124,7 @@ async function connectDriver(kind: TargetKind, host: string): Promise<LedDriver>
   const layout = d.getLayout();
   console.log(`[driver] connected ${kind}@${host} — "${d.name}", ${d.numLeds} LEDs (${d.bytesPerLed === 4 ? 'RGBW' : 'RGB'}), layout=${layout ? `${layout.coords.length} pts (${layout.source})` : 'none'}`);
   if (currentPattern) loop.setPattern(currentPattern);
+  loop.setSegmentPatterns([null, currentPatternB]);
   applyBufferPref(); // re-assert buffer mode on the freshly-built driver
   applyValuePref();  // re-assert global brightness
   return d;
@@ -281,6 +284,37 @@ async function boxHealth(host: string, label: string) {
   }
 }
 
+// Rolling command→photon estimate for the connected WLED box(es): median of
+// the last ~30s of /json/info round-trips, halved (one-way). Fed to the
+// follower so envelope lookups render slightly ahead — photons land in step
+// with the sound at the ear. Measured, never eyeballed; non-WLED targets
+// stay at 0 until someone measures them.
+const PING_EVERY_MS = 5000;
+const PING_WINDOW = 12; // 2 boxes × 6 samples ≈ 30s
+const pingSamples: number[] = [];
+async function sampleWledPing(): Promise<void> {
+  if (!driver) return;
+  const d = describeDriver(driver);
+  if (d.kind !== 'wled') {
+    if (pingSamples.length) { pingSamples.length = 0; setLightLatencyMs(0); }
+    return;
+  }
+  for (const h of String(d.host).split('+')) {
+    const addr = await resolveHost(h);
+    const t0 = Date.now();
+    try {
+      const r = await fetch(`http://${addr}/json/info`, { signal: AbortSignal.timeout(2000) });
+      if (r.ok) { await r.arrayBuffer(); pingSamples.push(Date.now() - t0); }
+    } catch { /* box unreachable — no sample this round */ }
+  }
+  while (pingSamples.length > PING_WINDOW) pingSamples.shift();
+  if (pingSamples.length) {
+    const sorted = [...pingSamples].sort((a, b) => a - b);
+    setLightLatencyMs(sorted[sorted.length >> 1] / 2);
+  }
+}
+setInterval(() => { void sampleWledPing(); }, PING_EVERY_MS).unref();
+
 app.get('/api/boxhealth', async (_req, res) => {
   const [top, bottom] = await Promise.all([
     boxHealth(STACK.top, 'Ubert (top)'),
@@ -290,17 +324,23 @@ app.get('/api/boxhealth', async (_req, res) => {
 });
 
 app.post('/api/pattern', (req, res) => {
-  // Body is a Pattern union literal — solid/gradient/perlin/strobe with params.
+  // Body is a Pattern union literal (drives every display), or { a, b } to
+  // give the second display of a stack its own params (b null/omitted =
+  // mirror a). Both displays always render in their own coordinate space.
   if (!loop) return res.status(400).json({ error: 'not connected' });
-  const p = req.body as Pattern;
-  if (!p || !p.kind) return res.status(400).json({ error: 'body.kind required' });
-  loop.setPattern(p);
-  currentPattern = p;
-  res.json({ ok: true, pattern: p });
+  const body = req.body ?? {};
+  const a = (body.a ?? body) as Pattern;
+  const b = (body.b ?? null) as Pattern | null;
+  if (!a || !a.kind) return res.status(400).json({ error: 'body.kind (or body.a.kind) required' });
+  loop.setPattern(a);
+  loop.setSegmentPatterns([null, b]);
+  currentPattern = a;
+  currentPatternB = b;
+  res.json({ ok: true, pattern: a, patternB: b });
 });
 
 app.get('/api/pattern', (_req, res) => {
-  res.json({ pattern: currentPattern });
+  res.json({ pattern: currentPattern, patternB: currentPatternB });
 });
 
 app.post('/api/hz', (req, res) => {
@@ -424,7 +464,14 @@ app.get('/api/source/mic', (_req, res) => res.json(getMicStatus()));
 //   GET  /api/source/syscap                        — status
 app.post('/api/source/syscap', (req, res) => {
   const active = !!req.body?.active;
-  if (typeof req.body?.delayMs === 'number') setSyscapDelay(req.body.delayMs);
+  if (typeof req.body?.delayMs === 'number') {
+    setSyscapDelay(req.body.delayMs);
+  } else if (active) {
+    // No explicit delay: match the current output device's audio latency
+    // (from the playhead server) so held frames line up with the ear.
+    const a = getAudioLatencyMs();
+    if (a != null) setSyscapDelay(a);
+  }
   if (active) { setSynth(null); setMicActive(false); } // single live override
   if (active) {
     const r = startSyscap();

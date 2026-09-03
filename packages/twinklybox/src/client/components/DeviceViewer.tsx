@@ -149,9 +149,11 @@ function Viewer2D({
     if (canvas.parentElement) ro.observe(canvas.parentElement);
 
     let cancelled = false;
+    let inFlight = false;
     const frameDelay = new FrameDelay();
     async function tick() {
-      if (cancelled) return;
+      if (cancelled || inFlight) return; // don't stack fetches when the network is slower than 30Hz
+      inFlight = true;
       try {
         const r = await fetch('/api/frame');
         if (!r.ok) return;
@@ -194,6 +196,7 @@ function Viewer2D({
           ctx!.strokeRect(col * cellW, row * cellH, cellW, cellH);
         }
       } catch { /* server restarting / not connected */ }
+      finally { inFlight = false; }
     }
     const timer = window.setInterval(tick, 1000 / FRAME_HZ);
 
@@ -317,9 +320,11 @@ function Viewer3D({
     }).catch(console.error);
 
     let cancelled = false;
+    let inFlight = false;
     const frameDelay = new FrameDelay();
     async function pullFrame() {
-      if (cancelled || !points || !colors) return;
+      if (cancelled || inFlight || !points || !colors) return;
+      inFlight = true;
       try {
         const r = await fetch('/api/frame');
         if (!r.ok) return;
@@ -340,6 +345,7 @@ function Viewer3D({
         const attr = points.geometry.getAttribute('color') as THREE.BufferAttribute;
         attr.needsUpdate = true;
       } catch { /* ignore */ }
+      finally { inFlight = false; }
     }
     const frameTimer = window.setInterval(pullFrame, 1000 / FRAME_HZ);
 

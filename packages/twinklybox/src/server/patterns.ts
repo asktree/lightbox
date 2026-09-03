@@ -14,6 +14,10 @@ export interface PatternContext {
   bytesPerLed: 3 | 4; // RGB or RGBW
   coords: NormCoord[] | null; // null when device hasn't been calibrated
   tSec: number; // elapsed seconds since stream started
+  // Which sub-display this render is for (0 when the driver is a single
+  // display). Stateful patterns key their motion accumulators on this so
+  // two displays with different rates don't share drift state.
+  segment?: number;
   // Latest per-stem audio energy from the audio bus. Two normalization
   // views; patterns pick which to read:
   //   energy        — empirical-CDF percentile (uniform on [0,1])
@@ -198,27 +202,37 @@ export interface PerlinParams {
 // accumulate (rather than compute speed×tSec), changing a slider just changes
 // the RATE from here on, so the field never jumps. Module-level so it persists
 // across frames (only one pattern runs at a time).
-let pnLastT = 0;
-let pnBoil = 0, pnDriftX = 0, pnDriftY = 0, pnSpin = 0;
-// Same accumulators for megadrome (separate so switching patterns doesn't share
-// drift state).
-let mdLastT = 0;
-let mdDriftX = 0, mdDriftY = 0, mdSpin = 0, mdDScroll = 0;
+// Keyed by ctx.segment so independent displays (each rendered every tick
+// with their own params) each integrate their own rates.
+interface MotionState { lastT: number; boil: number; driftX: number; driftY: number; spin: number; dScroll: number }
+function motionState(map: Map<number, MotionState>, segment: number): MotionState {
+  let st = map.get(segment);
+  if (!st) { st = { lastT: 0, boil: 0, driftX: 0, driftY: 0, spin: 0, dScroll: 0 }; map.set(segment, st); }
+  return st;
+}
+const pnMotion = new Map<number, MotionState>();
+// Separate map for megadrome so switching patterns doesn't share drift state.
+const mdMotion = new Map<number, MotionState>();
 
 export function renderPerlin(out: Uint8Array, ctx: PatternContext, p: PerlinParams) {
+  const st = motionState(pnMotion, ctx.segment ?? 0);
+  // Static per-display offset: shoves each display into a far-apart region
+  // of the noise field so two displays never show the same image, even with
+  // identical params and zero drift.
+  const segOff = (ctx.segment ?? 0) * 997.7;
   // Advance accumulators by the real frame delta. Guard against the first
   // frame, stream restarts (tSec resets → negative), and long pauses.
-  let dt = ctx.tSec - pnLastT;
-  pnLastT = ctx.tSec;
+  let dt = ctx.tSec - st.lastT;
+  st.lastT = ctx.tSec;
   if (!(dt > 0) || dt > 0.5) dt = 0;
   const dirRad = ((p.floatDir ?? 0) * Math.PI) / 180;
-  pnBoil   += (p.speed ?? 0) * dt;
-  pnDriftX += Math.cos(dirRad) * (p.floatSpeed ?? 0) * dt;
-  pnDriftY += Math.sin(dirRad) * (p.floatSpeed ?? 0) * dt;
-  pnSpin    = (pnSpin + (p.spinSpeed ?? 0) * dt * 2 * Math.PI) % (2 * Math.PI);
+  st.boil   += (p.speed ?? 0) * dt;
+  st.driftX += Math.cos(dirRad) * (p.floatSpeed ?? 0) * dt;
+  st.driftY += Math.sin(dirRad) * (p.floatSpeed ?? 0) * dt;
+  st.spin    = (st.spin + (p.spinSpeed ?? 0) * dt * 2 * Math.PI) % (2 * Math.PI);
 
   const cx = 0.5, cy = 0.5;            // spin/drift origin = display center
-  const cs = Math.cos(pnSpin), sn = Math.sin(pnSpin);
+  const cs = Math.cos(st.spin), sn = Math.sin(st.spin);
   for (let i = 0; i < ctx.numLeds; i++) {
     let bx: number, by: number, bz: number;
     if (ctx.coords) {
@@ -229,9 +243,9 @@ export function renderPerlin(out: Uint8Array, ctx: PatternContext, p: PerlinPara
     }
     // Rotate the sample point around the center, then translate by the drift.
     const ox = bx - cx, oy = by - cy;
-    const x = (cx + ox * cs - oy * sn + pnDriftX) * p.scale;
-    const y = (cy + ox * sn + oy * cs + pnDriftY) * p.scale;
-    const z = bz * p.scale + pnBoil;   // boil = walk through the field's z
+    const x = (cx + ox * cs - oy * sn + st.driftX + segOff) * p.scale;
+    const y = (cy + ox * sn + oy * cs + st.driftY + segOff) * p.scale;
+    const z = bz * p.scale + st.boil;   // boil = walk through the field's z
     const n = valueNoise3(x, y, z);
     const h = p.hueCenter + (n - 0.5) * p.hueRange;
     const [r, g, b] = hsvToRgb(h, p.sat, p.val);
@@ -496,19 +510,24 @@ export function renderMegadrome(out: Uint8Array, ctx: PatternContext, p: Megadro
     bandHues[b] = ((p.hueOffset + (b / N) * p.hueRange) % 360 + 360) % 360;
   }
 
+  const st = motionState(mdMotion, ctx.segment ?? 0);
+  // Static per-display offset — same trick as perlin: each display samples a
+  // far-apart region of the noise field, so identical params still give
+  // completely different (but same-character) imagery.
+  const segOff = (ctx.segment ?? 0) * 997.7;
   // Advance spatial-motion accumulators by real elapsed dt so changing a slider
   // adjusts the rate without jumping the field. Guard first frame / reset / pause.
   {
-    let dt = ctx.tSec - mdLastT;
-    mdLastT = ctx.tSec;
+    let dt = ctx.tSec - st.lastT;
+    st.lastT = ctx.tSec;
     if (!(dt > 0) || dt > 0.5) dt = 0;
     const dirRad = ((p.floatDir ?? 0) * Math.PI) / 180;
-    mdDriftX += Math.cos(dirRad) * (p.floatSpeed ?? 0) * dt;
-    mdDriftY += Math.sin(dirRad) * (p.floatSpeed ?? 0) * dt;
-    mdSpin = (mdSpin + (p.spinSpeed ?? 0) * dt * 2 * Math.PI) % (2 * Math.PI);
-    mdDScroll += (p.dSpeed ?? 0) * dt;
+    st.driftX += Math.cos(dirRad) * (p.floatSpeed ?? 0) * dt;
+    st.driftY += Math.sin(dirRad) * (p.floatSpeed ?? 0) * dt;
+    st.spin = (st.spin + (p.spinSpeed ?? 0) * dt * 2 * Math.PI) % (2 * Math.PI);
+    st.dScroll += (p.dSpeed ?? 0) * dt;
   }
-  const mdCos = Math.cos(mdSpin), mdSin = Math.sin(mdSpin);
+  const mdCos = Math.cos(st.spin), mdSin = Math.sin(st.spin);
 
   for (let i = 0; i < ctx.numLeds; i++) {
     let cx: number, cy: number, cz: number;
@@ -524,17 +543,17 @@ export function renderMegadrome(out: Uint8Array, ctx: PatternContext, p: Megadro
       cz = 0.5 - p.originZ;
     }
     // Spin around the origin (radial is invariant), then drift the field.
-    { const rx = cx * mdCos - cy * mdSin; const ry = cx * mdSin + cy * mdCos; cx = rx + mdDriftX; cy = ry + mdDriftY; }
+    { const rx = cx * mdCos - cy * mdSin; const ry = cx * mdSin + cy * mdCos; cx = rx + st.driftX + segOff; cy = ry + st.driftY + segOff; }
     const radial = Math.sqrt(cx * cx + cy * cy + cz * cz);
 
     const inner = valueNoise3(
       cx * p.noise2PosScalar,
       cy * p.noise2PosScalar,
-      radial * p.d2Scalar - bassPulse + mdDScroll,
+      radial * p.d2Scalar - bassPulse + st.dScroll,
     );
     const cum = valueNoise4(
       cx * p.rotationScalar,
-      radial * p.dScalar - bassPulse + mdDScroll,
+      radial * p.dScalar - bassPulse + st.dScroll,
       cy * p.rotationScalar,
       inner * p.noise2Scalar,
     );
@@ -551,6 +570,43 @@ export function renderMegadrome(out: Uint8Array, ctx: PatternContext, p: Megadro
     }
     const bri = Math.max(0, Math.min(1, p.baseline + bandEnergies[band] * p.val));
     const [r, g, b] = hsvToRgb(bandHues[band], p.sat, bri);
+    writePixel(out, i, ctx.bytesPerLed, r, g, b);
+  }
+}
+
+// Sparse dots that slowly fade in and out, desynchronized per LED. Each LED
+// runs its own fade cycle: per (led, cycle) a hash decides whether the LED
+// lights this cycle (density) and where in the cycle it starts (phase), so
+// dots appear at ever-shifting spots with no stored state — deterministic on
+// time, like the other patterns.
+export interface TwinkleParams {
+  kind: 'twinkle';
+  hue: number;      // 0–360 (amber ≈ 35)
+  sat: number;      // 0–1
+  val: number;      // 0–1, peak brightness of a dot
+  density: number;  // 0–1, expected fraction of LEDs lit at any moment
+  period: number;   // seconds for one full fade-in → fade-out
+  hueJitter: number; // ± degrees of per-dot hue variation (0 = uniform)
+}
+export function renderTwinkle(out: Uint8Array, ctx: PatternContext, p: TwinkleParams) {
+  const period = Math.max(0.5, p.period);
+  const density = Math.max(0, Math.min(1, p.density));
+  const seg = (ctx.segment ?? 0) * 7919; // decorrelate stacked displays
+  for (let i = 0; i < ctx.numLeds; i++) {
+    // Per-LED phase offset so fades don't happen in lockstep.
+    const phase = hash3(i, 101, seg);
+    const cycles = ctx.tSec / period + phase;
+    const n = Math.floor(cycles);
+    const u = cycles - n; // position within this LED's current cycle, [0,1)
+    // Lit this cycle? Independent draw per (led, cycle).
+    if (hash3(i, n, seg + 1) >= density) {
+      writePixel(out, i, ctx.bytesPerLed, 0, 0, 0);
+      continue;
+    }
+    // Smooth in/out envelope over the cycle.
+    const env = Math.sin(Math.PI * u);
+    const h = p.hue + (hash3(i, n, seg + 2) - 0.5) * 2 * p.hueJitter;
+    const [r, g, b] = hsvToRgb(h, p.sat, p.val * env * env);
     writePixel(out, i, ctx.bytesPerLed, r, g, b);
   }
 }
@@ -609,7 +665,7 @@ export function renderDebugCorners(out: Uint8Array, ctx: PatternContext, _p: Deb
 // Union for dispatch
 export type Pattern =
   | SolidParams | GradientParams | PerlinParams | PlanesParams | StrobeParams | MegadromeParams
-  | DebugCornersParams;
+  | TwinkleParams | DebugCornersParams;
 
 export function render(out: Uint8Array, ctx: PatternContext, p: Pattern) {
   switch (p.kind) {
@@ -618,6 +674,7 @@ export function render(out: Uint8Array, ctx: PatternContext, p: Pattern) {
     case 'perlin':    return renderPerlin(out, ctx, p);
     case 'planes':    return renderPlanes(out, ctx, p);
     case 'strobe':    return renderStrobe(out, ctx, p);
+    case 'twinkle':   return renderTwinkle(out, ctx, p);
     case 'megadrome': return renderMegadrome(out, ctx, p);
     case 'debugcorners': return renderDebugCorners(out, ctx, p);
   }

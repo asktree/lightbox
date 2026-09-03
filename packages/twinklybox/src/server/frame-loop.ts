@@ -63,6 +63,14 @@ export class FrameLoop {
     this.pattern = p;
   }
 
+  // Per-segment pattern overrides (index-aligned with driver.getSegments()).
+  // A null/missing entry falls back to the base pattern — so "same visualizer,
+  // different hue/origin per display" is just setPatterns([a, b]).
+  private segmentPatterns: (Pattern | null)[] = [];
+  setSegmentPatterns(ps: (Pattern | null)[]) {
+    this.segmentPatterns = ps;
+  }
+
   setHz(hz: number) {
     this.targetHz = Math.max(1, Math.min(60, hz));
     // Rebuild the timer at the new period (always-on).
@@ -102,9 +110,33 @@ export class FrameLoop {
     // we render. Cheap (binary search + a few mults) and keeps pattern
     // code agnostic to where the audio comes from.
     tickFollower();
+    const segments = this.driver.getSegments?.();
     if (!this.pattern) {
       // Pattern unset — paint black so viewer + lights show black.
       this.buf.fill(0);
+    } else if (segments && segments.length) {
+      // Physically-separate sub-displays: render each independently against
+      // its own [0,1] layout (own centroid), with per-segment pattern params
+      // when set. Same tSec for all — stateful patterns (drift accumulators)
+      // advance once per tick and stay phase-locked across displays.
+      const bus = audioBus();
+      const tSec = (Date.now() - this.t0Ms) / 1000;
+      const audio = { energy: bus.energy, energyMinMax: bus.energyMinMax, bands: bus.bands, bandsMinMax: bus.bandsMinMax };
+      const bpl = this.driver.bytesPerLed;
+      for (let i = 0; i < segments.length; i++) {
+        const seg = segments[i];
+        const sub = this.buf.subarray(seg.start * bpl, (seg.start + seg.numLeds) * bpl);
+        const p = this.segmentPatterns[i] ?? this.pattern;
+        const ctx: PatternContext = {
+          numLeds: seg.numLeds,
+          bytesPerLed: bpl,
+          coords: seg.layout?.coords ?? null,
+          tSec,
+          segment: i,
+          audio,
+        };
+        render(sub, ctx, p);
+      }
     } else {
       const bus = audioBus();
       const layout = this.driver.getLayout();

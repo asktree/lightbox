@@ -14,6 +14,17 @@ export interface LedLayout {
   source: string;
 }
 
+// A physically-separate sub-display within one driver's frame (e.g. two
+// non-contiguous WLED curtains driven as one buffer). Each segment gets its
+// own normalized [0,1] layout — its own centroid — so patterns render per
+// display instead of pretending the two are one contiguous surface.
+export interface LedSegment {
+  start: number;   // first LED index in the frame buffer
+  numLeds: number;
+  layout: LedLayout | null;
+  label: string;
+}
+
 export interface LedDriver {
   // Identity for the UI.
   readonly kind: 'twinkly' | 'wled' | 'serial';
@@ -32,6 +43,9 @@ export interface LedDriver {
   startStreaming(): Promise<void>;
   // Hand control back to the device's normal effects.
   stopStreaming(): Promise<void>;
+  // Optional: physically-separate sub-displays. When present, the frame
+  // loop renders each segment independently (own pattern params + coords).
+  getSegments?(): LedSegment[];
   // Ship one rendered frame. `buf` is RGB or RGBW bytes per LED matching
   // bytesPerLed × numLeds, in strand order.
   sendFrame(buf: Uint8Array): void;

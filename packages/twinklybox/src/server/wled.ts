@@ -85,6 +85,11 @@ export class WledDriver implements LedDriver {
     this.bytesPerLed = info.leds.rgbw ? 4 : 3;
     this.matrix = info.leds.matrix;
     this.layout = this.matrix ? wledMatrixLayout(this.matrix.w, this.matrix.h) : null;
+    // Whether the timecode_buffer usermod is actually on this box (its info
+    // panel entry shows up under `u`). Stock firmware silently drops packets
+    // on the buffer port, so buffer mode must never engage without it.
+    const u = (info as { u?: Record<string, unknown> }).u ?? {};
+    this.hasTimecodeUsermod = Object.keys(u).some((k) => k.toLowerCase().includes('timecode'));
   }
 
   static async connect(host: string): Promise<WledDriver> {
@@ -104,11 +109,19 @@ export class WledDriver implements LedDriver {
   // with per-frame timecodes; `off` reverts to stock immediate DDP on 4048.
   // The 500ms-ish playout delay lives on the device, not here.
   setBufferMode(on: boolean, opts?: { port?: number }): void {
+    if (on && !this.hasTimecodeUsermod) {
+      // Stock firmware: nothing listens on the buffer port — frames would
+      // vanish silently. Refuse rather than blackhole the display.
+      console.log(`[wled] ${this.host}: buffer mode requested but timecode usermod not present — staying on stock DDP`);
+      this.bufferMode = false;
+      return;
+    }
     this.bufferMode = on;
     if (opts?.port) this.bufferPort = opts.port;
   }
 
   get isBuffered(): boolean { return this.bufferMode; }
+  private hasTimecodeUsermod = false;
 
   // Set WLED master brightness (0..255). This scales the physical LED output
   // via WLED's own (dithered) brightness — it does NOT touch the streamed

@@ -1,5 +1,6 @@
 import express from 'express';
 import http from 'http';
+import { execFile } from 'child_process';
 import { readFileSync, readdirSync, statSync, existsSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
@@ -338,6 +339,51 @@ app.post('/api/playback', (req, res) => {
   // musicbox server's stdout — visible in /tmp/musicbox.log.
   console.log(`[playback] ← ${JSON.stringify(body)} → state ${JSON.stringify({ trackId: playback.trackId, position: playback.positionAtUpdate, playing: playback.playing })}`);
   res.json({ ok: true, trackId: playback.trackId, position: inferredPosition(), playing: playback.playing });
+});
+
+// ---- Host system volume ----
+// Drives the host Mac's output volume via osascript so remote UIs can
+// control it. LAN-trust-only, like everything else on this server.
+
+function osascript(expr: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile('osascript', ['-e', expr], { timeout: 3000 }, (err, stdout) => {
+      if (err) reject(err);
+      else resolve(stdout.trim());
+    });
+  });
+}
+
+app.get('/api/sysvol', async (_req, res) => {
+  try {
+    const out = await osascript(
+      'set s to (get volume settings)\nreturn (output volume of s as text) & "," & (output muted of s as text)'
+    );
+    const [vol, muted] = out.split(',');
+    res.json({ volume: Number(vol), muted: muted === 'true' });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.post('/api/sysvol', async (req, res) => {
+  const body = req.body ?? {};
+  try {
+    if (typeof body.volume === 'number' && Number.isFinite(body.volume)) {
+      const v = Math.round(Math.min(100, Math.max(0, body.volume)));
+      await osascript(`set volume output volume ${v}`);
+    }
+    if (typeof body.muted === 'boolean') {
+      await osascript(`set volume output muted ${body.muted}`);
+    }
+    const out = await osascript(
+      'set s to (get volume settings)\nreturn (output volume of s as text) & "," & (output muted of s as text)'
+    );
+    const [vol, muted] = out.split(',');
+    res.json({ volume: Number(vol), muted: muted === 'true' });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
 });
 
 const server = http.createServer(app);

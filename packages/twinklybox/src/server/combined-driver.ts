@@ -10,7 +10,7 @@
 // don't need a shared clock; they only need to start streaming together, which
 // they do.)
 
-import type { LedDriver, LedLayout } from './led-driver.js';
+import type { LedDriver, LedLayout, LedSegment } from './led-driver.js';
 import { WledDriver, wledMatrixLayout } from './wled.js';
 
 export class CombinedWledDriver implements LedDriver {
@@ -71,6 +71,17 @@ export class CombinedWledDriver implements LedDriver {
   }
 
   getLayout(): LedLayout | null { return this.layout; }
+
+  // The two curtains are NOT physically contiguous — expose them as separate
+  // sub-displays, each with its own full [0,1] layout (own centroid). The
+  // frame loop renders each segment independently; the stacked getLayout()
+  // above remains only as the preview's combined picture.
+  getSegments(): LedSegment[] {
+    return [
+      { start: 0, numLeds: this.top.numLeds, layout: this.top.getLayout(), label: this.top.name },
+      { start: this.top.numLeds, numLeds: this.bottom.numLeds, layout: this.bottom.getLayout(), label: this.bottom.name },
+    ];
+  }
 
   async startStreaming(): Promise<void> {
     await Promise.all([this.top.startStreaming(), this.bottom.startStreaming()]);

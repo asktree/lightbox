@@ -27,7 +27,7 @@ function usePersistedState<T>(key: string, initial: T): [T, React.Dispatch<React
 // pattern params and push them via /api/pattern. The server drives the
 // UDP frame loop.
 
-type PatternKind = 'solid' | 'gradient' | 'perlin' | 'planes' | 'strobe' | 'megadrome';
+type PatternKind = 'solid' | 'gradient' | 'perlin' | 'planes' | 'strobe' | 'megadrome' | 'twinkle';
 type Axis = 'x' | 'y' | 'z' | 'index';
 
 type DriverKind = 'twinkly' | 'wled' | 'serial' | 'stack';
@@ -40,9 +40,6 @@ interface BoxStat {
   played?: number | null; dropped?: number | null; lost?: number | null;
 }
 
-// Fixed estimate for capture→bus latency: FFT window (~43ms) + overlap + the
-// 10Hz bus tick + helper pipe. Rough but stable; folds into the sync math.
-const ANALYSIS_MS = 150;
 interface DeviceInfo {
   kind: DriverKind;
   host: string;
@@ -79,6 +76,9 @@ interface SourceState {
   playing: boolean;
   micActive?: boolean;
   micFresh?: boolean;
+  playheadServer?: boolean;
+  audioLatencyMs?: number | null;
+  lightLatencyMs?: number;
 }
 
 async function api<T>(path: string, body?: unknown): Promise<T> {
@@ -142,6 +142,21 @@ export default function App() {
   const [mdOriginX, setMdOriginX] = usePersistedState('md.originX', 0.5);
   const [mdOriginY, setMdOriginY] = usePersistedState('md.originY', 0.5);
   const [mdOriginZ, setMdOriginZ] = usePersistedState('md.originZ', 0.5);
+  // Display 2 (stack bottom = Doggert) — the two curtains are separate
+  // displays, so B gets its own complete visual param set (one object, one
+  // persisted key). Audio interpretation (normMode/bandMode/minMaxGain)
+  // stays shared with display 1. The server additionally offsets B's noise
+  // field by a large static amount, so even identical params never show
+  // the same image.
+  const [mdB, setMdB] = usePersistedState('md.displayB', {
+    originX: 0.5, originY: 0.5, originZ: 0.5,
+    rotationScalar: 5, dScalar: 5, d2Scalar: 5,
+    noise2PosScalar: 3, noise2Scalar: 5, pulseSize: 2,
+    hueOffset: 0, hueRange: 180, sat: 1, val: 0.8, baseline: 0,
+    propGain: 0, propDeadzone: 0,
+    floatSpeed: 0, floatDir: 0, spinSpeed: 0, dSpeed: 0,
+  });
+  const updB = (k: keyof typeof mdB) => (v: number) => setMdB((prev) => ({ ...prev, [k]: v }));
   const [mdRotation, setMdRotation] = usePersistedState('md.rotation', 5);
   const [mdD, setMdD] = usePersistedState('md.d', 5);
   const [mdD2, setMdD2] = usePersistedState('md.d2', 5);
@@ -191,20 +206,13 @@ export default function App() {
   // Live system-audio sync — captures the Mac output mix and drives megadrome
   // on a delay matched to playback (AirPlay) latency. Needs eq12 like mic.
   const [syscapOn, setSyscapOn] = useState(false);
-  const [syscapDelay, setSyscapDelay] = usePersistedState('syscap.delayMs', 1500);
+  // No delay knob: the server matches the hold to the current output
+  // device's audio latency (from the playhead server). Never eyeballed.
   const enableSyscap = (on: boolean) => {
     setSyscapOn(on);
     if (on) setMdBandMode('eq12');
-    api('/source/syscap', { active: on, delayMs: syscapDelay }).catch(() => {});
+    api('/source/syscap', { active: on }).catch(() => {});
   };
-  useEffect(() => {
-    if (syscapOn) api('/source/syscap', { active: true, delayMs: syscapDelay }).catch(() => {});
-  }, [syscapDelay]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Estimated audio (AirPlay/output) latency — the thing we sync the lights to.
-  // User-tunable; ~2s for AirPlay. The sync panel compares total light latency
-  // against this and suggests a syscap-delay that lines them up.
-  const [audioLatency, setAudioLatency] = usePersistedState('sync.audioLatencyMs', 2000);
 
   // Per-box network + buffer diagnostics (polled for the debug panel).
   const [health, setHealth] = useState<{ top: BoxStat; bottom: BoxStat } | null>(null);
@@ -235,6 +243,14 @@ export default function App() {
   }, [gamma]);
 
   // Strobe
+  // Twinkle: sparse slow-fading dots. Defaults are amber and very sparse.
+  const [twinkleHue, setTwinkleHue] = usePersistedState('twinkle.hue', 35);
+  const [twinkleSat, setTwinkleSat] = usePersistedState('twinkle.sat', 1);
+  const [twinkleVal, setTwinkleVal] = usePersistedState('twinkle.val', 0.8);
+  const [twinkleDensity, setTwinkleDensity] = usePersistedState('twinkle.density', 0.05);
+  const [twinklePeriod, setTwinklePeriod] = usePersistedState('twinkle.period', 6);
+  const [twinkleHueJitter, setTwinkleHueJitter] = usePersistedState('twinkle.hueJitter', 0);
+
   const [strobeHue, setStrobeHue] = usePersistedState('strobe.hue', 0);
   const [strobeHzVal, setStrobeHzVal] = usePersistedState('strobe.hz', 4);
   const [strobeDuty, setStrobeDuty] = usePersistedState('strobe.duty', 0.1);
@@ -288,19 +304,23 @@ export default function App() {
   // never survives a reload during a show.
   const [debugCorners, setDebugCorners] = useState(false);
 
-  // Push pattern updates to the server whenever any param changes.
+  // Push pattern updates to the server whenever any param changes. `a` drives
+  // display 1 (Ubert); `b` overrides display 2 (Doggert) where it has its own
+  // controls (megadrome hue/origin), otherwise mirrors `a`.
   useEffect(() => {
-    const p = debugCorners ? { kind: 'debugcorners' } : buildPattern();
-    api('/pattern', p).catch(console.error);
+    const a = debugCorners ? { kind: 'debugcorners' } : buildPattern();
+    api('/pattern', { a, b: debugCorners ? null : buildPatternB() }).catch(console.error);
   }, [
     debugCorners,
     kind,
+    mdB,
     solidHue, solidSat, solidVal,
     gradAxis, gradHueStart, gradHueEnd, gradSpeed, gradVal,
     perlinScale, perlinSpeed, perlinFloatSpeed, perlinFloatDir, perlinSpinSpeed, perlinHueRange, perlinHueCenter, perlinVal,
     planesDirection, planesHue, planesVal, planesSpeed, planesSpawnRate, planesThickness, planesSoftness,
     mdOriginX, mdOriginY, mdOriginZ, mdRotation, mdD, mdD2, mdNoise2Pos, mdNoise2, mdPulse, mdHueOffset, mdHueRange, mdSat, mdVal, mdBaseline, mdPropGain, mdPropDeadzone, mdNormMode, mdMinMaxGain, mdBandMode, mdFloatSpeed, mdFloatDir, mdSpinSpeed, mdDSpeed,
     strobeHue, strobeHzVal, strobeDuty, strobeVal,
+    twinkleHue, twinkleSat, twinkleVal, twinkleDensity, twinklePeriod, twinkleHueJitter,
   ]);
 
   function buildPattern() {
@@ -320,7 +340,15 @@ export default function App() {
         floatSpeed: mdFloatSpeed, floatDir: mdFloatDir, spinSpeed: mdSpinSpeed, dSpeed: mdDSpeed,
       };
       case 'strobe':    return { kind, hue: strobeHue, sat: 1, val: strobeVal, hz: strobeHzVal, duty: strobeDuty };
+      case 'twinkle':   return { kind, hue: twinkleHue, sat: twinkleSat, val: twinkleVal, density: twinkleDensity, period: twinklePeriod, hueJitter: twinkleHueJitter };
     }
+  }
+
+  // Display 2's pattern: megadrome gets its own full visual param set;
+  // every other kind mirrors display 1 (null = server falls back to `a`).
+  function buildPatternB() {
+    if (kind !== 'megadrome') return null;
+    return { ...buildPattern(), ...mdB };
   }
 
   const start = () => api('/stream/start', {}).then((s) => setStats(s as StreamStats));
@@ -428,7 +456,7 @@ export default function App() {
 
       <section className="bg-zinc-900 rounded p-3 space-y-2">
         <div className="flex gap-2">
-          {(['solid', 'gradient', 'perlin', 'planes', 'megadrome', 'strobe'] as PatternKind[]).map((k) => (
+          {(['solid', 'gradient', 'perlin', 'planes', 'megadrome', 'strobe', 'twinkle'] as PatternKind[]).map((k) => (
             <button
               key={k}
               onClick={() => setKind(k)}
@@ -612,6 +640,13 @@ export default function App() {
               );
             })()}
 
+            {/* Two separate displays: display 1 (Ubert) uses the individual
+                md* states; display 2 (Doggert) has its own full set in mdB.
+                normMode/bandMode/minMaxGain (audio interpretation, above)
+                are shared. */}
+            <div className="text-[10px] font-mono text-zinc-400 pt-1 border-t border-zinc-800">display 1 · Ubert (top)</div>
+            <Slider label="hue offset" min={0} max={360} step={1} value={mdHueOffset} onChange={setMdHueOffset} accentHue={mdHueOffset} />
+            <Slider label="hue range" min={-360} max={360} step={1} value={mdHueRange} onChange={setMdHueRange} />
             <Slider label="originX" min={0} max={1} step={0.01} value={mdOriginX} onChange={setMdOriginX} />
             <Slider label="originY" min={0} max={1} step={0.01} value={mdOriginY} onChange={setMdOriginY} />
             <Slider label="originZ" min={0} max={1} step={0.01} value={mdOriginZ} onChange={setMdOriginZ} />
@@ -621,8 +656,6 @@ export default function App() {
             <Slider label="noise2pos" min={0} max={20} step={0.1} value={mdNoise2Pos} onChange={setMdNoise2Pos} />
             <Slider label="noise2" min={0} max={20} step={0.1} value={mdNoise2} onChange={setMdNoise2} />
             <Slider label="pulse" min={0} max={10} step={0.05} value={mdPulse} onChange={setMdPulse} />
-            <Slider label="hue offset" min={0} max={360} step={1} value={mdHueOffset} onChange={setMdHueOffset} accentHue={mdHueOffset} />
-            <Slider label="hue range" min={-360} max={360} step={1} value={mdHueRange} onChange={setMdHueRange} />
             <Slider label="sat" min={0} max={1} step={0.01} value={mdSat} onChange={setMdSat} />
             <Slider label="val" min={0} max={1} step={0.01} value={mdVal} onChange={setMdVal} />
             <Slider label="baseline" min={0} max={0.5} step={0.01} value={mdBaseline} onChange={setMdBaseline} />
@@ -635,6 +668,30 @@ export default function App() {
             </div>
             <Slider label="spin (rev/s)" min={-0.5} max={0.5} step={0.005} value={mdSpinSpeed} onChange={setMdSpinSpeed} onZero={() => setMdSpinSpeed(0)} />
             <Slider label="d speed" min={-5} max={5} step={0.02} value={mdDSpeed} onChange={setMdDSpeed} onZero={() => setMdDSpeed(0)} />
+
+            <div className="text-[10px] font-mono text-zinc-400 pt-1 border-t border-zinc-800">display 2 · Doggert (bottom)</div>
+            <Slider label="hue offset" min={0} max={360} step={1} value={mdB.hueOffset} onChange={updB('hueOffset')} accentHue={mdB.hueOffset} />
+            <Slider label="hue range" min={-360} max={360} step={1} value={mdB.hueRange} onChange={updB('hueRange')} />
+            <Slider label="originX" min={0} max={1} step={0.01} value={mdB.originX} onChange={updB('originX')} />
+            <Slider label="originY" min={0} max={1} step={0.01} value={mdB.originY} onChange={updB('originY')} />
+            <Slider label="originZ" min={0} max={1} step={0.01} value={mdB.originZ} onChange={updB('originZ')} />
+            <Slider label="rotation" min={0} max={20} step={0.1} value={mdB.rotationScalar} onChange={updB('rotationScalar')} />
+            <Slider label="D" min={0} max={20} step={0.1} value={mdB.dScalar} onChange={updB('dScalar')} />
+            <Slider label="D2" min={0} max={20} step={0.1} value={mdB.d2Scalar} onChange={updB('d2Scalar')} />
+            <Slider label="noise2pos" min={0} max={20} step={0.1} value={mdB.noise2PosScalar} onChange={updB('noise2PosScalar')} />
+            <Slider label="noise2" min={0} max={20} step={0.1} value={mdB.noise2Scalar} onChange={updB('noise2Scalar')} />
+            <Slider label="pulse" min={0} max={10} step={0.05} value={mdB.pulseSize} onChange={updB('pulseSize')} />
+            <Slider label="sat" min={0} max={1} step={0.01} value={mdB.sat} onChange={updB('sat')} />
+            <Slider label="val" min={0} max={1} step={0.01} value={mdB.val} onChange={updB('val')} />
+            <Slider label="baseline" min={0} max={0.5} step={0.01} value={mdB.baseline} onChange={updB('baseline')} />
+            <Slider label="prop gain" min={-1} max={1} step={0.01} value={mdB.propGain} onChange={updB('propGain')} />
+            <Slider label="deadzone" min={0} max={20} step={0.05} value={mdB.propDeadzone} onChange={updB('propDeadzone')} />
+            <div className="flex items-center gap-3 pt-1">
+              <div className="flex-1"><Slider label="float speed" min={0} max={1} step={0.005} value={mdB.floatSpeed} onChange={updB('floatSpeed')} onZero={() => updB('floatSpeed')(0)} /></div>
+              <DirKnob value={mdB.floatDir} onChange={updB('floatDir')} />
+            </div>
+            <Slider label="spin (rev/s)" min={-0.5} max={0.5} step={0.005} value={mdB.spinSpeed} onChange={updB('spinSpeed')} onZero={() => updB('spinSpeed')(0)} />
+            <Slider label="d speed" min={-5} max={5} step={0.02} value={mdB.dSpeed} onChange={updB('dSpeed')} onZero={() => updB('dSpeed')(0)} />
           </div>
         )}
 
@@ -644,6 +701,17 @@ export default function App() {
             <Slider label="hz" min={0.5} max={20} step={0.5} value={strobeHzVal} onChange={setStrobeHzVal} />
             <Slider label="duty" min={0.02} max={0.98} step={0.02} value={strobeDuty} onChange={setStrobeDuty} />
             <Slider label="val" min={0} max={1} step={0.01} value={strobeVal} onChange={setStrobeVal} />
+          </div>
+        )}
+
+        {kind === 'twinkle' && (
+          <div className="space-y-2 pt-2">
+            <Slider label="hue" min={0} max={360} step={1} value={twinkleHue} onChange={setTwinkleHue} accentHue={twinkleHue} />
+            <Slider label="sat" min={0} max={1} step={0.01} value={twinkleSat} onChange={setTwinkleSat} />
+            <Slider label="val" min={0} max={1} step={0.01} value={twinkleVal} onChange={setTwinkleVal} />
+            <Slider label="density" min={0.005} max={0.5} step={0.005} value={twinkleDensity} onChange={setTwinkleDensity} />
+            <Slider label="period (s)" min={1} max={20} step={0.5} value={twinklePeriod} onChange={setTwinklePeriod} />
+            <Slider label="hue jitter" min={0} max={60} step={1} value={twinkleHueJitter} onChange={setTwinkleHueJitter} />
           </div>
         )}
       </section>
@@ -710,26 +778,15 @@ export default function App() {
               {syscapOn ? 'system audio → eq12, delayed to match output latency' : 'sync lights to computer audio output'}
             </span>
           </div>
-          <div className="flex items-center gap-2 text-[10px] text-zinc-500"
-            title="How long to hold light frames so they line up with delayed audio (AirPlay ~2s). Total light latency = this + 500ms box buffer. Raise if lights LEAD the sound; lower if they LAG.">
-            <span className="w-16">sync delay</span>
-            <input type="range" min={0} max={4000} step={50} value={syscapDelay}
-              onChange={(e) => setSyscapDelay(+e.target.value)} className="flex-1" />
-            <span className="w-16 text-right">{syscapDelay}ms</span>
-          </div>
         </div>
 
-        {/* Sync diagnostics — makes the latency budget visible so the delay
-            slider isn't a blind knob. Lights should be as delayed as the audio
-            you hear (AirPlay ~2s). */}
-        <SyncPanel
-          syscapDelay={syscapDelay}
-          audioLatency={audioLatency}
-          setAudioLatency={setAudioLatency}
-          health={health}
-          bass={audio?.bands ? Math.max(audio.bands[0] ?? 0, audio.bands[1] ?? 0, audio.bands[2] ?? 0) : 0}
-          onSnap={(d) => setSyscapDelay(d)}
-        />
+        {/* Latency readout — all measured (playhead server + WLED ping
+            median), no knobs. */}
+        <div className="text-[10px] font-mono text-zinc-500">
+          playhead: <span className="text-zinc-300">{sourceState?.playheadServer ? 'lightbox (ear-corrected)' : 'musicbox local (raw)'}</span>
+          {' · '}audio out: <span className="text-zinc-300">{sourceState?.audioLatencyMs != null ? `${sourceState.audioLatencyMs}ms` : '—'}</span>
+          {' · '}light: <span className="text-zinc-300">{sourceState?.lightLatencyMs != null ? `${sourceState.lightLatencyMs.toFixed(0)}ms` : '—'}</span>
+        </div>
 
         {/* 12-band spectrum meter — live view of whatever source is active. */}
         <BandMeter bands={audio?.bands} minMax={audio?.bandsMinMax} hueOffset={mdHueOffset} hueRange={mdHueRange} />
@@ -781,10 +838,11 @@ export default function App() {
         <DeviceViewer
           height={420}
           origin={kind === 'megadrome' ? { x: mdOriginX, y: mdOriginY, z: mdOriginZ } : null}
-          // Hold the preview by the box buffer so preview == lights == music.
-          // syscapDelay is already baked into the rendered frame (the audio bus
-          // releases captured audio late), so only the box delay remains.
-          delayMs={(bufferTop || bufferBottom) ? 500 : 0}
+          // Hold the preview by the box buffer so preview == lights == music —
+          // but only when a box actually REPORTS an active buffer (usermod
+          // present). The toggles alone are a no-op on stock firmware; holding
+          // 500ms for them just lags the preview.
+          delayMs={((bufferTop && health?.top?.bufDelayMs != null) || (bufferBottom && health?.bottom?.bufDelayMs != null)) ? 500 : 0}
         />
       </section>
     </div>
@@ -815,64 +873,6 @@ function BandMeter({ bands, minMax, hueOffset = 0, hueRange = 280 }: { bands?: n
         <span>low</span>
         <span>12-band · solid = percentile · faded = min-max</span>
         <span>high</span>
-      </div>
-    </div>
-  );
-}
-
-function SyncPanel({ syscapDelay, audioLatency, setAudioLatency, health, bass, onSnap }: {
-  syscapDelay: number;
-  audioLatency: number;
-  setAudioLatency: (n: number) => void;
-  health: { top: BoxStat; bottom: BoxStat } | null;
-  bass: number;
-  onSnap: (delay: number) => void;
-}) {
-  // Average the boxes' reported buffer delay (falls back to 500ms = old fw).
-  const boxes = health ? [health.top, health.bottom].filter((b) => b.reachable && b.bufDelayMs != null) : [];
-  const boxDelay = boxes.length
-    ? Math.round(boxes.reduce((s, b) => s + (b.bufDelayMs ?? 0), 0) / boxes.length)
-    : 500;
-  const totalLight = syscapDelay + boxDelay + ANALYSIS_MS;
-  const gap = audioLatency - totalLight; // >0: lights lead the sound (raise delay)
-  // What syscap delay would make total == audioLatency.
-  const snapTo = Math.max(0, Math.min(4000, audioLatency - boxDelay - ANALYSIS_MS));
-  const synced = Math.abs(gap) <= 60;
-  const gapColor = synced ? 'text-emerald-400' : Math.abs(gap) < 200 ? 'text-amber-400' : 'text-rose-400';
-
-  return (
-    <div className="bg-zinc-950 rounded p-2 text-[10px] font-mono flex flex-col gap-1.5">
-      <div className="flex items-center gap-2">
-        <span className="text-zinc-400">sync</span>
-        {/* beat pulse — bass energy of the (delayed) audio driving the show */}
-        <div className="w-3 h-3 rounded-full" style={{ backgroundColor: `hsl(180,80%,${20 + bass * 50}%)`, transform: `scale(${0.7 + bass * 0.6})` }}
-          title="beat pulse — low-band energy of the audio the lights are reacting to right now" />
-        <span className={`ml-auto ${gapColor}`}>
-          {synced ? '● in sync (±60ms)' : gap > 0 ? `lights lead by ${gap}ms` : `lights lag by ${-gap}ms`}
-        </span>
-      </div>
-      {/* latency budget breakdown */}
-      <div className="flex items-center gap-1 text-zinc-500">
-        <span title="syscap delay (the slider)">syscap {syscapDelay}</span>
-        <span className="text-zinc-700">+</span>
-        <span title="box playout buffer (from box health)">box {boxDelay}</span>
-        <span className="text-zinc-700">+</span>
-        <span title="capture + analysis estimate">analysis {ANALYSIS_MS}</span>
-        <span className="text-zinc-700">=</span>
-        <span className="text-zinc-300">light {totalLight}ms</span>
-        <span className="text-zinc-700">vs</span>
-        <span className="text-zinc-300">audio {audioLatency}ms</span>
-      </div>
-      <div className="flex items-center gap-2">
-        <span className="text-zinc-500 w-20">audio latency</span>
-        <input type="range" min={0} max={3500} step={50} value={audioLatency}
-          onChange={(e) => setAudioLatency(+e.target.value)} className="flex-1 accent-cyan-500"
-          title="How long after playing does the sound reach your ear (AirPlay ~2s). Tune until the beat pulse matches what you hear." />
-        <span className="w-12 text-right text-zinc-400">{audioLatency}</span>
-        <button onClick={() => onSnap(snapTo)}
-          className="px-2 py-0.5 rounded bg-cyan-700 hover:bg-cyan-600 text-white"
-          title={`Set syscap delay to ${snapTo}ms so total light latency = audio latency`}
-        >snap →{snapTo}</button>
       </div>
     </div>
   );

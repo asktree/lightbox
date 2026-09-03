@@ -7,6 +7,7 @@ import { NowPlaying } from './components/NowPlaying';
 import { Queue } from './components/Queue';
 import { DriveRail } from './components/DriveRail';
 import { Diagnostics } from './components/Diagnostics';
+import { SysVol } from './components/SysVol';
 import { StemViz } from './components/StemViz';
 
 // Musicbox v2 — one screen, four zones (design doc §06):
@@ -101,6 +102,7 @@ export default function App() {
         <div className="flex-1 min-w-0">
           <NowPlaying state={ap} playhead={playhead} now={now} />
         </div>
+        <SysVol />
         <div className="shrink-0 flex rounded overflow-hidden border border-zinc-700 font-mono text-[10px]">
           {(['spotify', 'local'] as const).map((s) => (
             <button
