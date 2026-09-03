@@ -43,7 +43,10 @@ packages/
 ├── musicbox/       # Library server :3002 + thin player :5174
 ├── musicbox2/      # Spotify console UI :5175
 ├── music-scraper/  # Python: scraper CLI, ingest (zotify+demucs), autopilot daemon
-├── twinklybox/     # WLED/DDP patterns :3010/:5180
+├── twinklybox/     # DDP patterns for the curtain boxes :3010/:5180
+├── igled/          # From-scratch ESP32 firmware on the two curtain matrices
+│                   # (couch1/window, ex-WLED): buffered DDP listener + native
+│                   # routines (soap). PlatformIO, not part of pnpm dev/build.
 ├── curtainbox/     # Govee curtain client :3020/:5190
 ├── screenbox/      # ESP32-S3 touch-panel firmware (PlatformIO/C++, not JS)
 └── screenbox-art/  # Generative art sketches for the same panels (fish, comet)
