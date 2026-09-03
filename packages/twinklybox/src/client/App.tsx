@@ -93,9 +93,11 @@ async function api<T>(path: string, body?: unknown): Promise<T> {
 
 export default function App() {
   const [device, setDevice] = useState<DeviceInfo | null>(null);
-  const [stats, setStats] = useState<StreamStats>({ running: false, hz: 25, frameCount: 0, patternKind: null });
+  const [stats, setStats] = useState<StreamStats>({ running: false, hz: 30, frameCount: 0, patternKind: null });
   const [kind, setKind] = usePersistedState<PatternKind>('kind', 'gradient');
-  const [hz, setHz] = usePersistedState('hz', 25);
+  // 30Hz default: the 960-LED boxes cap out at ~34fps on the wire (28.8ms
+  // WS2812 transmit), so 30 is the highest "clean" rate with headroom.
+  const [hz, setHz] = usePersistedState('hz', 30);
   const [gamma, setGamma] = usePersistedState('gamma', 2.2);
 
   // Global master value (brightness): dims the physical LEDs via WLED master
