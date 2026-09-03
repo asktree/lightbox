@@ -84,11 +84,24 @@ constexpr uint32_t C_WHITE   = 0xffffff;
 constexpr uint32_t C_GREEN   = 0x22c55e;
 constexpr uint32_t C_RED     = 0xf87171;
 
+// --- ambience mode -----------------------------------------------------------
+// 'color' = the HSV wheel. 'normal' = a blackbody-radiator kelvin bar: CT-mode
+// lights ride it as pins (Hue renders CT with its warm-white diodes). The
+// toggle also switches the curtains (soap <-> twinkle) via the server.
+bool normalMode = false;
+constexpr int KELVIN_MIN = 2000, KELVIN_MAX = 6500;
+constexpr int MODE_R  = (int)(9 * SX);              // circular mode button,
+constexpr int MODE_CX = W - 12;                     // above the online dot
+constexpr int MODE_CY = STATUS_Y - (int)(26 * SY);
+constexpr int KB_HALF_W = R - (int)(6 * SX);        // bar half-length (world units)
+constexpr int KB_HALF_H = (int)(9 * SY);            // bar half-height (px)
+
 // --- state -------------------------------------------------------------------
 struct Orb {
   String id, name;
   int h = 0, s = 0, bri = 0;
   float hf = 0, sf = 0;            // unrounded hue/sat (drag smoothness); h/s are what we send
+  int kelvin = 2700; float kf = 2700.f;   // CT position for normal mode
   bool on = false;
   uint32_t color = 0;
   float x = 0, y = 0, z = 0;       // current (animated) world position
@@ -242,8 +255,29 @@ void worldToHs(float wx, float wy, int& h, int& s) {
 inline int   sx(float wx)           { return CX + (int)roundf(wx); }
 inline int   sy(float wy, float z)  { return CY + (int)roundf(wy * SQUASH - z); }
 
-// Where an orb with hue h / sat s sits on the (possibly rotated) wheel.
-void orbWorld(const Orb& o, float& wx, float& wy) { hsToWorldF(o.hf, o.sf, wx, wy); float a = wheelRot * (float)M_PI / 180.f; float c = cosf(a), s = sinf(a); float rx = wx * c - wy * s, ry = wx * s + wy * c; wx = rx; wy = ry; }
+// Tanner Helland kelvin -> RGB approximation (same one the web KelvinBar uses).
+uint32_t kelvinToRgb888(float kelvin) {
+  float t = fminf((float)KELVIN_MAX, fmaxf((float)KELVIN_MIN, kelvin)) / 100.f;
+  float r, g, b;
+  if (t <= 66.f) {
+    r = 255.f;
+    g = 99.47f * logf(t) - 161.12f;
+    b = t <= 19.f ? 0.f : 138.52f * logf(t - 10.f) - 305.04f;
+  } else {
+    r = 329.7f * powf(t - 60.f, -0.1332f);
+    g = 288.12f * powf(t - 60.f, -0.0755f);
+    b = 255.f;
+  }
+  auto c8 = [](float v) { return (uint32_t)fmaxf(0.f, fminf(255.f, roundf(v))); };
+  return (c8(r) << 16) | (c8(g) << 8) | c8(b);
+}
+// kelvin <-> bar position (world x; the bar spans the wheel's width, wy = 0)
+float kelvinToWx(float k) { return ((k - KELVIN_MIN) / (float)(KELVIN_MAX - KELVIN_MIN) * 2.f - 1.f) * KB_HALF_W; }
+float wxToKelvin(float wx) { float f = (wx / KB_HALF_W + 1.f) / 2.f; return KELVIN_MIN + fmaxf(0.f, fminf(1.f, f)) * (KELVIN_MAX - KELVIN_MIN); }
+
+// Where an orb sits: on the kelvin bar in normal mode, else on the (possibly
+// rotated) wheel by hue/sat.
+void orbWorld(const Orb& o, float& wx, float& wy) { if (normalMode) { wx = kelvinToWx(o.kf); wy = 0; return; } hsToWorldF(o.hf, o.sf, wx, wy); float a = wheelRot * (float)M_PI / 180.f; float c = cosf(a), s = sinf(a); float rx = wx * c - wy * s, ry = wx * s + wy * c; wx = rx; wy = ry; }
 float normDeg(float d) { d = fmodf(d, 360.f); if (d < 0) d += 360.f; return d; }
 float normDegSigned(float d) { d = normDeg(d); return d > 180.f ? d - 360.f : d; }
 float easeInOut(float t) { t = fmaxf(0.f, fminf(1.f, t)); return t < 0.5f ? 2 * t * t : 1 - powf(-2 * t + 2, 2) / 2; }
@@ -258,12 +292,15 @@ void syncOrbs() {
   std::vector<Orb> next;
   for (auto& l : lights) {
     if (!l.reachable) { offlineCount++; continue; }
-    if (!l.canColor) continue;
+    // color mode shows color-capable lights on the wheel; normal mode shows
+    // temperature-capable lights on the kelvin bar
+    if (normalMode ? !l.canTemp : !l.canColor) continue;
     Orb o;
     if (Orb* prev = findOrb(l.id)) o = *prev;
     else { o.id = l.id; o.phase = (float)(rand() % 628) / 100.f; o.fresh = true; }
     o.name = l.name; o.h = l.h; o.s = l.s; o.hf = l.h; o.sf = l.s; o.bri = l.brightness; o.on = l.on;
-    o.color = hsvToRgb888(l.h, l.s, 100);
+    if (l.hasTemp) { o.kelvin = l.temperature; o.kf = l.temperature; }
+    o.color = normalMode ? kelvinToRgb888(o.kf) : hsvToRgb888(l.h, l.s, 100);
     orbWorld(o, o.tx, o.ty);
     o.tz = l.on ? l.brightness / 100.f * ZMAX : 0;
     if (o.fresh) { o.x = o.tx; o.y = o.ty; o.z = -ORB_R * 2; o.fresh = false; }   // new orbs rise up from below
@@ -489,7 +526,8 @@ void drawReadout() {
   Orb* o = findOrb(selectedId.length() ? selectedId : lastReadoutId);
   if (!o || !readoutFader.visible()) return;
   char buf[64];
-  snprintf(buf, sizeof buf, "H %03d  S %03d  B %03d", o->h, o->s, o->bri);
+  if (normalMode) snprintf(buf, sizeof buf, "%04dK  B %03d", o->kelvin, o->bri);
+  else snprintf(buf, sizeof buf, "H %03d  S %03d  B %03d", o->h, o->s, o->bri);
   String name = o->name; name.toUpperCase();
   if (name.length() > 18) name = name.substring(0, 18);
   float a = readoutFader.alpha();
@@ -650,7 +688,58 @@ void drawTrail(float dt, bool advance) {
   }
 }
 
+// --- normal mode: the kelvin bar ---------------------------------------------
+// A horizontal spectrum of blackbody radiator whites where the wheel's centre
+// line is; CT-mode lights ride it like pins on the wheel.
+void drawKelvinBar() {
+  const int x0 = CX - KB_HALF_W, x1 = CX + KB_HALF_W;
+  const int yTop = CY - KB_HALF_H, h = KB_HALF_H * 2;
+  for (int x = x0; x <= x1; x++) {
+    uint32_t c = kelvinToRgb888(wxToKelvin((float)(x - CX)));
+    // soften the ends so the bar reads as an object, not a screen glitch
+    int edge = min(x - x0, x1 - x);
+    if (edge < 4) c = blend(C_BG, c, 0.35f + 0.65f * (edge / 4.f));
+    canvas.drawFastVLine(x, yTop, h, c);
+  }
+  canvas.drawRoundRect(x0 - 2, yTop - 2, (x1 - x0) + 5, h + 4, 3, blend(C_BG, C_WHITE, 0.3f));
+  // ticks
+  const int ticks[3] = {2700, 4000, 5500};
+  char buf[8];
+  for (int k : ticks) {
+    int x = CX + (int)roundf(kelvinToWx((float)k));
+    canvas.drawFastVLine(x, yTop + h + 4, 3, C_ZINC500);
+    snprintf(buf, sizeof buf, "%dK", k);
+    text(x, yTop + h + 9, buf, C_ZINC500, textdatum_t::top_center);
+  }
+}
+
+// The circular mode button, above the online dot: shows the mode you're in —
+// a mini hue ring in color mode, a warm-white disc in normal mode.
+void drawModeButton() {
+  if (normalMode) {
+    canvas.fillCircle(MODE_CX, MODE_CY, MODE_R - 1, kelvinToRgb888(2900.f));
+    canvas.fillCircle(MODE_CX - MODE_R / 4, MODE_CY - MODE_R / 4, MODE_R / 3, blend(kelvinToRgb888(2900.f), C_WHITE, 0.5f));
+  } else {
+    for (int i = 0; i < 12; i++)
+      canvas.fillArc(MODE_CX, MODE_CY, MODE_R - 4, MODE_R - 1, i * 30.f, i * 30.f + 31.f, hsvToRgb888(i * 30.f, 100.f, 92.f));
+  }
+  canvas.drawEllipse(MODE_CX, MODE_CY, MODE_R + 1, MODE_R + 1, C_ZINC500);
+}
+
+void toggleMode(uint32_t now) {
+  normalMode = !normalMode;
+  selectedId = "";
+  net::setMode(normalMode);
+  syncOrbs();                       // re-filter + retarget orbs for the new mode
+  floorSig = 0;                     // wheel cache is stale after a mode round-trip
+  lastInteractMs = now;
+}
+
 float wispDt = 0.f;
+// Blank the whole band (normal mode paints no disc, so everything clears).
+void clearFrameFull() {
+  memset(frame.getBuffer(), 0, (size_t)W * BAND_H * 2);
+}
 void clearFrame() {
   uint16_t* dst = (uint16_t*)frame.getBuffer();
   const float R2in = (R - 1.5f) * (R - 1.5f);
@@ -668,13 +757,13 @@ void clearFrame() {
 
 void render(uint32_t now) {
   uint32_t t0 = micros();
-  updateFloorCache();                                     // once per frame
+  if (!normalMode) updateFloorCache();                    // once per frame
   renderAccumUs += micros() - t0; renderFrames++;
 
   for (int band = 0; band < BANDS; band++) {
     viewY = band * BAND_H;
-    clearFrame();                                         // the floor cache fills the disc itself
-    pushFloorCache();
+    if (normalMode) { clearFrameFull(); drawKelvinBar(); }
+    else            { clearFrame(); pushFloorCache(); }   // the floor cache fills the disc itself
     drawRipples(now);
     drawTrail(wispDt, band == 0);
     drawWisps(wispDt, band == 0);
@@ -698,6 +787,7 @@ void render(uint32_t now) {
     drawReadout();
     drawRotReadout();
     drawStatus();
+    drawModeButton();
     if (board::PIXEL_SCALE == 1) frame.pushSprite(0, viewY);
     else { frame.setPivot(0, 0); frame.pushRotateZoom(&lcd, 0, viewY * board::PIXEL_SCALE, 0.f, board::PIXEL_SCALE, board::PIXEL_SCALE); }
   }
@@ -767,6 +857,10 @@ void applyBar(int x) {
 
 void onDown(int x, int y, uint32_t now) {
   downX = x; downY = y; downMs = now; dragging = false; longFired = false; lastInteractMs = now;
+  {
+    int dx = x - MODE_CX, dy = y - MODE_CY, rr = MODE_R + 8;
+    if (dx * dx + dy * dy <= rr * rr) { toggleMode(now); return; }
+  }
   if (Orb* o = orbAt(x, y, now)) {
     hold = Hold::Orb; holdId = o->id; selectedId = o->id;
     grabDX = sx(o->x) - x; grabDY = sy(o->y, o->z) - y;
@@ -782,7 +876,7 @@ void onDown(int x, int y, uint32_t now) {
     applyBar(x);
     return;
   }
-  {
+  if (!normalMode) {
     // grab the dial: lower part of the rim band
     float wx = x - CX, wy = (y - CY) / SQUASH;
     float d = sqrtf(wx * wx + wy * wy) / R;
@@ -803,7 +897,10 @@ void onDown(int x, int y, uint32_t now) {
   }
   hold = Hold::Floor;
   float wx = x - CX, wy = (y - CY) / SQUASH;
-  if (wx * wx + wy * wy <= (float)R * R * 1.1f) {
+  if (normalMode) {
+    if (fabsf(wx) <= KB_HALF_W + 8 && abs(y - CY) <= KB_HALF_H * 3)
+      ripples.push_back({wx, (y - CY) / SQUASH, now, kelvinToRgb888(wxToKelvin(wx))});
+  } else if (wx * wx + wy * wy <= (float)R * R * 1.1f) {
     int h, s; worldToHs(wx, wy, h, s);
     ripples.push_back({wx, wy, now, hsvToRgb888(h, s, 100)});
   }
@@ -819,6 +916,17 @@ void onMove(int x, int y, uint32_t now) {
       net::startControlling(o->id);
     }
     if (!dragging) return;
+    if (normalMode) {
+      // slide along the bar: only x matters
+      float wx = (x + grabDX) - CX;
+      float kf = wxToKelvin(wx);
+      o->kf = kf;
+      o->x = kelvinToWx(kf); o->y = 0;
+      o->tx = o->x; o->ty = 0;
+      int k = (int)roundf(kf / 10.f) * 10;              // 10K send granularity
+      if (k != o->kelvin) { o->kelvin = k; o->color = kelvinToRgb888(kf); net::setTemperature(o->id, k); }
+      return;
+    }
     // finger + grab offset -> floor coords at the orb's (locked) height
     float wx = (x + grabDX) - CX;
     float wy = ((y + grabDY) - CY + o->z) / SQUASH;

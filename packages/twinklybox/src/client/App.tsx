@@ -95,9 +95,9 @@ export default function App() {
   const [device, setDevice] = useState<DeviceInfo | null>(null);
   const [stats, setStats] = useState<StreamStats>({ running: false, hz: 30, frameCount: 0, patternKind: null });
   const [kind, setKind] = usePersistedState<PatternKind>('kind', 'gradient');
-  // 30Hz default: the 960-LED boxes cap out at ~34fps on the wire (28.8ms
-  // WS2812 transmit), so 30 is the highest "clean" rate with headroom.
-  const [hz, setHz] = usePersistedState('hz', 30);
+  // Frame rate is pinned to the server's 30Hz default — the 960-LED boxes cap
+  // out at ~34fps on the wire (28.8ms WS2812 transmit), so there's no useful
+  // range to expose a control for.
   const [gamma, setGamma] = usePersistedState('gamma', 2.2);
 
   // Global master value (brightness): dims the physical LEDs via WLED master
@@ -355,7 +355,6 @@ export default function App() {
 
   const start = () => api('/stream/start', {}).then((s) => setStats(s as StreamStats));
   const stop  = () => api('/stream/stop', {}).then((s) => setStats(s as StreamStats));
-  const pushHz = (n: number) => { setHz(n); api('/hz', { hz: n }).then((s) => setStats(s as StreamStats)); };
 
   return (
     <div className="min-h-screen p-6 max-w-5xl mx-auto space-y-6">
@@ -448,11 +447,6 @@ export default function App() {
           γ
           <input type="range" min={1} max={30} step={0.05} value={gamma} onChange={(e) => setGamma(+e.target.value)} className="w-24" />
           <span className="w-8 text-right">{gamma.toFixed(2)}</span>
-        </label>
-        <label className="text-xs text-zinc-500 font-mono flex items-center gap-2">
-          Hz
-          <input type="range" min={5} max={50} step={1} value={hz} onChange={(e) => pushHz(+e.target.value)} className="w-32" />
-          <span className="w-6 text-right">{hz}</span>
         </label>
       </section>
 

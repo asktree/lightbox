@@ -196,6 +196,26 @@ static bool fetchLights() {
   return true;
 }
 
+// Ambience mode request: 0 = none pending, 1 = color, 2 = normal. Written by
+// the UI thread, consumed (and sent) by the net task.
+static volatile int s_modeRequest = 0;
+
+static void sendMode(bool normal) {
+  JsonDocument body;
+  body["mode"] = normal ? "normal" : "color";
+  JsonArray ids = body["ids"].to<JsonArray>();
+  for (size_t i = 0; i < ROOM_LIGHT_COUNT; i++) ids.add(ROOM_LIGHT_IDS[i]);
+  String json; serializeJson(body, json);
+  HTTPClient http;
+  http.setTimeout(9000);   // the server talks to both curtain boxes before replying
+  String url = String("http://") + s_host + ":" + LIGHTBOX_PORT + "/api/ambience";
+  if (!http.begin(url)) return;
+  http.addHeader("Content-Type", "application/json");
+  int code = http.POST(json);
+  Serial.printf("[net] ambience %s -> %d\n", normal ? "normal" : "color", code);
+  http.end();
+}
+
 static void flushPending() {
   uint32_t now = millis();
   for (auto& kv : s_pending) {
@@ -309,6 +329,7 @@ static void netTask(void*) {
     s_ws.loop();
 
     flushPending();
+    if (s_modeRequest) { int m = s_modeRequest; s_modeRequest = 0; sendMode(m == 2); }
     vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
@@ -373,6 +394,8 @@ void setBrightness(const String& id, int brightness) {
   Pending& p = s_pending[id]; p.hasBri = true; p.brightness = brightness;
   xSemaphoreGive(s_mutex);
 }
+void setMode(bool normal) { s_modeRequest = normal ? 2 : 1; }
+
 void setOn(const String& id, bool on) {
   xSemaphoreTake(s_mutex, portMAX_DELAY);
   for (auto& l : s_lights) if (l.id == id) { l.on = on; s_version++; break; }

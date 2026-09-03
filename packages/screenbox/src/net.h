@@ -41,5 +41,8 @@ void setColor(const String& id, int h, int s);
 void setTemperature(const String& id, int kelvin);
 void setBrightness(const String& id, int brightness);
 void setOn(const String& id, bool on);
+// Ambience mode: POSTs /api/ambience with this room's light ids. The server
+// flips the lights (CT mode <-> color) and switches the curtains' routine.
+void setMode(bool normal);
 
 }  // namespace net

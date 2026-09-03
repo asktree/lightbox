@@ -18,6 +18,7 @@ import { Database } from './lib/database.js';
 import { LightManager } from './lib/light-manager.js';
 import { PaletteAnimator } from './lib/palette-animator.js';
 import { createLightsRouter } from './routes/lights.js';
+import { createAmbienceRouter } from './routes/ambience.js';
 import { createGroupsRouter } from './routes/groups.js';
 import { createPalettesRouter } from './routes/palettes.js';
 import { createRoomsRouter } from './routes/rooms.js';
@@ -133,6 +134,7 @@ wss.on('connection', async (ws) => {
 
 // Mount routes
 app.use('/api/lights', createLightsRouter(lightManager, paletteAnimator));
+app.use('/api/ambience', createAmbienceRouter(lightManager));
 app.use('/api/groups', createGroupsRouter(lightManager));
 app.use('/api/palettes', createPalettesRouter(lightManager));
 app.use('/api/rooms', createRoomsRouter(paletteAnimator));
