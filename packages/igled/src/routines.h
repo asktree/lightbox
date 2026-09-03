@@ -11,6 +11,10 @@ struct FxParams {
   uint8_t hue = 30;          // amber-ish
   uint8_t sat = 255;
   uint8_t val = 200;
+  // Explicit RGB base color (used instead of hue/sat when set — e.g. an
+  // exact blackbody chromaticity from the server; hueJitter is ignored)
+  bool    useRgb = false;
+  uint8_t r = 255, g = 160, b = 60;
   // twinkle
   uint8_t  density = 13;     // /255 chance a pixel lights each cycle (~5%)
   uint16_t periodMs = 6000;  // one fade in->out

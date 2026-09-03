@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
 import type { Light, LightState, LightDriver, Group, Palette, PaletteNode, DebugLogEntry, DeviceDiagnostics, LightSettings } from '@lightbox/shared';
+import { kelvinToXy, xyToHs } from '@lightbox/shared';
 import { HueDriver } from '../drivers/hue.js';
 import { GoveeDriver } from '../drivers/govee.js';
 import { TuyaDriver } from '../drivers/tuya.js';
@@ -220,7 +221,26 @@ export class LightManager extends EventEmitter {
     // Mark as recently controlled to skip polling (prevents race conditions)
     this.recentlyControlled.set(id, Date.now());
 
-    await driver.setState(this.getDeviceId(id), state, transition);
+    // Deep-warm emulation: CT hardware (Hue's WW/CW diodes) bottoms out at
+    // 2000K, but the blackbody locus keeps going. Below the floor we render
+    // the planckian chromaticity with the color engine instead (mostly the
+    // red+green diodes), while the light keeps *reporting* `temperature` so
+    // kelvin UIs keep it on the bar. Locus approximation is valid to 1667K.
+    let driverState = state;
+    if (
+      state.temperature !== undefined &&
+      state.temperature < 2000 &&
+      light.capabilities.includes('color')
+    ) {
+      const k = Math.max(1667, state.temperature);
+      const { h, s } = xyToHs(kelvinToXy(k));
+      const color = { h: Math.round(h), s: Math.round(s) };
+      driverState = { ...state, color };
+      delete driverState.temperature;      // hue's setState prefers ct if both present
+      state = { ...state, color };         // local state keeps temperature AND color
+    }
+
+    await driver.setState(this.getDeviceId(id), driverState, transition);
 
     // Update local state
     Object.assign(light.state, state);

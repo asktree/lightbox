@@ -199,6 +199,22 @@ static bool fetchLights() {
 // Ambience mode request: 0 = none pending, 1 = color, 2 = normal. Written by
 // the UI thread, consumed (and sent) by the net task.
 static volatile int s_modeRequest = 0;
+// Curtains twinkle kelvin: -1 = none pending. Coalesced (latest wins).
+static volatile int s_curtainsKelvin = -1;
+static uint32_t s_curtainsSentMs = 0;
+
+static void sendCurtainsKelvin(int k) {
+  HTTPClient http;
+  http.setTimeout(4000);
+  String url = String("http://") + s_host + ":" + LIGHTBOX_PORT + "/api/ambience/twinkle";
+  if (!http.begin(url)) return;
+  http.addHeader("Content-Type", "application/json");
+  char body[32];
+  snprintf(body, sizeof body, "{\"kelvin\":%d}", k);
+  int code = http.POST(body);
+  if (code != 200) Serial.printf("[net] twinkle kelvin -> %d\n", code);
+  http.end();
+}
 
 static void sendMode(bool normal) {
   JsonDocument body;
@@ -330,6 +346,10 @@ static void netTask(void*) {
 
     flushPending();
     if (s_modeRequest) { int m = s_modeRequest; s_modeRequest = 0; sendMode(m == 2); }
+    if (s_curtainsKelvin >= 0 && millis() - s_curtainsSentMs >= 250) {
+      int k = s_curtainsKelvin; s_curtainsKelvin = -1; s_curtainsSentMs = millis();
+      sendCurtainsKelvin(k);
+    }
     vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
@@ -395,6 +415,7 @@ void setBrightness(const String& id, int brightness) {
   xSemaphoreGive(s_mutex);
 }
 void setMode(bool normal) { s_modeRequest = normal ? 2 : 1; }
+void setCurtainsKelvin(int kelvin) { s_curtainsKelvin = kelvin; }
 
 void setOn(const String& id, bool on) {
   xSemaphoreTake(s_mutex, portMAX_DELAY);

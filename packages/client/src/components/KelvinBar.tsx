@@ -8,7 +8,9 @@ import { useLightsStore } from '../stores/lights';
 // back to color mode (and the wheel does the reverse — see ColorWheel's
 // kelvinBarRef handling).
 
-export const KELVIN_MIN = 2000;
+// 1700K floor: CT hardware stops at 2000K; below that the server emulates
+// the blackbody chromaticity with the color engine.
+export const KELVIN_MIN = 1700;
 export const KELVIN_MAX = 6500;
 
 export function xToKelvin(x: number, rect: DOMRect): number {

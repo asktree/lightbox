@@ -71,10 +71,12 @@ static void sendRoutine() {
   snprintf(buf, sizeof(buf),
     "{\"kind\":\"%s\",\"hue\":%u,\"sat\":%u,\"val\":%u,"
     "\"density\":%u,\"periodMs\":%u,\"hueJitter\":%u,"
-    "\"speed\":%u,\"smoothness\":%u,\"palette\":\"%s\"}",
+    "\"speed\":%u,\"smoothness\":%u,\"palette\":\"%s\","
+    "\"useRgb\":%s,\"rgb\":{\"r\":%u,\"g\":%u,\"b\":%u}}",
     fxName(fxParams.kind), fxParams.hue, fxParams.sat, fxParams.val,
     fxParams.density, fxParams.periodMs, fxParams.hueJitter,
-    fxParams.speed, fxParams.smoothness, fxPaletteName(fxParams.palette));
+    fxParams.speed, fxParams.smoothness, fxPaletteName(fxParams.palette),
+    fxParams.useRgb ? "true" : "false", fxParams.r, fxParams.g, fxParams.b);
   server.send(200, "application/json", buf);
 }
 
@@ -93,7 +95,12 @@ static void handleRoutine() {
     }
     if (k != fxParams.kind) { fxParams.kind = k; fxOnSwitch(); }
   }
-  if (doc["hue"].is<int>())        fxParams.hue = doc["hue"];
+  if (doc["rgb"].is<JsonObjectConst>()) {
+    JsonObjectConst rgb = doc["rgb"];
+    fxParams.useRgb = true;
+    fxParams.r = rgb["r"] | 255; fxParams.g = rgb["g"] | 160; fxParams.b = rgb["b"] | 60;
+  }
+  if (doc["hue"].is<int>())        { fxParams.hue = doc["hue"]; fxParams.useRgb = false; }
   if (doc["sat"].is<int>())        fxParams.sat = doc["sat"];
   if (doc["val"].is<int>())        fxParams.val = doc["val"];
   if (doc["density"].is<int>())    fxParams.density = doc["density"];

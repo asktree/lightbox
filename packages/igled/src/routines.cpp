@@ -91,12 +91,17 @@ static void fxTwinkle(CRGB* fb, uint32_t nowMs) {
     float u = (t % period) / (float)period;                // cycle position 0..1
     float env = sinf((float)M_PI * u);
     env *= env;                                            // ^2 for softer tails
-    uint8_t h = fxParams.hue;
-    if (fxParams.hueJitter) {
-      int8_t j = (int8_t)(hash3(i, n, 2) & 0xFF);          // -128..127
-      h = fxParams.hue + ((int16_t)j * fxParams.hueJitter) / 180;
+    CRGB base;
+    if (fxParams.useRgb) {
+      base = CRGB(fxParams.r, fxParams.g, fxParams.b);
+    } else {
+      uint8_t h = fxParams.hue;
+      if (fxParams.hueJitter) {
+        int8_t j = (int8_t)(hash3(i, n, 2) & 0xFF);        // -128..127
+        h = fxParams.hue + ((int16_t)j * fxParams.hueJitter) / 180;
+      }
+      base = CHSV(h, fxParams.sat, 255);
     }
-    CRGB base = CHSV(h, fxParams.sat, 255);
     float scale = fxParams.val * env / 255.f;              // 0..1
     for (int c = 0; c < 3; c++) {
       float v = base.raw[c] * scale;

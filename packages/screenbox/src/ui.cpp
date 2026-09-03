@@ -89,7 +89,10 @@ constexpr uint32_t C_RED     = 0xf87171;
 // lights ride it as pins (Hue renders CT with its warm-white diodes). The
 // toggle also switches the curtains (soap <-> twinkle) via the server.
 bool normalMode = false;
-constexpr int KELVIN_MIN = 2000, KELVIN_MAX = 6500;
+// 1700K floor: CT hardware stops at 2000K; below that the server emulates the
+// blackbody chromaticity with the color engine (ember territory).
+constexpr int KELVIN_MIN = 1700, KELVIN_MAX = 6500;
+float curtainsKf = 2900.f;    // the curtains' twinkle color (bar position)
 constexpr int MODE_R  = (int)(9 * SX);              // circular mode button,
 constexpr int MODE_CX = W - 12;                     // above the online dot
 constexpr int MODE_CY = STATUS_Y - (int)(26 * SY);
@@ -304,6 +307,20 @@ void syncOrbs() {
     orbWorld(o, o.tx, o.ty);
     o.tz = l.on ? l.brightness / 100.f * ZMAX : 0;
     if (o.fresh) { o.x = o.tx; o.y = o.ty; o.z = -ORB_R * 2; o.fresh = false; }   // new orbs rise up from below
+    next.push_back(o);
+  }
+  // The curtains ride the bar too (normal mode only): a pseudo-orb whose
+  // position is the twinkle routine's blackbody color, not a lightbox light.
+  if (normalMode) {
+    Orb o;
+    if (Orb* prev = findOrb("curtains")) o = *prev;
+    else { o.id = "curtains"; o.phase = (float)(rand() % 628) / 100.f; o.fresh = true; }
+    o.name = "curtains"; o.on = true; o.bri = 100;
+    o.kf = curtainsKf; o.kelvin = (int)roundf(curtainsKf);
+    o.color = kelvinToRgb888(o.kf);
+    orbWorld(o, o.tx, o.ty);
+    o.tz = 0.55f * ZMAX;                     // fixed height — no brightness to show
+    if (o.fresh) { o.x = o.tx; o.y = o.ty; o.z = -ORB_R * 2; o.fresh = false; }
     next.push_back(o);
   }
   orbs = next;
@@ -526,7 +543,8 @@ void drawReadout() {
   Orb* o = findOrb(selectedId.length() ? selectedId : lastReadoutId);
   if (!o || !readoutFader.visible()) return;
   char buf[64];
-  if (normalMode) snprintf(buf, sizeof buf, "%04dK  B %03d", o->kelvin, o->bri);
+  if (normalMode && o->id == "curtains") snprintf(buf, sizeof buf, "%04dK  TWINKLE", o->kelvin);
+  else if (normalMode) snprintf(buf, sizeof buf, "%04dK  B %03d", o->kelvin, o->bri);
   else snprintf(buf, sizeof buf, "H %03d  S %03d  B %03d", o->h, o->s, o->bri);
   String name = o->name; name.toUpperCase();
   if (name.length() > 18) name = name.substring(0, 18);
@@ -702,8 +720,8 @@ void drawKelvinBar() {
     canvas.drawFastVLine(x, yTop, h, c);
   }
   canvas.drawRoundRect(x0 - 2, yTop - 2, (x1 - x0) + 5, h + 4, 3, blend(C_BG, C_WHITE, 0.3f));
-  // ticks
-  const int ticks[3] = {2700, 4000, 5500};
+  // ticks (2000 marks where real CT diodes end and emulation begins)
+  const int ticks[4] = {2000, 2700, 4000, 5500};
   char buf[8];
   for (int k : ticks) {
     int x = CX + (int)roundf(kelvinToWx((float)k));
@@ -868,7 +886,9 @@ void onDown(int x, int y, uint32_t now) {
   }
   if (y <= BAR_Y + BAR_DROP + BAR_H + 16 && x >= BAR_X - 12 && x <= BAR_X + BAR_W + 12) {
     hold = Hold::Bar;
-    barSingle = selectedId.length() > 0 && findOrb(selectedId) != nullptr;   // selected light -> its own slider; global is paused
+    // selected light -> its own slider; global is paused (curtains pseudo-orb
+    // has no lightbox brightness, so it never gets a per-light slider)
+    barSingle = selectedId.length() > 0 && selectedId != "curtains" && findOrb(selectedId) != nullptr;
     lastInteractMs = now;
     barRatios.clear();
     int m = maxBrightness();
@@ -924,7 +944,11 @@ void onMove(int x, int y, uint32_t now) {
       o->x = kelvinToWx(kf); o->y = 0;
       o->tx = o->x; o->ty = 0;
       int k = (int)roundf(kf / 10.f) * 10;              // 10K send granularity
-      if (k != o->kelvin) { o->kelvin = k; o->color = kelvinToRgb888(kf); net::setTemperature(o->id, k); }
+      if (k != o->kelvin) {
+        o->kelvin = k; o->color = kelvinToRgb888(kf);
+        if (o->id == "curtains") { curtainsKf = kf; net::setCurtainsKelvin(k); }
+        else net::setTemperature(o->id, k);
+      }
       return;
     }
     // finger + grab offset -> floor coords at the orb's (locked) height
@@ -974,6 +998,7 @@ void checkLongPress(uint32_t now) {
   Orb* o = findOrb(holdId);
   if (!o) return;
   longFired = true;
+  if (o->id == "curtains") return;   // no on/off for the routine pin
   net::setOn(o->id, !o->on);
   ripples.push_back({o->x, o->y, now, o->on ? C_ZINC500 : o->color});
 }

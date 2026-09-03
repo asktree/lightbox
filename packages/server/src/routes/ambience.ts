@@ -11,11 +11,13 @@ import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { LightManager } from '../lib/light-manager.js';
-import { hsToXy, xyToKelvin, kelvinToXy, xyToHs } from '@lightbox/shared';
+import { hsToXy, xyToKelvin, kelvinToXy, xyToHs, xyToRgb } from '@lightbox/shared';
 
 type Mode = 'color' | 'normal';
 
-const KELVIN_MIN = 2000;
+// 1700K floor: below CT hardware's 2000K limit, into ember territory — the
+// LightManager emulates sub-2000K with the color engine (planckian xy).
+const KELVIN_MIN = 1700;
 const KELVIN_MAX = 6500;
 
 // The two igled curtain boxes. Their native routine is what shows whenever
@@ -34,14 +36,14 @@ async function resolveIp(host: string): Promise<string> {
   return address;
 }
 
-async function setCurtains(mode: Mode): Promise<Record<string, boolean>> {
-  // An active twinklybox stream would paint over the native routine.
-  await fetch(`${TWINKLYBOX}/api/stream/stop`, {
-    method: 'POST',
-    signal: AbortSignal.timeout(2000),
-  }).catch(() => {});
+// Blackbody color as 0-255 RGB bytes at full brightness (the boxes' twinkle
+// uses this as its dot color — exact planckian chromaticity, no HSV detour).
+function kelvinToRgbBytes(k: number): { r: number; g: number; b: number } {
+  const { r, g, b } = xyToRgb(kelvinToXy(Math.max(1667, k)));
+  return { r: Math.round(r * 255), g: Math.round(g * 255), b: Math.round(b * 255) };
+}
 
-  const kind = mode === 'normal' ? 'twinkle' : 'soap';
+async function postRoutine(body: object): Promise<Record<string, boolean>> {
   const results: Record<string, boolean> = {};
   await Promise.all(CURTAIN_HOSTS.map(async (host) => {
     try {
@@ -49,7 +51,7 @@ async function setCurtains(mode: Mode): Promise<Record<string, boolean>> {
       const r = await fetch(`http://${ip}/api/routine`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ kind }),
+        body: JSON.stringify(body),
         signal: AbortSignal.timeout(3000),
       });
       results[host] = r.ok;
@@ -58,6 +60,19 @@ async function setCurtains(mode: Mode): Promise<Record<string, boolean>> {
     }
   }));
   return results;
+}
+
+async function setCurtains(mode: Mode, twinkleKelvin: number): Promise<Record<string, boolean>> {
+  // An active twinklybox stream would paint over the native routine.
+  await fetch(`${TWINKLYBOX}/api/stream/stop`, {
+    method: 'POST',
+    signal: AbortSignal.timeout(2000),
+  }).catch(() => {});
+
+  if (mode === 'normal') {
+    return postRoutine({ kind: 'twinkle', rgb: kelvinToRgbBytes(twinkleKelvin) });
+  }
+  return postRoutine({ kind: 'soap' });
 }
 
 // --- per-light position memory ----------------------------------------------
@@ -70,6 +85,7 @@ interface AmbienceState {
   mode: Mode;
   lastColor: Record<string, { h: number; s: number }>;
   lastKelvin: Record<string, number>;
+  curtainsKelvin: number;    // the twinkle dots' blackbody color (normal mode)
 }
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = join(__dirname, '../../data/state/ambience.json');
@@ -78,10 +94,10 @@ function loadState(): AmbienceState {
   try {
     const s = JSON.parse(readFileSync(STATE_FILE, 'utf8')) as AmbienceState;
     if (s.mode === 'color' || s.mode === 'normal') {
-      return { mode: s.mode, lastColor: s.lastColor ?? {}, lastKelvin: s.lastKelvin ?? {} };
+      return { mode: s.mode, lastColor: s.lastColor ?? {}, lastKelvin: s.lastKelvin ?? {}, curtainsKelvin: s.curtainsKelvin ?? 2900 };
     }
   } catch { /* first run / unreadable — start fresh */ }
-  return { mode: 'color', lastColor: {}, lastKelvin: {} };
+  return { mode: 'color', lastColor: {}, lastKelvin: {}, curtainsKelvin: 2900 };
 }
 
 function saveState(s: AmbienceState): void {
@@ -99,7 +115,23 @@ const state = loadState();
 export function createAmbienceRouter(lightManager: LightManager): Router {
   const router = Router();
 
-  router.get('/', (_req, res) => res.json({ mode: state.mode }));
+  router.get('/', (_req, res) => res.json({ mode: state.mode, curtainsKelvin: state.curtainsKelvin }));
+
+  // Slide the twinkle dots along the blackbody locus (screenbox drags the
+  // curtains pin on the kelvin bar). Applies live; save is debounced so a
+  // drag doesn't hammer the disk.
+  let saveTimer: NodeJS.Timeout | null = null;
+  router.post('/twinkle', async (req, res) => {
+    const k = Number(req.body?.kelvin);
+    if (!Number.isFinite(k)) {
+      res.status(400).json({ error: 'kelvin required' });
+      return;
+    }
+    state.curtainsKelvin = Math.max(KELVIN_MIN, Math.min(KELVIN_MAX, Math.round(k)));
+    if (!saveTimer) saveTimer = setTimeout(() => { saveTimer = null; saveState(state); }, 1000);
+    const curtains = await postRoutine({ kind: 'twinkle', rgb: kelvinToRgbBytes(state.curtainsKelvin) });
+    res.json({ kelvin: state.curtainsKelvin, curtains });
+  });
 
   router.post('/', async (req, res) => {
     const m = req.body?.mode as Mode;
@@ -147,7 +179,7 @@ export function createAmbienceRouter(lightManager: LightManager): Router {
 
     state.mode = m;
     saveState(state);
-    const curtains = await setCurtains(m);
+    const curtains = await setCurtains(m, state.curtainsKelvin);
     res.json({ mode: state.mode, changed, curtains });
   });
 
