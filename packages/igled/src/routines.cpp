@@ -38,41 +38,81 @@ bool fxByName(const char* name, Fx& out) {
   return false;
 }
 
-// --- twinkle ---------------------------------------------------------------
-// Port of twinklybox's 'twinkle' pattern: each LED runs its own fade cycle
-// with a hashed phase; per (led, cycle) a hash decides whether it lights.
+// --- temporal dithering ------------------------------------------------------
+// WS2812s are 8-bit with linear PWM, so the bottom of a fade steps through
+// codes the eye can clearly see (4 -> 3 is a 25% jump). Routines that render
+// in float write their sub-LSB remainder into fxFrac (0..255 = 0..1 LSB);
+// applyDither() then flickers each byte between the two adjacent codes with a
+// duty cycle equal to the fraction. The threshold walks a golden-ratio
+// sequence per frame with a per-byte hash offset, so the time-average lands
+// exactly on the fraction and neighboring bytes never blink in sync.
 static inline uint32_t hash3(uint32_t ix, uint32_t iy, uint32_t iz) {
   uint32_t h = (ix * 374761393u) ^ (iy * 668265263u) ^ (iz * 2147483647u);
   h = (h ^ (h >> 13)) * 1274126177u;
   return h ^ (h >> 16);
 }
 
+static uint8_t  fxFrac[NUM_LEDS * 3];   // sub-LSB fractions, zero = no dither
+static uint32_t ditherFrame = 0;
+
+static void applyDither(CRGB* fb) {
+  uint8_t* raw = reinterpret_cast<uint8_t*>(fb);
+  const uint8_t phase = (uint8_t)(ditherFrame * 158u);   // ~0.618 * 256 per frame
+  for (uint32_t i = 0; i < NUM_LEDS * 3; i++) {
+    uint8_t f = fxFrac[i];
+    if (!f) continue;
+    uint8_t t = (uint8_t)(hash3(i, 0, 7) + phase);
+    if (f > t && raw[i] < 255) raw[i]++;
+  }
+}
+
+// --- twinkle ---------------------------------------------------------------
+// Port of twinklybox's 'twinkle' pattern: each LED runs its own fade cycle
+// with a hashed phase; per (led, cycle) a hash decides whether it lights.
+// The fade envelope is computed in float and dithered, so the tail of each
+// fade glides instead of stepping.
 static void fxTwinkle(CRGB* fb, uint32_t nowMs) {
   const uint32_t period = fxParams.periodMs < 500 ? 500 : fxParams.periodMs;
   for (uint16_t i = 0; i < NUM_LEDS; i++) {
+    uint32_t o = (uint32_t)i * 3;
     // Per-LED phase offset in ms so fades desynchronize.
     uint32_t phase = hash3(i, 101, 0) % period;
     uint32_t t = nowMs + phase;
     uint32_t n = t / period;
-    uint8_t  u = (uint8_t)(((t % period) * 255) / period);   // cycle position
-    if ((hash3(i, n, 1) & 0xFF) >= fxParams.density) { fb[i] = CRGB::Black; continue; }
-    uint8_t env = sin8(u >> 1);                              // half-sine 0..255..0
-    env = scale8(env, env);                                  // ^2 for softer tails
+    if ((hash3(i, n, 1) & 0xFF) >= fxParams.density) {
+      fb[i] = CRGB::Black;
+      fxFrac[o] = fxFrac[o + 1] = fxFrac[o + 2] = 0;
+      continue;
+    }
+    float u = (t % period) / (float)period;                // cycle position 0..1
+    float env = sinf((float)M_PI * u);
+    env *= env;                                            // ^2 for softer tails
     uint8_t h = fxParams.hue;
     if (fxParams.hueJitter) {
-      int8_t j = (int8_t)(hash3(i, n, 2) & 0xFF);            // -128..127
+      int8_t j = (int8_t)(hash3(i, n, 2) & 0xFF);          // -128..127
       h = fxParams.hue + ((int16_t)j * fxParams.hueJitter) / 180;
     }
-    fb[i] = CHSV(h, fxParams.sat, scale8(fxParams.val, env));
+    CRGB base = CHSV(h, fxParams.sat, 255);
+    float scale = fxParams.val * env / 255.f;              // 0..1
+    for (int c = 0; c < 3; c++) {
+      float v = base.raw[c] * scale;
+      uint8_t hi = (uint8_t)v;
+      fb[i].raw[c] = hi;
+      fxFrac[o + c] = (uint8_t)((v - hi) * 255.f);
+    }
   }
 }
 
 // --- dispatch --------------------------------------------------------------
 static uint32_t lastSoapFrame = 0;
 
-void fxOnSwitch() { fxSoapReset(); }
+void fxOnSwitch() {
+  fxSoapReset();
+  memset(fxFrac, 0, sizeof(fxFrac));   // routines that don't dither leave it 0
+}
 
 void fxRender(CRGB* fb, uint32_t nowMs) {
+  ditherFrame++;
   switch (fxParams.kind) {
     case Fx::Off:
       fill_solid(fb, NUM_LEDS, CRGB::Black);
@@ -90,4 +130,5 @@ void fxRender(CRGB* fb, uint32_t nowMs) {
       break;
     }
   }
+  applyDither(fb);
 }

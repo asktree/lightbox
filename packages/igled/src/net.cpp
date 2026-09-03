@@ -49,24 +49,17 @@ static void handleInfo() {
 }
 
 // --- /json/state -----------------------------------------------------------
-// Accepts the two writes twinklybox makes against WLED: {"bri":n} and (for
-// remote recovery) {"rb":true}.
+// {"rb":true} = remote reboot. There is deliberately no master brightness —
+// routines and the stream sender own their own levels; "bri" is ignored.
 static void handleState() {
   if (server.method() == HTTP_GET) {
-    char buf[96];
-    snprintf(buf, sizeof(buf), "{\"on\":true,\"bri\":%u}", FastLED.getBrightness());
-    server.send(200, "application/json", buf);
+    server.send(200, "application/json", "{\"on\":true,\"bri\":255}");
     return;
   }
   JsonDocument doc;
   if (deserializeJson(doc, server.arg("plain"))) {
     server.send(400, "application/json", "{\"error\":\"bad json\"}");
     return;
-  }
-  if (doc["bri"].is<int>() && !gSafe) {
-    int b = doc["bri"].as<int>();
-    if (b < 0) b = 0; if (b > 255) b = 255;
-    FastLED.setBrightness((uint8_t)b);
   }
   server.send(200, "application/json", "{\"success\":true}");
   if (doc["rb"].as<bool>()) { delay(150); ESP.restart(); }

@@ -100,11 +100,6 @@ export default function App() {
   // range to expose a control for.
   const [gamma, setGamma] = usePersistedState('gamma', 2.2);
 
-  // Global master value (brightness): dims the physical LEDs via WLED master
-  // brightness. The preview mirrors raw frames, so it ignores this. Persisted +
-  // re-asserted on load (survives server restarts), like the buffer pref.
-  const [globalValue, setGlobalValue] = usePersistedState('global.value', 128);
-  useEffect(() => { api('/brightness', { value: globalValue }).catch(() => {}); }, [globalValue]);
 
   // Solid
   const [solidHue, setSolidHue] = usePersistedState('solid.hue', 0);
@@ -375,19 +370,6 @@ export default function App() {
           )}
         </div>
       </header>
-
-      {/* Global master value (brightness). Scales the physical LED output via
-          WLED's master brightness — the preview ignores it (it mirrors the raw
-          rendered frames). */}
-      <section className="bg-zinc-900 rounded p-3 flex items-center gap-3 text-xs font-mono">
-        <span className="text-zinc-200 font-semibold w-12">value</span>
-        <input type="range" min={0} max={255} step={1} value={globalValue}
-          onChange={(e) => setGlobalValue(+e.target.value)}
-          className="flex-1 accent-amber-400"
-          title="Master brightness sent to the box(es). Dims the physical lights only — the preview below stays full-brightness." />
-        <span className="w-10 text-right text-zinc-300">{globalValue}</span>
-        <span className="text-[10px] text-zinc-600 w-40">physical only · preview ignores</span>
-      </section>
 
       {/* Driver target selector. Switching kind+host hot-swaps the LED
           target (server tears down the old driver and stands up a new

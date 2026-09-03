@@ -104,11 +104,6 @@ export class CombinedWledDriver implements LedDriver {
   get bufferedTop(): boolean { return this.top.isBuffered; }
   get bufferedBottom(): boolean { return this.bottom.isBuffered; }
 
-  setBrightness(bri: number): void {
-    this.top.setBrightness(bri);
-    this.bottom.setBrightness(bri);
-  }
-
   // Send to one box, optionally software-delayed by delayMs (to match the other
   // box's on-box buffer). delayMs<=0 sends immediately.
   private sendBox(driver: WledDriver, queue: { t: number; data: Uint8Array }[], data: Uint8Array, delayMs: number, now: number): void {

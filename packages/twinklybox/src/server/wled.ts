@@ -123,32 +123,6 @@ export class WledDriver implements LedDriver {
   get isBuffered(): boolean { return this.bufferMode; }
   private hasTimecodeUsermod = false;
 
-  // Set WLED master brightness (0..255). This scales the physical LED output
-  // via WLED's own (dithered) brightness — it does NOT touch the streamed
-  // frames, so the twinklybox preview (which mirrors raw frames) ignores it.
-  // Leading+trailing throttle so slider drags don't flood the box.
-  private pendingBri: number | null = null;
-  private briTimer: ReturnType<typeof setTimeout> | null = null;
-  setBrightness(bri: number): void {
-    this.pendingBri = Math.max(0, Math.min(255, Math.round(bri)));
-    if (this.briTimer) return;               // a send is already in flight
-    this.sendBri();
-    this.briTimer = setTimeout(() => {
-      this.briTimer = null;
-      if (this.pendingBri !== null) this.setBrightness(this.pendingBri);
-    }, 120);
-  }
-  private sendBri(): void {
-    if (this.pendingBri === null) return;
-    const v = this.pendingBri;
-    this.pendingBri = null;
-    fetch(`http://${this.host}/json/state`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ bri: v }),
-    }).catch(() => { /* ignore — best-effort */ });
-  }
-
   // WLED auto-detects realtime — no handshake. We just track the streaming
   // flag locally so the FrameLoop's gating is honored.
   async startStreaming(): Promise<void> { this.streaming = true; }

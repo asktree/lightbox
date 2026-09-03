@@ -70,18 +70,6 @@ function applyBufferPref(): void {
   }
 }
 
-// Global master brightness ("value") applied to the box(es) — scales physical
-// output only; the preview mirrors raw frames and ignores it. Server-level so
-// it survives reconnects, like the buffer pref. null = leave the box's bri be.
-let globalValue: number | null = null;
-type Dimmable = { setBrightness: (bri: number) => void };
-function asDimmable(d: LedDriver | null): Dimmable | null {
-  return d && typeof (d as unknown as Dimmable).setBrightness === 'function' ? (d as unknown as Dimmable) : null;
-}
-function applyValuePref(): void {
-  if (globalValue !== null) asDimmable(driver)?.setBrightness(globalValue);
-}
-
 // Connect both stacked boxes. If only one is reachable, drive that one alone
 // ("if only one is plugged in it can just do the one"). Throws if neither is.
 async function connectStack(): Promise<LedDriver> {
@@ -126,7 +114,6 @@ async function connectDriver(kind: TargetKind, host: string): Promise<LedDriver>
   if (currentPattern) loop.setPattern(currentPattern);
   loop.setSegmentPatterns([null, currentPatternB]);
   applyBufferPref(); // re-assert buffer mode on the freshly-built driver
-  applyValuePref();  // re-assert global brightness
   return d;
 }
 
@@ -216,16 +203,8 @@ app.get('/api/buffer', (_req, res) => {
   res.json({ top: bufferTop, bottom: bufferBottom, port: bufferPort ?? null });
 });
 
-// Global master "value" / brightness (0..255). Dims the physical output via
-// WLED brightness; the preview ignores it. POST { value }.
-app.post('/api/brightness', (req, res) => {
-  const v = Number(req.body?.value);
-  if (!Number.isFinite(v)) return res.status(400).json({ error: 'value 0..255 required' });
-  globalValue = Math.max(0, Math.min(255, Math.round(v)));
-  asDimmable(driver)?.setBrightness(globalValue);
-  res.json({ value: globalValue });
-});
-app.get('/api/brightness', (_req, res) => res.json({ value: globalValue }));
+// No master brightness: routines own their own levels (val params). The old
+// WLED-style global bri was a second dimmer stage that also quantized fades.
 
 // Per-box network + buffer health for the UI diagnostics panel. Queries each
 // stacked box's /json/info: round-trip latency (a live jitter proxy), WiFi

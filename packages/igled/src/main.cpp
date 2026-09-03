@@ -52,7 +52,8 @@ void setup() {
   if (!safeMode) {
     FastLED.addLeds<WS2812, LED_PIN, LED_ORDER>(leds, NUM_LEDS);
     FastLED.setMaxPowerInVoltsAndMilliamps(POWER_VOLTS, POWER_MA);
-    FastLED.setBrightness(140);
+    // No master brightness: routines (and the stream sender) own their own
+    // levels. A second dimmer stage would just re-quantize every fade.
     fill_solid(leds, NUM_LEDS, CRGB::Black);
     FastLED.show();
   }

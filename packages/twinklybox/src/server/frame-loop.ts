@@ -25,12 +25,29 @@ export class FrameLoop {
   private t0Ms = Date.now();
   private frameCount = 0;
   private lastTickMs = 0;
-  // Gamma encoding LUT applied to every output byte. Linear pattern values
+  // Gamma encoding applied to every output byte. Linear pattern values
   // → perceptually-linear LED brightness. Default 2.2 (sRGB-ish). 1.0 =
   // pass-through. Higher = stretches more PWM range to the bottom (better
   // resolution where the eye is most sensitive).
+  //
+  // The LUT holds FLOATS and the fractional part is temporally dithered:
+  // γ2.2 maps inputs 0..40 onto only ~5 output codes, so slow fades used to
+  // step visibly ("stuttery twinkles"). Instead of rounding, each byte
+  // flickers between the two adjacent codes with a duty cycle equal to the
+  // fraction — the eye integrates it back into the in-between level. The
+  // threshold walks a golden-ratio sequence per frame with a per-byte hash
+  // offset, so the time-average is exact and neighbors don't blink in sync.
   private gamma = 2.2;
-  private gammaLut: Uint8Array = new Uint8Array(256);
+  private gammaLutF: Float32Array = new Float32Array(256);
+  private static readonly DITHER_OFFSETS = (() => {
+    const a = new Float32Array(1024);
+    let h = 2166136261;
+    for (let i = 0; i < a.length; i++) {
+      h ^= i; h = Math.imul(h, 16777619);
+      a[i] = ((h >>> 0) % 65536) / 65536;
+    }
+    return a;
+  })();
 
   constructor(driver: LedDriver) {
     this.driver = driver;
@@ -50,7 +67,7 @@ export class FrameLoop {
 
   private rebuildGammaLut() {
     for (let i = 0; i < 256; i++) {
-      this.gammaLut[i] = Math.round(Math.pow(i / 255, this.gamma) * 255);
+      this.gammaLutF[i] = Math.pow(i / 255, this.gamma) * 255;
     }
   }
   setGamma(g: number) {
@@ -149,12 +166,20 @@ export class FrameLoop {
       };
       render(this.buf, ctx, this.pattern);
     }
-    // Gamma-encode the buffer in place if a non-unity gamma is set.
-    // Skipped at gamma=1 to avoid the loop overhead in that case.
+    // Gamma-encode the buffer in place, temporally dithering the fractional
+    // part (see the field comment). Skipped at gamma=1.
     if (this.gamma !== 1) {
-      const lut = this.gammaLut;
+      const lut = this.gammaLutF;
+      const off = FrameLoop.DITHER_OFFSETS;
       const b = this.buf;
-      for (let i = 0; i < b.length; i++) b[i] = lut[b[i]];
+      const phase = (this.frameCount * 0.6180339887498949) % 1;
+      for (let i = 0; i < b.length; i++) {
+        const g = lut[b[i]];
+        const base = g | 0;
+        let t = phase + off[i & 1023];
+        if (t >= 1) t -= 1;
+        b[i] = g - base > t ? base + 1 : base;
+      }
     }
     // Only ship to the wire when the user has explicitly started streaming.
     if (this.streaming) this.driver.sendFrame(this.buf);
