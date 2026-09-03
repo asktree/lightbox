@@ -64,12 +64,7 @@ constexpr int   CX = W / 2, CY = (int)(218 * SY);   // floor centre on screen
 constexpr int   ZMAX = (int)(78 * SY);              // orb height at brightness 100
 constexpr int   ORB_R = (int)(10 * SX), HIT_R = (int)(24 * SX);   // ORB_R = half-size when awake; 30 % smaller dormant
 
-// Brightness rail: a vertical spine along the left edge; one row per light
-// (plus a global row on top), each light's distance to the right = brightness.
-constexpr int RAIL_X    = (int)(12 * SX);
-constexpr int RAIL_W    = (int)(52 * SX);   // 0..100% of travel
-constexpr int RAIL_Y0   = (int)(50 * SY);
-constexpr int RAIL_STEP = (int)(14 * SY);
+constexpr int BAR_X = (int)(22 * SX), BAR_Y = (int)(14 * SY), BAR_W = (int)(170 * SX), BAR_H = (int)(6 * SY);
 constexpr int READOUT_Y = (int)(34 * SY);
 constexpr int LINE_H = (int)(11 * SY);            // readout line spacing
 constexpr int STATUS_Y = H - 5;
@@ -101,8 +96,13 @@ float curtainsKf = 2900.f;    // the curtains' twinkle color (bar position)
 constexpr int MODE_R  = (int)(9 * SX);              // circular mode button,
 constexpr int MODE_CX = W - 12;                     // above the online dot
 constexpr int MODE_CY = STATUS_Y - (int)(26 * SY);
-constexpr int KB_HALF_W = R - (int)(6 * SX);        // bar half-length (world units)
-constexpr int KB_HALF_H = (int)(9 * SY);            // bar half-height (px)
+// Vertical kelvin bar along the left edge (cool at the top, warm at the
+// bottom), and the global-shift track mirrored on the right.
+constexpr int KBV_X  = (int)(30 * SX);              // bar centerline (screen x)
+constexpr int KBV_HW = (int)(9 * SX);               // bar half-width
+constexpr int KBV_Y0 = (int)(48 * SY);              // top = cool end
+constexpr int KBV_Y1 = H - (int)(30 * SY);          // bottom = warm end
+constexpr int GK_X   = W - (int)(30 * SX);          // global-shift track x
 
 // --- state -------------------------------------------------------------------
 struct Orb {
@@ -123,7 +123,7 @@ uint32_t seenVersion = 0xffffffff;
 int offlineCount = 0;
 
 String selectedId;
-enum class Hold { None, Orb, Bar, Floor, Rim };
+enum class Hold { None, Orb, Bar, Floor, Rim, GlobalK };
 Hold     hold = Hold::None;
 String   holdId;
 bool     dragging = false, longFired = false;
@@ -135,7 +135,9 @@ bool     wasTouched = false;
 uint32_t lastFrameMs = 0;
 
 struct Ratio { String id; float ratio; };
-std::vector<Ratio> barRatios;                     // global-row drag scales lights proportionally
+std::vector<Ratio> barRatios;
+bool barSingle = false;                           // bar drag targets the selected light only
+constexpr int BAR_DROP = (int)(5 * SY);           // the per-light slider sits this far below the global one
 int curtainsBri = 78;                             // twinkle val as 0-100 (~200/255)
 
 // --- wheel rotation (grab the bottom rim and turn the dial) -------------------
@@ -278,25 +280,26 @@ uint32_t kelvinToRgb888(float kelvin) {
   auto c8 = [](float v) { return (uint32_t)fmaxf(0.f, fminf(255.f, roundf(v))); };
   return (c8(r) << 16) | (c8(g) << 8) | c8(b);
 }
-// kelvin <-> bar position (world x; the bar spans the wheel's width, wy = 0).
+// kelvin <-> bar position (screen y; cool at the top, warm at the bottom).
 // The bar is linear in MIRED (1e6/K), the perceptually-uniform CCT scale —
 // linear-in-kelvin crams all the visible change into the warm end, which made
 // low-range drags feel like big steps.
-constexpr float MIRED_WARM = 1e6f / KELVIN_MIN;   // left end
-constexpr float MIRED_COOL = 1e6f / KELVIN_MAX;   // right end
-float kelvinToWx(float k) {
-  float m = 1e6f / fmaxf(1.f, k);
-  float f = (MIRED_WARM - m) / (MIRED_WARM - MIRED_COOL);   // 0 = warm/left
-  return (fmaxf(0.f, fminf(1.f, f)) * 2.f - 1.f) * KB_HALF_W;
+constexpr float MIRED_WARM = 1e6f / KELVIN_MIN;   // bottom end
+constexpr float MIRED_COOL = 1e6f / KELVIN_MAX;   // top end
+float yToMired(float y) {
+  float f = fmaxf(0.f, fminf(1.f, (y - KBV_Y0) / (float)(KBV_Y1 - KBV_Y0)));
+  return MIRED_COOL + f * (MIRED_WARM - MIRED_COOL);
 }
-float wxToKelvin(float wx) {
-  float f = fmaxf(0.f, fminf(1.f, (wx / KB_HALF_W + 1.f) / 2.f));
-  return 1e6f / (MIRED_WARM - f * (MIRED_WARM - MIRED_COOL));
+float miredToY(float m) {
+  float f = (m - MIRED_COOL) / (MIRED_WARM - MIRED_COOL);
+  return KBV_Y0 + fmaxf(0.f, fminf(1.f, f)) * (KBV_Y1 - KBV_Y0);
 }
+float yToKelvin(float y) { return 1e6f / yToMired(y); }
+float kelvinToY(float k) { return miredToY(1e6f / fmaxf(1.f, k)); }
 
-// Where an orb sits: on the kelvin bar in normal mode, else on the (possibly
-// rotated) wheel by hue/sat.
-void orbWorld(const Orb& o, float& wx, float& wy) { if (normalMode) { wx = kelvinToWx(o.kf); wy = 0; return; } hsToWorldF(o.hf, o.sf, wx, wy); float a = wheelRot * (float)M_PI / 180.f; float c = cosf(a), s = sinf(a); float rx = wx * c - wy * s, ry = wx * s + wy * c; wx = rx; wy = ry; }
+// Where an orb sits: on the vertical kelvin bar in normal mode, else on the
+// (possibly rotated) wheel by hue/sat.
+void orbWorld(const Orb& o, float& wx, float& wy) { if (normalMode) { wx = KBV_X - CX; wy = (kelvinToY(o.kf) - CY) / SQUASH; return; } hsToWorldF(o.hf, o.sf, wx, wy); float a = wheelRot * (float)M_PI / 180.f; float c = cosf(a), s = sinf(a); float rx = wx * c - wy * s, ry = wx * s + wy * c; wx = rx; wy = ry; }
 float normDeg(float d) { d = fmodf(d, 360.f); if (d < 0) d += 360.f; return d; }
 float normDegSigned(float d) { d = normDeg(d); return d > 180.f ? d - 360.f : d; }
 float easeInOut(float t) { t = fmaxf(0.f, fminf(1.f, t)); return t < 0.5f ? 2 * t * t : 1 - powf(-2 * t + 2, 2) / 2; }
@@ -321,7 +324,7 @@ void syncOrbs() {
     if (l.hasTemp) { o.kelvin = l.temperature; o.kf = l.temperature; }
     o.color = normalMode ? kelvinToRgb888(o.kf) : hsvToRgb888(l.h, l.s, 100);
     orbWorld(o, o.tx, o.ty);
-    o.tz = l.on ? l.brightness / 100.f * ZMAX : 0;
+    o.tz = (normalMode || !l.on) ? 0 : l.brightness / 100.f * ZMAX;   // pins sit ON the vertical bar
     if (o.fresh) { o.x = o.tx; o.y = o.ty; o.z = -ORB_R * 2; o.fresh = false; }   // new orbs rise up from below
     next.push_back(o);
   }
@@ -335,7 +338,7 @@ void syncOrbs() {
     o.kf = curtainsKf; o.kelvin = (int)roundf(curtainsKf);
     o.color = kelvinToRgb888(o.kf);
     orbWorld(o, o.tx, o.ty);
-    o.tz = curtainsBri / 100.f * ZMAX;       // height = twinkle brightness
+    o.tz = 0;                                // sits on the bar like the lights
     if (o.fresh) { o.x = o.tx; o.y = o.ty; o.z = -ORB_R * 2; o.fresh = false; }
     next.push_back(o);
   }
@@ -511,31 +514,39 @@ void shadowText(int x, int y, const char* s, uint32_t c, textdatum_t d) {
   text(x, y, s, c, d);
 }
 
-// The brightness rail: global row on top (proportional scaling, like the old
-// LEVEL bar), then one row per orb — including the curtains pin, whose row
-// drives the twinkle routine's brightness. Marker distance right = level.
-void drawRail() {
-  const int rows = 1 + (int)orbs.size();
+void drawBar(uint32_t now) {
+  Orb* sel = findOrb(selectedId);
+  const bool single = sel != nullptr;
   const bool active = hold == Hold::Bar;
   char buf[8];
-  text(RAIL_X, RAIL_Y0 - RAIL_STEP / 2 - 3, "LEVEL", C_ZINC500, textdatum_t::bottom_left);
-  canvas.drawFastVLine(RAIL_X, RAIL_Y0 - RAIL_STEP / 2, rows * RAIL_STEP, C_ZINC700);
-  const int half = (int)(3 * SX);
-  for (int r = 0; r < rows; r++) {
-    const int cy = RAIL_Y0 + r * RAIL_STEP;
-    canvas.fillRect(RAIL_X, cy, RAIL_W, 1, C_ZINC800);   // row track
-    int v; uint32_t col; bool on = true; const String id = r == 0 ? String("*") : orbs[r - 1].id;
-    if (r == 0) { v = maxBrightness(); col = blend(C_ZINC50, C_PURPLE, 0.25f); }
-    else { Orb& o = orbs[r - 1]; v = o.bri; on = o.on; col = on ? o.color : C_ZINC700; }
-    const int mx = RAIL_X + RAIL_W * v / 100;
-    const int h2 = r == 0 ? half + 1 : half;
-    canvas.fillRect(mx - h2, cy - h2, 2 * h2 + 1, 2 * h2 + 1, col);
-    canvas.drawRect(mx - h2, cy - h2, 2 * h2 + 1, 2 * h2 + 1, blend(C_BG, C_WHITE, on ? 0.7f : 0.3f));
-    if (active && holdId == id) {
-      canvas.drawRect(mx - h2 - 2, cy - h2 - 2, 2 * h2 + 5, 2 * h2 + 5, C_WHITE);
-      snprintf(buf, sizeof buf, "%d%%", v);
-      text(RAIL_X + RAIL_W + 8, cy, buf, C_WHITE, textdatum_t::middle_left);
+
+  // global bar (greyed out and inert while a light is selected)
+  {
+    int m = maxBrightness();
+    int fillW = BAR_W * m / 100;
+    canvas.fillRoundRect(BAR_X, BAR_Y, BAR_W, BAR_H, BAR_H / 2, single ? blend(C_BG, C_ZINC800, 0.6f) : C_ZINC800);
+    for (int i = 1; i < 10; i++) canvas.drawFastVLine(BAR_X + BAR_W * i / 10, BAR_Y + BAR_H + 2, 2, single ? blend(C_BG, C_ZINC700, 0.5f) : C_ZINC700);
+    if (fillW > 0) canvas.fillRoundRect(BAR_X, BAR_Y, max(fillW, BAR_H), BAR_H, BAR_H / 2, single ? C_ZINC700 : blend(C_ZINC50, C_PURPLE, 0.25f));
+    if (!single) {
+      int tx = BAR_X + fillW;
+      canvas.fillRoundRect(tx - 2, BAR_Y - 4, 4, BAR_H + 8, 2, active ? C_PURPLE : C_WHITE);
+      snprintf(buf, sizeof buf, "%d%%", m);
+      text(BAR_X + BAR_W + 8, BAR_Y + BAR_H / 2, buf, active ? C_WHITE : C_ZINC400, textdatum_t::middle_left);
     }
+  }
+  text(BAR_X, BAR_Y - 2, "LEVEL", C_ZINC500, textdatum_t::bottom_left);
+
+  // per-light slider, overlapping just below (the curtains pin gets one too —
+  // it drives the twinkle routine's brightness)
+  if (single) {
+    int y = BAR_Y + BAR_DROP;
+    int fillW = BAR_W * sel->bri / 100;
+    canvas.fillRoundRect(BAR_X, y, BAR_W, BAR_H, BAR_H / 2, C_ZINC800);
+    if (fillW > 0) canvas.fillRoundRect(BAR_X, y, max(fillW, BAR_H), BAR_H, BAR_H / 2, sel->on ? sel->color : C_ZINC700);
+    int tx = BAR_X + fillW;
+    canvas.fillRoundRect(tx - 2, y - 4, 4, BAR_H + 8, 2, active ? C_PURPLE : C_WHITE);
+    snprintf(buf, sizeof buf, "%d%%", sel->bri);
+    text(BAR_X + BAR_W + 8, y + BAR_H / 2, buf, active ? C_WHITE : C_ZINC400, textdatum_t::middle_left);
   }
 }
 
@@ -718,20 +729,54 @@ void drawTrail(float dt, bool advance) {
 // A horizontal spectrum of blackbody radiator whites where the wheel's centre
 // line is; CT-mode lights ride it like pins on the wheel.
 void drawKelvinBar() {
-  const int x0 = CX - KB_HALF_W, x1 = CX + KB_HALF_W;
-  const int yTop = CY - KB_HALF_H, h = KB_HALF_H * 2;
-  for (int x = x0; x <= x1; x++) {
-    canvas.drawFastVLine(x, yTop, h, kelvinToRgb888(wxToKelvin((float)(x - CX))));
+  for (int y = KBV_Y0; y <= KBV_Y1; y++) {
+    canvas.fillRect(KBV_X - KBV_HW, y, 2 * KBV_HW + 1, 1, kelvinToRgb888(yToKelvin((float)y)));
   }
-  canvas.drawRoundRect(x0 - 2, yTop - 2, (x1 - x0) + 5, h + 4, 3, blend(C_BG, C_WHITE, 0.3f));
+  canvas.drawRoundRect(KBV_X - KBV_HW - 2, KBV_Y0 - 2, 2 * KBV_HW + 5, (KBV_Y1 - KBV_Y0) + 5, 3, blend(C_BG, C_WHITE, 0.3f));
   // ticks (2000 marks where real CT diodes end and emulation begins)
   const int ticks[5] = {1500, 2000, 2700, 4000, 5500};
   char buf[8];
   for (int k : ticks) {
-    int x = CX + (int)roundf(kelvinToWx((float)k));
-    canvas.drawFastVLine(x, yTop + h + 4, 3, C_ZINC500);
+    int y = (int)roundf(kelvinToY((float)k));
+    canvas.fillRect(KBV_X + KBV_HW + 4, y, 3, 1, C_ZINC500);
     snprintf(buf, sizeof buf, "%dK", k);
-    text(x, yTop + h + 9, buf, C_ZINC500, textdatum_t::top_center);
+    text(KBV_X + KBV_HW + 9, y, buf, C_ZINC500, textdatum_t::middle_left);
+  }
+}
+
+// The global-shift track on the right: one handle at the midpoint (mean
+// mired) of every pin on the bar; dragging it slides them all together.
+struct GkGrab { String id; float m0; };
+std::vector<GkGrab> gkOrbs;
+float gkGrabDY = 0.f;       // finger-to-handle offset at grab
+float gkStartMired = 0.f;   // handle (mean) mired at grab
+
+float gkMeanMired() {
+  if (orbs.empty()) return 1e6f / 2900.f;
+  float m = 0;
+  for (auto& o : orbs) m += 1e6f / fmaxf(1.f, o.kf);
+  return m / orbs.size();
+}
+
+void drawGlobalK() {
+  if (orbs.empty()) return;
+  canvas.drawFastVLine(GK_X, KBV_Y0, KBV_Y1 - KBV_Y0, C_ZINC700);
+  text(GK_X, KBV_Y0 - 6, "ALL", C_ZINC500, textdatum_t::bottom_center);
+  const float m = gkMeanMired();
+  const int y = (int)roundf(miredToY(m));
+  const bool active = hold == Hold::GlobalK;
+  const int h2 = (int)(5 * SX);
+  canvas.fillRect(GK_X - h2, y - h2, 2 * h2 + 1, 2 * h2 + 1, kelvinToRgb888(1e6f / m));
+  canvas.drawRect(GK_X - h2, y - h2, 2 * h2 + 1, 2 * h2 + 1, active ? C_WHITE : blend(C_BG, C_WHITE, 0.6f));
+  // chevrons hinting the drag axis
+  for (int i = 0; i < 3; i++) {
+    canvas.drawPixel(GK_X - i, y - h2 - 3 - i, C_ZINC500); canvas.drawPixel(GK_X + i, y - h2 - 3 - i, C_ZINC500);
+    canvas.drawPixel(GK_X - i, y + h2 + 3 + i, C_ZINC500); canvas.drawPixel(GK_X + i, y + h2 + 3 + i, C_ZINC500);
+  }
+  if (active) {
+    char buf[8];
+    snprintf(buf, sizeof buf, "%dK", (int)roundf(1e6f / m));
+    text(GK_X - h2 - 5, y, buf, C_WHITE, textdatum_t::middle_right);
   }
 }
 
@@ -784,7 +829,7 @@ void render(uint32_t now) {
 
   for (int band = 0; band < BANDS; band++) {
     viewY = band * BAND_H;
-    if (normalMode) { clearFrameFull(); drawKelvinBar(); }
+    if (normalMode) { clearFrameFull(); drawKelvinBar(); drawGlobalK(); }
     else            { clearFrame(); pushFloorCache(); }   // the floor cache fills the disc itself
     drawRipples(now);
     drawTrail(wispDt, band == 0);
@@ -805,7 +850,7 @@ void render(uint32_t now) {
       ditherText(x, L.y, L.text.c_str(), L.color, textdatum_t::bottom_center, L.alpha, true);
     }
 
-    drawRail();
+    drawBar(now);
     drawReadout();
     drawRotReadout();
     drawStatus();
@@ -868,18 +913,32 @@ Orb* orbAt(int x, int y, uint32_t now) {
   return best;
 }
 
-void applyRail(const String& id, int x) {
-  int v = constrain((x - RAIL_X) * 100 / RAIL_W, 1, 100);
-  if (id == "*") {
-    for (auto& r : barRatios) net::setBrightness(r.id, max(1, (int)roundf(v * r.ratio)));
+void applyBar(int x) {
+  int v = constrain((x - BAR_X) * 100 / BAR_W, 1, 100);
+  if (barSingle) {
+    Orb* o = findOrb(selectedId);
+    if (!o) return;
+    o->bri = v;
+    if (!normalMode) o->tz = o->on ? v / 100.f * ZMAX : 0;
+    if (o->id == "curtains") { curtainsBri = v; net::setCurtainsVal((int)roundf(v * 2.55f)); }
+    else net::setBrightness(o->id, v);
     return;
   }
-  Orb* o = findOrb(id);
-  if (!o) return;
-  o->bri = v;
-  o->tz = o->on ? v / 100.f * ZMAX : 0;    // orb height tracks the drag live
-  if (id == "curtains") { curtainsBri = v; net::setCurtainsVal((int)roundf(v * 2.55f)); }
-  else net::setBrightness(id, v);
+  for (auto& r : barRatios) net::setBrightness(r.id, max(1, (int)roundf(v * r.ratio)));
+}
+
+// Move one pin to a kelvin value: updates the orb and sends (shared by the
+// single-pin drag and the global-shift drag).
+void setOrbKelvin(Orb& o, float kf) {
+  o.kf = kf;
+  orbWorld(o, o.x, o.y);
+  o.tx = o.x; o.ty = o.y;
+  int k = (int)roundf(kf / 10.f) * 10;                // 10K send granularity
+  if (k == o.kelvin) return;
+  o.kelvin = k;
+  o.color = kelvinToRgb888(kf);
+  if (o.id == "curtains") { curtainsKf = kf; net::setCurtainsKelvin(k); }
+  else net::setTemperature(o.id, k);
 }
 
 void onDown(int x, int y, uint32_t now) {
@@ -888,22 +947,30 @@ void onDown(int x, int y, uint32_t now) {
     int dx = x - MODE_CX, dy = y - MODE_CY, rr = MODE_R + 8;
     if (dx * dx + dy * dy <= rr * rr) { toggleMode(now); return; }
   }
-  // Rail markers win inside the rail column (checked before orbs so a light
-  // parked at the left of the wheel can't shadow its own brightness row).
-  if (x >= RAIL_X - 10 && x <= RAIL_X + RAIL_W + (int)(14 * SX)) {
-    const int rows = 1 + (int)orbs.size();
-    int r = (y - RAIL_Y0 + RAIL_STEP / 2) / max(1, RAIL_STEP);
-    if (y >= RAIL_Y0 - RAIL_STEP / 2 && r >= 0 && r < rows) {
-      hold = Hold::Bar;
-      holdId = r == 0 ? "*" : orbs[r - 1].id;
-      if (holdId == "*") {
-        barRatios.clear();
-        int m = maxBrightness();
-        for (auto& l : lights) if (l.on && l.reachable) barRatios.push_back({l.id, m > 0 ? (float)l.brightness / m : 1.f});
-      }
-      applyRail(holdId, x);
-      return;
+  if (y <= BAR_Y + BAR_DROP + BAR_H + 16 && x >= BAR_X - 12 && x <= BAR_X + BAR_W + 12) {
+    hold = Hold::Bar;
+    // selected light -> its own slider (the curtains pin included: its slider
+    // drives the twinkle brightness); global is paused
+    barSingle = selectedId.length() > 0 && findOrb(selectedId) != nullptr;
+    lastInteractMs = now;
+    barRatios.clear();
+    int m = maxBrightness();
+    for (auto& l : lights) if (l.on && l.reachable) barRatios.push_back({l.id, m > 0 ? (float)l.brightness / m : 1.f});
+    applyBar(x);
+    return;
+  }
+  // The global-shift handle (normal mode, right edge): grab and slide every
+  // pin along the locus at once.
+  if (normalMode && abs(x - GK_X) <= (int)(16 * SX) && y >= KBV_Y0 - 12 && y <= KBV_Y1 + 12 && !orbs.empty()) {
+    hold = Hold::GlobalK;
+    gkStartMired = gkMeanMired();
+    gkGrabDY = miredToY(gkStartMired) - y;
+    gkOrbs.clear();
+    for (auto& o : orbs) {
+      gkOrbs.push_back({o.id, 1e6f / fmaxf(1.f, o.kf)});
+      if (o.id != "curtains") net::startControlling(o.id);
     }
+    return;
   }
   if (Orb* o = orbAt(x, y, now)) {
     hold = Hold::Orb; holdId = o->id; selectedId = o->id;
@@ -932,8 +999,8 @@ void onDown(int x, int y, uint32_t now) {
   hold = Hold::Floor;
   float wx = x - CX, wy = (y - CY) / SQUASH;
   if (normalMode) {
-    if (fabsf(wx) <= KB_HALF_W + 8 && abs(y - CY) <= KB_HALF_H * 3)
-      ripples.push_back({wx, (y - CY) / SQUASH, now, kelvinToRgb888(wxToKelvin(wx))});
+    if (abs(x - KBV_X) <= KBV_HW * 3 && y >= KBV_Y0 - 8 && y <= KBV_Y1 + 8)
+      ripples.push_back({wx, (y - CY) / SQUASH, now, kelvinToRgb888(yToKelvin((float)y))});
   } else if (wx * wx + wy * wy <= (float)R * R * 1.1f) {
     int h, s; worldToHs(wx, wy, h, s);
     ripples.push_back({wx, wy, now, hsvToRgb888(h, s, 100)});
@@ -951,18 +1018,8 @@ void onMove(int x, int y, uint32_t now) {
     }
     if (!dragging) return;
     if (normalMode) {
-      // slide along the bar: only x matters
-      float wx = (x + grabDX) - CX;
-      float kf = wxToKelvin(wx);
-      o->kf = kf;
-      o->x = kelvinToWx(kf); o->y = 0;
-      o->tx = o->x; o->ty = 0;
-      int k = (int)roundf(kf / 10.f) * 10;              // 10K send granularity
-      if (k != o->kelvin) {
-        o->kelvin = k; o->color = kelvinToRgb888(kf);
-        if (o->id == "curtains") { curtainsKf = kf; net::setCurtainsKelvin(k); }
-        else net::setTemperature(o->id, k);
-      }
+      // slide along the vertical bar: only y matters
+      setOrbKelvin(*o, yToKelvin((float)(y + grabDY)));
       return;
     }
     // finger + grab offset -> floor coords at the orb's (locked) height
@@ -975,7 +1032,15 @@ void onMove(int x, int y, uint32_t now) {
     int h = (int)roundf(hf) % 360, s = (int)roundf(sf);
     if (h != o->h || s != o->s) { o->h = h; o->s = s; o->color = hsvToRgb888(hf, sf, 100); net::setColor(o->id, h, s); }
   } else if (hold == Hold::Bar) {
-    applyRail(holdId, x);
+    applyBar(x);
+  } else if (hold == Hold::GlobalK) {
+    float dm = yToMired((float)(y + gkGrabDY)) - gkStartMired;
+    for (auto& g : gkOrbs) {
+      Orb* o = findOrb(g.id);
+      if (!o) continue;
+      float m = fmaxf(MIRED_COOL, fminf(MIRED_WARM, g.m0 + dm));
+      setOrbKelvin(*o, 1e6f / m);
+    }
   } else if (hold == Hold::Rim) {
     float wx = x - CX, wy = (y - CY) / SQUASH;
     float a = atan2f(wy, wx) * 180.f / (float)M_PI;
@@ -998,6 +1063,9 @@ void onUp(int x, int y, uint32_t now) {
     if (dragging) net::stopControlling(holdId);
   } else if (hold == Hold::Floor) {
     selectedId = "";                       // tap the floor to deselect
+  } else if (hold == Hold::GlobalK) {
+    for (auto& g : gkOrbs) if (g.id != "curtains") net::stopControlling(g.id);
+    gkOrbs.clear();
   } else if (hold == Hold::Rim) {
     for (auto& ro : rotOrbs) net::stopControlling(ro.id);
     rotOrbs.clear();
