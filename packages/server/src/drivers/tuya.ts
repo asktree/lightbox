@@ -630,12 +630,16 @@ export class TuyaDriver implements LightDriver {
   private parseState(config: TuyaDeviceConfig, dps: Record<string, any>): LightState {
     const mapping = config.mapping || {};
     const state: LightState = { on: false };
+    let workMode: string | undefined;
 
     for (const [dp, value] of Object.entries(dps)) {
       const info = mapping[dp];
       if (!info) continue;
 
       switch (info.code) {
+        case 'work_mode':
+          workMode = String(value);
+          break;
         case 'switch_led':
           state.on = Boolean(value);
           break;
@@ -681,6 +685,13 @@ export class TuyaDriver implements LightDriver {
           break;
       }
     }
+
+    // Status dumps report EVERY dp, including whichever of colour_data /
+    // temp_value is stale — work_mode says which one the bulb is actually
+    // rendering. Without this, a stale temp_value (0 -> "2700K") overrode
+    // the live color on every report and yanked UI pins back to 2700.
+    if (workMode === 'colour') delete state.temperature;
+    else if (workMode === 'white') delete state.color;
 
     return state;
   }

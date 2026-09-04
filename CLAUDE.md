@@ -3,6 +3,13 @@
 Unified smart light control: React UIs, Node.js services, a Python music
 pipeline, and audio-reactive light drives.
 
+## Writing Style
+
+Always use ASD-STE100 (Simplified Technical English) in all writing for this
+repo — docs, code comments, commit messages, and replies. Keep sentences
+short (about 20 words or fewer). Use the active voice. Give one instruction
+for each sentence. Use approved, simple vocabulary where possible.
+
 ## Quick Start
 
 ```bash
