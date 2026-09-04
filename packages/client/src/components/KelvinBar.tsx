@@ -8,14 +8,29 @@ import { useLightsStore } from '../stores/lights';
 // back to color mode (and the wheel does the reverse — see ColorWheel's
 // kelvinBarRef handling).
 
-// 1000K floor: CT hardware stops at 2000K; below that the server emulates
-// the blackbody chromaticity with the color engine.
+// 1000K floor: CT hardware stops at its per-brand floor; below that the
+// server emulates the blackbody chromaticity with the color engine.
 export const KELVIN_MIN = 1000;
 export const KELVIN_MAX = 6500;
 
+// The bar is linear in MIRED (1e6/K), the perceptually-uniform CCT scale —
+// the same mapping the screenbox bar uses. Linear-in-kelvin crams all the
+// visible change into the warm end. Warm = left, cool = right.
+const MIRED_WARM = 1e6 / KELVIN_MIN;
+const MIRED_COOL = 1e6 / KELVIN_MAX;
+
+export function kelvinToFrac(k: number): number {
+  const m = 1e6 / Math.max(1, k);
+  return Math.max(0, Math.min(1, (MIRED_WARM - m) / (MIRED_WARM - MIRED_COOL)));
+}
+
+export function fracToKelvin(frac: number): number {
+  const f = Math.max(0, Math.min(1, frac));
+  return 1e6 / (MIRED_WARM - f * (MIRED_WARM - MIRED_COOL));
+}
+
 export function xToKelvin(x: number, rect: DOMRect): number {
-  const frac = Math.max(0, Math.min(1, (x - rect.left) / rect.width));
-  return Math.round(KELVIN_MIN + frac * (KELVIN_MAX - KELVIN_MIN));
+  return Math.round(fracToKelvin((x - rect.left) / rect.width));
 }
 
 // Tanner Helland kelvin→RGB approximation, clamped to our range.
@@ -59,9 +74,12 @@ export function KelvinBar({ lights, width, zoneRef, wheelRef, selectedLightId, o
   const barLights = lights.filter((l) => l.state.on && l.state.temperature !== undefined);
 
   const gradient = useMemo(() => {
-    const stops = Array.from({ length: 11 }, (_, i) => {
-      const k = KELVIN_MIN + (i / 10) * (KELVIN_MAX - KELVIN_MIN);
-      return `${kelvinToHex(k)} ${i * 10}%`;
+    // Sample stops uniformly in bar position (= mired) so the gradient
+    // matches where the pins sit.
+    const N = 16;
+    const stops = Array.from({ length: N + 1 }, (_, i) => {
+      const f = i / N;
+      return `${kelvinToHex(fracToKelvin(f))} ${(f * 100).toFixed(1)}%`;
     });
     return `linear-gradient(to right, ${stops.join(', ')})`;
   }, []);
@@ -114,18 +132,18 @@ export function KelvinBar({ lights, width, zoneRef, wheelRef, selectedLightId, o
       className="relative select-none rounded-full"
       style={{ width, height: BAR_HEIGHT, background: gradient }}
     >
-      {/* Kelvin ticks */}
-      {[2700, 4000, 5500].map((k) => (
+      {/* Kelvin ticks (2000 marks where real CT diodes end and emulation begins) */}
+      {[1500, 2000, 2700, 4000, 5500].map((k) => (
         <div
           key={k}
           className="absolute top-full mt-0.5 -translate-x-1/2 text-[9px] text-zinc-500 pointer-events-none"
-          style={{ left: `${((k - KELVIN_MIN) / (KELVIN_MAX - KELVIN_MIN)) * 100}%` }}
+          style={{ left: `${kelvinToFrac(k) * 100}%` }}
         >{k}K</div>
       ))}
 
       {barLights.map((light) => {
         const k = light.state.temperature ?? 3000;
-        const frac = (Math.max(KELVIN_MIN, Math.min(KELVIN_MAX, k)) - KELVIN_MIN) / (KELVIN_MAX - KELVIN_MIN);
+        const frac = kelvinToFrac(k);
         const isDragging = dragging === light.id;
         return (
           <div
