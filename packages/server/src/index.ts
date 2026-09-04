@@ -19,6 +19,7 @@ import { LightManager } from './lib/light-manager.js';
 import { PaletteAnimator } from './lib/palette-animator.js';
 import { createLightsRouter } from './routes/lights.js';
 import { createAmbienceRouter } from './routes/ambience.js';
+import { startTapDial } from './services/tap-dial.js';
 import { createGroupsRouter } from './routes/groups.js';
 import { createPalettesRouter } from './routes/palettes.js';
 import { createRoomsRouter } from './routes/rooms.js';
@@ -180,6 +181,10 @@ async function start() {
   try {
     await lightManager.initialize();
     console.log(`Discovered ${lightManager.getAllLights().length} lights`);
+
+    // Hue Tap Dial: bare rotation = brightness; button-1-held rotation =
+    // kelvin. Buttons 2-4 keep their bridge behavior.
+    startTapDial(lightManager);
 
     await paletteAnimator.initialize({ resumeActuation: !cold });
     console.log('Palette animator initialized');

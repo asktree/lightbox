@@ -37,6 +37,9 @@ export class HueDriver implements LightDriver {
 
   // Callback for pushing real-time updates
   onUpdate?: (deviceId: string, state: LightState) => void;
+  // Non-light CLIP v2 EventStream items (button, relative_rotary). The
+  // tap-dial service consumes these.
+  onRemoteEvent?: (item: any) => void;
 
   // Debug logging callbacks (initialized so 'in' check works)
   onDebug: ((id: string, deviceName: string, message: string, direction: 'in' | 'out') => void) | undefined = undefined;
@@ -168,6 +171,30 @@ export class HueDriver implements LightDriver {
     await this.buildV2Mapping();
 
     return lights;
+  }
+
+  // Generic bounded CLIP v2 GET. The tap-dial service uses it to map button
+  // resource ids to control ids.
+  async getClipResource(rtype: string): Promise<any[]> {
+    if (!this.config) return [];
+    return new Promise((resolve) => {
+      const req = https.request({
+        hostname: this.config!.bridgeIp,
+        path: `/clip/v2/resource/${rtype}`,
+        method: 'GET',
+        headers: { 'hue-application-key': this.config!.username },
+        rejectUnauthorized: false,
+      }, (res) => {
+        let data = '';
+        res.on('data', (c) => { data += c; });
+        res.on('end', () => {
+          try { resolve(JSON.parse(data).data ?? []); } catch { resolve([]); }
+        });
+      });
+      req.on('error', () => resolve([]));
+      req.setTimeout(10000, () => { req.destroy(); resolve([]); });
+      req.end();
+    });
   }
 
   private async buildV2Mapping(): Promise<void> {
@@ -398,6 +425,10 @@ export class HueDriver implements LightDriver {
       if (event.type !== 'update' || !event.data) continue;
 
       for (const item of event.data) {
+        if (item.type === 'button' || item.type === 'relative_rotary') {
+          this.onRemoteEvent?.(item);
+          continue;
+        }
         if (item.type !== 'light') continue;
 
         const v1Id = this.v2IdToV1Id.get(item.id);

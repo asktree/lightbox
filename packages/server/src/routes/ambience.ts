@@ -118,6 +118,24 @@ function saveState(s: AmbienceState): void {
 
 const state = loadState();
 
+let saveTimer: NodeJS.Timeout | null = null;
+function saveStateDebounced(): void {
+  if (saveTimer) return;
+  saveTimer = setTimeout(() => { saveTimer = null; saveState(state); }, 1000);
+}
+
+// The tap-dial service shifts the twinkle color together with the lights.
+// Only in normal mode — in color mode the curtains show soap.
+export async function shiftCurtainsKelvin(deltaMired: number): Promise<void> {
+  if (state.mode !== 'normal') return;
+  const m = 1e6 / state.curtainsKelvin + deltaMired;
+  const k = Math.round(1e6 / Math.max(1e6 / KELVIN_MAX, Math.min(1e6 / KELVIN_MIN, m)));
+  if (k === state.curtainsKelvin) return;
+  state.curtainsKelvin = k;
+  saveStateDebounced();
+  await postRoutine({ kind: 'twinkle', rgb: kelvinToRgbBytes(k), val: state.curtainsVal });
+}
+
 export function createAmbienceRouter(lightManager: LightManager): Router {
   const router = Router();
 
@@ -126,7 +144,6 @@ export function createAmbienceRouter(lightManager: LightManager): Router {
   // The twinkle dots' color (kelvin, along the blackbody locus) and/or peak
   // brightness (val 0-255) — screenbox drags the curtains pin / its rail row.
   // Applies live; save is debounced so a drag doesn't hammer the disk.
-  let saveTimer: NodeJS.Timeout | null = null;
   router.post('/twinkle', async (req, res) => {
     const k = Number(req.body?.kelvin);
     const v = Number(req.body?.val);
@@ -136,7 +153,7 @@ export function createAmbienceRouter(lightManager: LightManager): Router {
     }
     if (Number.isFinite(k)) state.curtainsKelvin = Math.max(KELVIN_MIN, Math.min(KELVIN_MAX, Math.round(k)));
     if (Number.isFinite(v)) state.curtainsVal = Math.max(0, Math.min(255, Math.round(v)));
-    if (!saveTimer) saveTimer = setTimeout(() => { saveTimer = null; saveState(state); }, 1000);
+    saveStateDebounced();
     const curtains = await postRoutine({ kind: 'twinkle', rgb: kelvinToRgbBytes(state.curtainsKelvin), val: state.curtainsVal });
     res.json({ kelvin: state.curtainsKelvin, val: state.curtainsVal, curtains });
   });
