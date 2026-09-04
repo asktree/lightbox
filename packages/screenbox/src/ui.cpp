@@ -103,6 +103,18 @@ constexpr int KBV_HW = (int)(9 * SX);               // bar half-width
 constexpr int KBV_Y0 = (int)(48 * SY);              // top = cool end
 constexpr int KBV_Y1 = H - (int)(30 * SY);          // bottom = warm end
 constexpr int GK_X   = W - (int)(30 * SX);          // global-shift track x
+// In normal mode a pin's distance to the RIGHT of the bar = its brightness
+// (the vertical-bar analogue of the wheel's floating height).
+constexpr int KB_RANGE = (int)(110 * SX);           // offset at 100%
+
+// Thermal idle: untouched for a while -> dim the backlight, drop the frame
+// rate, and downclock the CPU. Any touch (or a remote light change, briefly)
+// restores full speed. The panel otherwise renders 30fps at 240MHz forever,
+// which is most of why it runs hot.
+constexpr uint32_t IDLE_AFTER_MS  = 60000;
+constexpr uint32_t REMOTE_WAKE_MS = 10000;
+bool     idleCool = false;
+uint32_t lastRemoteMs = 0;
 
 // --- state -------------------------------------------------------------------
 struct Orb {
@@ -324,7 +336,9 @@ void syncOrbs() {
     if (l.hasTemp) { o.kelvin = l.temperature; o.kf = l.temperature; }
     o.color = normalMode ? kelvinToRgb888(o.kf) : hsvToRgb888(l.h, l.s, 100);
     orbWorld(o, o.tx, o.ty);
-    o.tz = (normalMode || !l.on) ? 0 : l.brightness / 100.f * ZMAX;   // pins sit ON the vertical bar
+    // z is the brightness offset: floating height on the wheel, distance to
+    // the right of the bar in normal mode (drawOrb rotates it there).
+    o.tz = !l.on ? 0 : l.brightness / 100.f * (normalMode ? KB_RANGE : ZMAX);
     if (o.fresh) { o.x = o.tx; o.y = o.ty; o.z = -ORB_R * 2; o.fresh = false; }   // new orbs rise up from below
     next.push_back(o);
   }
@@ -338,7 +352,7 @@ void syncOrbs() {
     o.kf = curtainsKf; o.kelvin = (int)roundf(curtainsKf);
     o.color = kelvinToRgb888(o.kf);
     orbWorld(o, o.tx, o.ty);
-    o.tz = 0;                                // sits on the bar like the lights
+    o.tz = curtainsBri / 100.f * KB_RANGE;   // twinkle brightness = distance right
     if (o.fresh) { o.x = o.tx; o.y = o.ty; o.z = -ORB_R * 2; o.fresh = false; }
     next.push_back(o);
   }
@@ -589,16 +603,25 @@ void drawOrb(Orb& o, uint32_t now) {
   const bool sel = (o.id == selectedId);
   const bool drag = sel && dragging;
   const float bob = o.on ? sinf(now * 0.0016f + o.phase) * 1.5f : 0.f;
-  const int X = sx(o.x), Yf = sy(o.y, 0), Y = sy(o.y, o.z + bob);
+  // Anchor = the light's position on the wheel floor / kelvin bar. The
+  // brightness offset (z) lifts the handle up on the wheel, but pushes it to
+  // the RIGHT of the vertical bar in normal mode.
+  const int AX = sx(o.x), Yf = sy(o.y, 0);
+  const int X = normalMode ? AX + (int)roundf(o.z + bob) : AX;
+  const int Y = normalMode ? Yf : sy(o.y, o.z + bob);
   const int r = orbHalf();
 
-  // dropper ring on the floor: hollow, with a white point at the centre
-  canvas.drawEllipse(X, Yf, (int)(9 * SX), (int)(5 * SX), blend(C_BG, C_WHITE, o.on ? 0.8f : 0.25f));
-  canvas.fillRect(X - 1, Yf - 1, 2, 2, o.on ? C_WHITE : blend(C_BG, C_WHITE, 0.4f));
+  // dropper ring at the anchor: hollow, with a white point at the centre
+  canvas.drawEllipse(AX, Yf, (int)(normalMode ? 5 * SX : 9 * SX), (int)(5 * SX), blend(C_BG, C_WHITE, o.on ? 0.8f : 0.25f));
+  canvas.fillRect(AX - 1, Yf - 1, 2, 2, o.on ? C_WHITE : blend(C_BG, C_WHITE, 0.4f));
 
-  // projection line: 1 px dots, 1 on / 3 off, drifting slowly upward
-  if (o.on && Y + r + 1 < Yf - 2) {
-    const int off = (now / 120) % 4;
+  // projection line: 1 px dots, 1 on / 3 off, drifting slowly toward the handle
+  const int off = (now / 120) % 4;
+  if (normalMode) {
+    if (o.on && X - r - 1 > AX + 2) {
+      for (int x = AX + 2 + off; x < X - r - 1; x += 4) canvas.drawPixel(x, Yf, C_WHITE);
+    }
+  } else if (o.on && Y + r + 1 < Yf - 2) {
     for (int y = Yf - 2 - off; y > Y + r + 1; y -= 4) canvas.drawPixel(X, y, C_WHITE);
   }
 
@@ -660,6 +683,7 @@ int trailNext = 0;
 uint32_t lastWispMs = 0;
 
 void spawnWisps(uint32_t now) {
+  if (normalMode) return;   // z means "distance right" there; climbing wisps would read wrong
   // one wisp per frame (every other frame when pixel-doubled), from a random lit light's ring edge
   static uint32_t frameNo = 0;
   if (board::PIXEL_SCALE > 1 && (++frameNo & 1)) return;
@@ -796,6 +820,7 @@ void drawModeButton() {
 void toggleMode(uint32_t now) {
   normalMode = !normalMode;
   selectedId = "";
+  for (auto& w : wisps) w.alive = false;   // their geometry doesn't survive the mode change
   net::setMode(normalMode);
   syncOrbs();                       // re-filter + retarget orbs for the new mode
   floorSig = 0;                     // wheel cache is stale after a mode round-trip
@@ -905,7 +930,8 @@ Orb* orbAt(int x, int y, uint32_t now) {
   Orb* best = nullptr; int bestD = HIT_R * HIT_R;
   for (auto& o : orbs) {
     float bob = o.on ? sinf(now * 0.0016f + o.phase) * 1.5f : 0.f;
-    int ox = sx(o.x), oy = sy(o.y, o.z + bob);
+    int ox = normalMode ? sx(o.x) + (int)roundf(o.z + bob) : sx(o.x);
+    int oy = normalMode ? sy(o.y, 0) : sy(o.y, o.z + bob);
     int d = (ox - x) * (ox - x) + (oy - y) * (oy - y);
     if (o.id == selectedId) d -= 24;
     if (d < bestD) { bestD = d; best = &o; }
@@ -919,7 +945,7 @@ void applyBar(int x) {
     Orb* o = findOrb(selectedId);
     if (!o) return;
     o->bri = v;
-    if (!normalMode) o->tz = o->on ? v / 100.f * ZMAX : 0;
+    o->tz = o->on ? v / 100.f * (normalMode ? KB_RANGE : ZMAX) : 0;
     if (o->id == "curtains") { curtainsBri = v; net::setCurtainsVal((int)roundf(v * 2.55f)); }
     else net::setBrightness(o->id, v);
     return;
@@ -1127,9 +1153,20 @@ void loop() {
   if (selectedId.length() && hold == Hold::None && now - lastInteractMs > SELECT_TIMEOUT_MS) selectedId = "";
 
   uint32_t v = net::version();
-  if (v != seenVersion) { seenVersion = v; syncOrbs(); }
+  if (v != seenVersion) { seenVersion = v; syncOrbs(); lastRemoteMs = now; }
 
-  if (now - lastFrameMs >= 33) {
+  // Thermal idle: nobody touching, nothing changing remotely -> dim the
+  // backlight, drop to ~6fps, downclock 240 -> 80MHz. Wakes on the same
+  // touch that does the thing (the dim is mild enough to read through).
+  bool awake = touched || now - lastInteractMs < IDLE_AFTER_MS || now - lastRemoteMs < REMOTE_WAKE_MS;
+  if (awake == idleCool) {
+    idleCool = !awake;
+    setCpuFrequencyMhz(idleCool ? 80 : 240);
+    lcd.setBrightness(idleCool ? 60 : 220);
+    Serial.printf("[ui] %s\n", idleCool ? "idle: dim + 80MHz" : "awake: bright + 240MHz");
+  }
+
+  if (now - lastFrameMs >= (idleCool ? 167u : 33u)) {
     animate((now - lastFrameMs) / 1000.f);
     render(now);
     lastFrameMs = now;
@@ -1139,7 +1176,7 @@ void loop() {
     Serial.printf("[ui] floor composite avg %lu us over %lu frames\n", (unsigned long)(renderAccumUs / renderFrames), (unsigned long)renderFrames);
     renderAccumUs = 0; renderFrames = 0; lastPerf = now;
   }
-  delay(1);
+  delay(idleCool ? 8 : 1);
 }
 
 }  // namespace ui
