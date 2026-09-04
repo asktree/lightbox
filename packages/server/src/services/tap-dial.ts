@@ -8,8 +8,9 @@
 // Clockwise raises the value in both modes (brighter / cooler).
 import type { LightManager } from '../lib/light-manager.js';
 import type { HueDriver } from '../drivers/hue.js';
-import { isHiddenLightName } from '../lib/hidden-lights.js';
-import { shiftCurtainsKelvin } from '../routes/ambience.js';
+
+// The dial lives in the bedroom — it controls only the two bedroom strips.
+const TARGET_IDS = ['hue:3', 'hue:4'];   // spaceship floor, cockpit
 
 const KELVIN_MIN = 1000;
 const KELVIN_MAX = 6500;
@@ -26,8 +27,18 @@ export function startTapDial(lightManager: LightManager): void {
 
   let modifierButtonId: string | null = null;
   let modifierDown = false;
-  // Fractional remainders so a slow turn still accumulates to whole units.
-  const briAccum = new Map<string, number>();
+  // During a rotation burst, compound on OUR last-sent targets, not on the
+  // light's reported state — echoes lag behind (transition ramps + event
+  // latency) and reading them back mid-turn rubber-bands the value.
+  const session = new Map<string, { bri?: number; mired?: number; at: number }>();
+  const SESSION_TTL_MS = 1500;
+  function sessionFor(id: string) {
+    const e = session.get(id);
+    if (e && Date.now() - e.at < SESSION_TTL_MS) return e;
+    const fresh = { at: Date.now() };
+    session.set(id, fresh);
+    return fresh as { bri?: number; mired?: number; at: number };
+  }
 
   void hue.getClipResource('button').then((buttons) => {
     for (const b of buttons) {
@@ -44,6 +55,7 @@ export function startTapDial(lightManager: LightManager): void {
       const ev = item.button?.button_report?.event ?? item.button?.last_event;
       if (ev === 'initial_press') modifierDown = true;
       else if (ev === 'short_release' || ev === 'long_release') modifierDown = false;
+      console.log(`tap-dial: button1 ${ev} (modifier ${modifierDown ? 'DOWN' : 'up'})`);
       return;
     }
     if (item.type !== 'relative_rotary') return;
@@ -52,35 +64,43 @@ export function startTapDial(lightManager: LightManager): void {
     const steps = Number(rot?.steps) || 0;
     if (!steps) return;
     const dir = rot.direction === 'clock_wise' ? 1 : -1;
+    console.log(`tap-dial: rotary ${dir > 0 ? '+' : '-'}${steps} -> ${modifierDown ? 'kelvin' : 'brightness'}`);
     if (modifierDown) shiftKelvin(-dir * steps * MIRED_PER_STEP);  // cw = cooler
     else shiftBrightness(dir * steps * BRI_PER_STEP);              // cw = brighter
   };
 
   function targets() {
-    return lightManager.getAllLights().filter(
-      (l) => l.reachable && l.state.on && !isHiddenLightName(l.name),
-    );
+    return TARGET_IDS
+      .map((id) => lightManager.getLight(id))
+      .filter((l): l is NonNullable<typeof l> => !!l && l.reachable && l.state.on);
   }
 
   function shiftBrightness(delta: number): void {
     for (const light of targets()) {
-      const cur = (light.state.brightness ?? 0) + (briAccum.get(light.id) ?? 0);
+      const e = sessionFor(light.id);
+      const cur = e.bri ?? light.state.brightness ?? 50;
       const next = Math.max(1, Math.min(100, cur + delta));
+      const prev = Math.round(cur);
+      e.bri = next;
+      e.at = Date.now();
       const v = Math.round(next);
-      briAccum.set(light.id, next - v);
-      if (v === light.state.brightness) continue;
+      if (v === prev && e.bri !== undefined) continue;
       lightManager.setLightState(light.id, { brightness: v }, 200).catch(() => {});
     }
   }
 
   function shiftKelvin(deltaMired: number): void {
     for (const light of targets()) {
-      if (light.state.temperature === undefined) continue;   // only pins on the bar
-      const m = Math.max(MIRED_COOL, Math.min(MIRED_WARM, 1e6 / light.state.temperature + deltaMired));
+      const e = sessionFor(light.id);
+      const curMired = e.mired
+        ?? (light.state.temperature !== undefined ? 1e6 / light.state.temperature : 1e6 / 2700);
+      const m = Math.max(MIRED_COOL, Math.min(MIRED_WARM, curMired + deltaMired));
+      const prevK = Math.round(1e6 / curMired);
+      e.mired = m;
+      e.at = Date.now();
       const k = Math.round(1e6 / m);
-      if (k === light.state.temperature) continue;
+      if (k === prevK) continue;
       lightManager.setLightState(light.id, { temperature: k }, 200).catch(() => {});
     }
-    void shiftCurtainsKelvin(deltaMired);
   }
 }

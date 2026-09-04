@@ -52,9 +52,11 @@ export class LightManager extends EventEmitter {
           const lightId = `${driver.brand}:${deviceId}`;
           const light = this.lights.get(lightId);
           if (!light) return;
-          state = this.applyEmulatedCt(lightId, state);
-          if (this.hasStateChanged(light.state, state)) {
-            light.state = state;
+          // Driver updates can be PARTIAL (Hue EventStream sends only the
+          // changed fields) — merge, never replace, or brightness/on vanish.
+          const merged = this.applyEmulatedCt(lightId, { ...light.state, ...state });
+          if (this.hasStateChanged(light.state, merged)) {
+            light.state = merged;
             this.emit('update', light);
           }
         };

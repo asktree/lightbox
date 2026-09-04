@@ -384,15 +384,18 @@ export class HueDriver implements LightDriver {
       res.on('data', (chunk: Buffer) => {
         buffer += chunk.toString();
 
-        // SSE format: "data: {...}\n\n"
-        const lines = buffer.split('\n\n');
-        buffer = lines.pop() || ''; // Keep incomplete data in buffer
+        // SSE messages are "\n\n"-separated blocks of lines. The bridge
+        // sends "id: ...\ndata: [...]" per block, so the data line must be
+        // found INSIDE the block — a startsWith on the whole block matches
+        // nothing and silently drops every event.
+        const blocks = buffer.split('\n\n');
+        buffer = blocks.pop() || ''; // Keep the incomplete block
 
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
+        for (const block of blocks) {
+          for (const line of block.split('\n')) {
+            if (!line.startsWith('data: ')) continue;
             try {
-              const events = JSON.parse(line.slice(6));
-              this.handleEventStreamData(events);
+              this.handleEventStreamData(JSON.parse(line.slice(6)));
             } catch {
               // Ignore parse errors
             }
@@ -458,7 +461,10 @@ export class HueDriver implements LightDriver {
   }
 
   private mapV2State(v2Light: any): LightState | null {
-    const state: LightState = { on: true };
+    // EventStream items are PARTIAL: only the fields that changed are
+    // present. Do not invent an `on` value — the consumer merges this into
+    // the light's existing state.
+    const state = {} as LightState;
     let hasData = false;
 
     if (v2Light.on !== undefined) {
