@@ -5,16 +5,17 @@
 FxParams fxParams;
 
 // --- palette bank ----------------------------------------------------------
-// The default palette is FastLED's party colors with two changes:
-//   - the two yellow entries are black
-//   - black holds ~30% of the palette (5 of 16 entries, spread out)
+// The default palette starts from FastLED's party colors, with changes:
+//   - all yellow and orange entries are gone (two red-oranges stay for warmth)
+//   - black holds 7 of 16 entries (~40%), spread across the full range,
+//     with black near both ends (purple side and blue side)
 // Soap blends between entries, so each black entry makes a smooth dark
 // valley between the colors.
 static const CRGBPalette16 DefaultDark_p(
-  CRGB(0x5500AB), CRGB(0x84007C), CRGB::Black,    CRGB(0xE5001B),
-  CRGB(0xE81700), CRGB(0xB84700), CRGB::Black,    CRGB::Black,
-  CRGB(0xAB5500), CRGB(0xDD2200), CRGB::Black,    CRGB(0xC2003E),
-  CRGB(0x8F0071), CRGB(0x5F00A1), CRGB::Black,    CRGB(0x0007F9));
+  CRGB(0x5500AB), CRGB::Black,    CRGB(0x84007C), CRGB::Black,
+  CRGB(0xE5001B), CRGB(0xE81700), CRGB::Black,    CRGB::Black,
+  CRGB(0xDD2200), CRGB::Black,    CRGB(0xC2003E), CRGB(0x8F0071),
+  CRGB::Black,    CRGB(0x5F00A1), CRGB::Black,    CRGB(0x0007F9));
 
 struct PaletteEntry { const char* name; const CRGBPalette16 pal; };
 static const PaletteEntry PALETTES[] = {
