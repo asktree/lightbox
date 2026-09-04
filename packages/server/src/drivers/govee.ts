@@ -13,6 +13,10 @@ import type { Light, LightState, LightDriver, Brand, Capability } from '@lightbo
 
 const DISCOVERY_PORT = 4001;
 const CONTROL_PORT = 4003;
+// Devices send ALL replies (scan + devStatus) to the client's UDP port 4002 —
+// that exact port, not the sender's. A socket bound anywhere else hears
+// nothing, which is why discovery silently found zero devices for months.
+const REPLY_PORT = 4002;
 const BROADCAST_ADDR = '239.255.255.250';
 
 interface GoveeDevice {
@@ -32,69 +36,87 @@ export class GoveeDriver implements LightDriver {
 
   private socket?: Socket;
   private devices: Map<string, GoveeDevice> = new Map();
+  // discover() in flight: newly-seen lights are pushed here
+  private pendingScan: Light[] | null = null;
+  // devStatus waiters keyed by device ip
+  private pendingStatus = new Map<string, (s: GoveeDevice['state']) => void>();
 
   async initialize(): Promise<void> {
-    // Create UDP socket for discovery and control
-    this.socket = createSocket('udp4');
+    // reuseAddr because curtainbox also listens on 4002 when it's running —
+    // with both bound, the OS delivers each reply to only one of them, so
+    // periodic rediscovery (light-manager) papers over lost responses.
+    this.socket = createSocket({ type: 'udp4', reuseAddr: true });
 
     this.socket.on('error', (err) => {
       console.error('Govee UDP error:', err);
     });
 
+    this.socket.on('message', (msg, rinfo) => this.onMessage(msg, rinfo.address));
+
     await new Promise<void>((resolve) => {
-      this.socket!.bind(() => {
+      const onBindError = (err: Error) => {
+        console.error(`Govee: cannot bind reply port ${REPLY_PORT} (${err.message}) — device replies will be lost`);
+        this.socket = createSocket({ type: 'udp4', reuseAddr: true });
+        this.socket.on('error', (e) => console.error('Govee UDP error:', e));
+        this.socket.on('message', (msg, rinfo) => this.onMessage(msg, rinfo.address));
+        this.socket.bind(() => { this.socket!.setBroadcast(true); resolve(); });
+      };
+      this.socket!.once('error', onBindError);
+      this.socket!.bind(REPLY_PORT, () => {
+        this.socket!.removeListener('error', onBindError);
         this.socket!.setBroadcast(true);
         resolve();
       });
     });
 
-    console.log('Govee driver: initialized UDP socket');
+    console.log(`Govee driver: listening on UDP ${REPLY_PORT}`);
+  }
+
+  private onMessage(msg: Buffer, fromIp: string): void {
+    let data: any;
+    try { data = JSON.parse(msg.toString()); } catch { return; }
+    const cmd = data.msg?.cmd;
+    if (cmd === 'scan' && data.msg?.data?.device) {
+      const device = data.msg.data as GoveeDevice;
+      device.ip = fromIp;
+      const isNew = !this.devices.has(device.device);
+      const prev = this.devices.get(device.device);
+      if (prev?.state && !device.state) device.state = prev.state;   // scan replies carry no state
+      this.devices.set(device.device, device);
+      if (this.pendingScan && (isNew || this.pendingScan.every((l) => l.id !== `govee:${device.device}`))) {
+        this.pendingScan.push({
+          id: `govee:${device.device}`,
+          name: `Govee ${device.model}`,
+          brand: 'govee',
+          capabilities: this.getCapabilities(device.model),
+          state: this.mapState(device.state ?? { onOff: 0, brightness: 0, color: { r: 0, g: 0, b: 0 }, colorTemInKelvin: 0 }),
+          reachable: true,
+        });
+      }
+    } else if (cmd === 'devStatus' && data.msg?.data) {
+      for (const [, device] of this.devices) {
+        if (device.ip === fromIp) { device.state = data.msg.data; break; }
+      }
+      const waiter = this.pendingStatus.get(fromIp);
+      if (waiter) { this.pendingStatus.delete(fromIp); waiter(data.msg.data); }
+    }
   }
 
   async discover(): Promise<Light[]> {
-    // Send discovery message
     const scanMsg = JSON.stringify({
-      msg: {
-        cmd: 'scan',
-        data: {
-          account_topic: 'reserve',
-        },
-      },
+      msg: { cmd: 'scan', data: { account_topic: 'reserve' } },
     });
 
-    return new Promise((resolve) => {
-      const discovered: Light[] = [];
-      const timeout = setTimeout(() => {
-        this.socket?.removeAllListeners('message');
-        resolve(discovered);
-      }, 3000);
-
-      this.socket?.on('message', (msg, rinfo) => {
-        try {
-          const data = JSON.parse(msg.toString());
-          if (data.msg?.cmd === 'scan' && data.msg?.data) {
-            const device = data.msg.data as GoveeDevice;
-            device.ip = rinfo.address;
-
-            this.devices.set(device.device, device);
-
-            discovered.push({
-              id: `govee:${device.device}`,
-              name: `Govee ${device.model}`,
-              brand: 'govee',
-              capabilities: this.getCapabilities(device.model),
-              state: this.mapState(device.state),
-              reachable: true,
-            });
-          }
-        } catch {
-          // Ignore parse errors
-        }
-      });
-
-      // Send to multicast address
-      this.socket?.send(scanMsg, DISCOVERY_PORT, BROADCAST_ADDR);
-    });
+    this.pendingScan = [];
+    // Multicast per the spec, plus plain broadcasts — some APs eat one or the
+    // other, and duplicate replies are de-duped in onMessage.
+    for (const dest of [BROADCAST_ADDR, '255.255.255.255']) {
+      this.socket?.send(scanMsg, DISCOVERY_PORT, dest);
+    }
+    await new Promise((r) => setTimeout(r, 3000));
+    const found = this.pendingScan;
+    this.pendingScan = null;
+    return found ?? [];
   }
 
   async getState(deviceId: string): Promise<LightState> {
@@ -103,34 +125,17 @@ export class GoveeDriver implements LightDriver {
       return { on: false };
     }
 
-    // Request current state
-    const statusMsg = JSON.stringify({
-      msg: {
-        cmd: 'devStatus',
-        data: {},
-      },
-    });
+    const statusMsg = JSON.stringify({ msg: { cmd: 'devStatus', data: {} } });
 
     return new Promise((resolve) => {
       const timeout = setTimeout(() => {
+        this.pendingStatus.delete(device.ip);
         resolve(this.mapState(device.state));
       }, 1000);
-
-      const handler = (msg: Buffer) => {
-        try {
-          const data = JSON.parse(msg.toString());
-          if (data.msg?.cmd === 'devStatus' && data.msg?.data) {
-            clearTimeout(timeout);
-            this.socket?.removeListener('message', handler);
-            device.state = data.msg.data;
-            resolve(this.mapState(data.msg.data));
-          }
-        } catch {
-          // Ignore
-        }
-      };
-
-      this.socket?.on('message', handler);
+      this.pendingStatus.set(device.ip, (s) => {
+        clearTimeout(timeout);
+        resolve(this.mapState(s));
+      });
       this.socket?.send(statusMsg, CONTROL_PORT, device.ip);
     });
   }

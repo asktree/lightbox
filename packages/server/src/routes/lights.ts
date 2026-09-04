@@ -12,6 +12,13 @@ export function createLightsRouter(lightManager: LightManager, paletteAnimator?:
     res.json(lightManager.getAllLights().filter((l) => !isHiddenLightName(l.name)));
   });
 
+  // Rescan for LAN-discoverable lights (currently Govee). Use after flipping
+  // "LAN Control" on in the Govee app — no server restart needed.
+  router.post('/discover', async (_req, res) => {
+    const added = await lightManager.rediscoverGovee();
+    res.json({ added });
+  });
+
   // Get single light
   router.get('/:id', (req, res) => {
     const light = lightManager.getLight(req.params.id);
