@@ -65,9 +65,33 @@ export function startTapDial(lightManager: LightManager): void {
     if (!steps) return;
     const dir = rot.direction === 'clock_wise' ? 1 : -1;
     console.log(`tap-dial: rotary ${dir > 0 ? '+' : '-'}${steps} -> ${modifierDown ? 'kelvin' : 'brightness'}`);
-    if (modifierDown) shiftKelvin(-dir * steps * MIRED_PER_STEP);  // cw = cooler
-    else shiftBrightness(dir * steps * BRI_PER_STEP);              // cw = brighter
+    // The bridge delivers rotary ticks in clumps. Replaying each tick as its
+    // own command made a spin land as separate ramps ("two bursts") plus a
+    // backlog. Accumulate the deltas and send one command per flush window:
+    // the first tick flushes at once, the rest fold into the next flush.
+    if (modifierDown) pendMired += -dir * steps * MIRED_PER_STEP;  // cw = cooler
+    else pendBri += dir * steps * BRI_PER_STEP;                    // cw = brighter
+    scheduleFlush();
   };
+
+  let pendBri = 0;
+  let pendMired = 0;
+  let flushTimer: NodeJS.Timeout | null = null;
+  const FLUSH_MS = 140;
+
+  function scheduleFlush(): void {
+    if (flushTimer) return;          // a window is open; deltas keep folding in
+    flush();                         // leading edge: act on the first tick now
+    flushTimer = setTimeout(() => {
+      flushTimer = null;
+      if (pendBri !== 0 || pendMired !== 0) scheduleFlush();
+    }, FLUSH_MS);
+  }
+
+  function flush(): void {
+    if (pendBri !== 0) { shiftBrightness(pendBri); pendBri = 0; }
+    if (pendMired !== 0) { shiftKelvin(pendMired); pendMired = 0; }
+  }
 
   function targets() {
     return TARGET_IDS
@@ -85,7 +109,7 @@ export function startTapDial(lightManager: LightManager): void {
       e.at = Date.now();
       const v = Math.round(next);
       if (v === prev && e.bri !== undefined) continue;
-      lightManager.setLightState(light.id, { brightness: v }, 200).catch(() => {});
+      lightManager.setLightState(light.id, { brightness: v }, 150).catch(() => {});
     }
   }
 
@@ -100,7 +124,7 @@ export function startTapDial(lightManager: LightManager): void {
       e.at = Date.now();
       const k = Math.round(1e6 / m);
       if (k === prevK) continue;
-      lightManager.setLightState(light.id, { temperature: k }, 200).catch(() => {});
+      lightManager.setLightState(light.id, { temperature: k }, 150).catch(() => {});
     }
   }
 }
