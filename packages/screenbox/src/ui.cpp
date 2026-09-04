@@ -1000,7 +1000,11 @@ void onDown(int x, int y, uint32_t now) {
   }
   if (Orb* o = orbAt(x, y, now)) {
     hold = Hold::Orb; holdId = o->id; selectedId = o->id;
-    grabDX = sx(o->x) - x; grabDY = sy(o->y, o->z) - y;
+    // Finger-to-handle offset. The brightness offset (z) lifts the handle up
+    // on the wheel but pushes it RIGHT of the vertical bar in normal mode —
+    // capture the offset against where the handle actually is.
+    if (normalMode) { grabDX = (sx(o->x) + (int)roundf(o->z)) - x; grabDY = sy(o->y, 0) - y; }
+    else { grabDX = sx(o->x) - x; grabDY = sy(o->y, o->z) - y; }
     return;
   }
   if (!normalMode) {
