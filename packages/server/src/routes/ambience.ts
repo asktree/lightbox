@@ -118,6 +118,9 @@ function saveState(s: AmbienceState): void {
 
 const state = loadState();
 
+/** Read-only view for the day-log snapshot. */
+export function getAmbienceState(): Readonly<AmbienceState> { return state; }
+
 let saveTimer: NodeJS.Timeout | null = null;
 function saveStateDebounced(): void {
   if (saveTimer) return;

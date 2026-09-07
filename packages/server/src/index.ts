@@ -20,6 +20,7 @@ import { PaletteAnimator } from './lib/palette-animator.js';
 import { createLightsRouter } from './routes/lights.js';
 import { createAmbienceRouter } from './routes/ambience.js';
 import { startTapDial } from './services/tap-dial.js';
+import { startDayLog, buildSnapshot, DAY_LOG_FILE } from './services/day-log.js';
 import { createWwTestRouter } from './routes/wwtest.js';
 import { createGroupsRouter } from './routes/groups.js';
 import { createPalettesRouter } from './routes/palettes.js';
@@ -153,6 +154,11 @@ app.use('/api/audio-sync', createAudioSyncRouter(paletteAnimator));
 app.use('/api/stem-sync', createStemSyncRouter(paletteAnimator));
 app.use('/api/playhead', createPlayheadRouter());
 
+// Day log: what a snapshot looks like right now, and where the file is.
+app.get('/api/day-log', (_req, res) => {
+  res.json({ file: DAY_LOG_FILE, now: buildSnapshot(lightManager) });
+});
+
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', lights: lightManager.getAllLights().length });
@@ -187,6 +193,10 @@ async function start() {
     // Hue Tap Dial: bare rotation = brightness; button-1-held rotation =
     // kelvin. Buttons 2-4 keep their bridge behavior.
     startTapDial(lightManager);
+
+    // Day log: 5-minute snapshots of the room settings, for the natural
+    // daily-curve project. Read-only.
+    startDayLog(lightManager);
 
     await paletteAnimator.initialize({ resumeActuation: !cold });
     console.log('Palette animator initialized');
