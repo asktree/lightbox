@@ -19,6 +19,7 @@ struct FxParams {
   uint8_t  density = 13;     // /255 chance a pixel lights each cycle (~5%)
   uint16_t periodMs = 6000;  // one fade in->out
   uint8_t  hueJitter = 0;    // +/- degrees-ish of per-dot hue wobble
+  bool     cut = true;       // cut fade tails whose rounded colour drifts off target
   // soap
   uint8_t speed = 32;
   uint8_t smoothness = 200;
@@ -34,3 +35,4 @@ const char* fxPaletteName(uint8_t i);
 
 void fxRender(CRGB* fb, uint32_t nowMs);
 void fxOnSwitch();  // call after changing fxParams.kind (resets stateful fx)
+void fxParamsChanged();  // call after any fxParams change (recomputes derived values)

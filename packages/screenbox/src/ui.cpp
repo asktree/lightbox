@@ -106,6 +106,16 @@ constexpr int GK_X   = W - (int)(30 * SX);          // global-shift track x
 // In normal mode a pin's distance to the RIGHT of the bar = its brightness
 // (the vertical-bar analogue of the wheel's floating height).
 constexpr int KB_RANGE = (int)(110 * SX);           // offset at 100%
+// Curtains controls, shown only while the curtains pin is selected: a
+// vertical SPEED track between the pins and the ALL track (fast at the top,
+// slow at the bottom, log scale), and a CUT toggle below it (drop the
+// off-hue frames at each fade tail).
+constexpr int SPD_X   = (int)(168 * SX);
+constexpr int SPD_MS_MIN = 1500, SPD_MS_MAX = 20000;
+constexpr int CUT_Y   = KBV_Y1 + (int)(9 * SY);     // toggle box centre
+constexpr int CUT_HALF = (int)(6 * SY);
+int  curtainsPeriodMs = 6000;
+bool curtainsCut = true;
 
 // Thermal idle: untouched for a while -> dim the backlight, drop the frame
 // rate, and downclock the CPU. Any touch (or a remote light change, briefly)
@@ -135,7 +145,7 @@ uint32_t seenVersion = 0xffffffff;
 int offlineCount = 0;
 
 String selectedId;
-enum class Hold { None, Orb, Bar, Floor, Rim, GlobalK };
+enum class Hold { None, Orb, Bar, Floor, Rim, GlobalK, Speed };
 Hold     hold = Hold::None;
 String   holdId;
 bool     dragging = false, longFired = false;
@@ -804,6 +814,38 @@ void drawGlobalK() {
   }
 }
 
+// --- curtains controls (normal mode, curtains pin selected) ------------------
+bool curtainsSelected() { return normalMode && selectedId == "curtains"; }
+float yToPeriodMs(float y) {
+  float t = (y - KBV_Y0) / (float)(KBV_Y1 - KBV_Y0);
+  t = fminf(1.f, fmaxf(0.f, t));
+  return SPD_MS_MIN * powf((float)SPD_MS_MAX / SPD_MS_MIN, t);
+}
+float periodMsToY(float ms) {
+  float t = logf(ms / SPD_MS_MIN) / logf((float)SPD_MS_MAX / SPD_MS_MIN);
+  return KBV_Y0 + fminf(1.f, fmaxf(0.f, t)) * (KBV_Y1 - KBV_Y0);
+}
+void drawCurtainsControls() {
+  if (!curtainsSelected()) return;
+  const bool active = hold == Hold::Speed;
+  canvas.drawFastVLine(SPD_X, KBV_Y0, KBV_Y1 - KBV_Y0, C_ZINC700);
+  text(SPD_X, KBV_Y0 - 6, "SPEED", C_ZINC500, textdatum_t::bottom_center);
+  int y = (int)roundf(periodMsToY((float)curtainsPeriodMs));
+  int h2 = (int)(5 * SX);
+  canvas.fillRect(SPD_X - h2, y - h2, 2 * h2 + 1, 2 * h2 + 1, active ? C_ZINC50 : C_ZINC400);
+  canvas.drawRect(SPD_X - h2, y - h2, 2 * h2 + 1, 2 * h2 + 1, active ? C_WHITE : blend(C_BG, C_WHITE, 0.6f));
+  if (active) {
+    char buf[12];
+    snprintf(buf, sizeof buf, "%.1fS", curtainsPeriodMs / 1000.f);
+    text(SPD_X - h2 - 5, y, buf, C_WHITE, textdatum_t::middle_right);
+  }
+  // CUT toggle: filled box = on
+  int bx = SPD_X - CUT_HALF, by = CUT_Y - CUT_HALF, bs = 2 * CUT_HALF + 1;
+  if (curtainsCut) canvas.fillRect(bx, by, bs, bs, C_ZINC400);
+  canvas.drawRect(bx, by, bs, bs, curtainsCut ? C_WHITE : C_ZINC500);
+  text(SPD_X + CUT_HALF + 5, CUT_Y, "CUT", curtainsCut ? C_ZINC400 : C_ZINC500, textdatum_t::middle_left);
+}
+
 // The circular mode button, above the online dot: shows the mode you're in —
 // a mini hue ring in color mode, a warm-white disc in normal mode.
 void drawModeButton() {
@@ -854,7 +896,7 @@ void render(uint32_t now) {
 
   for (int band = 0; band < BANDS; band++) {
     viewY = band * BAND_H;
-    if (normalMode) { clearFrameFull(); drawKelvinBar(); drawGlobalK(); }
+    if (normalMode) { clearFrameFull(); drawKelvinBar(); drawGlobalK(); drawCurtainsControls(); }
     else            { clearFrame(); pushFloorCache(); }   // the floor cache fills the disc itself
     drawRipples(now);
     drawTrail(wispDt, band == 0);
@@ -967,6 +1009,13 @@ void setOrbKelvin(Orb& o, float kf) {
   else net::setTemperature(o.id, k);
 }
 
+void applySpeed(int y) {
+  int ms = (int)roundf(yToPeriodMs((float)y) / 100.f) * 100;   // 100ms send granularity
+  if (ms == curtainsPeriodMs) return;
+  curtainsPeriodMs = ms;
+  net::setCurtainsPeriod(ms);
+}
+
 void onDown(int x, int y, uint32_t now) {
   downX = x; downY = y; downMs = now; dragging = false; longFired = false; lastInteractMs = now;
   {
@@ -984,6 +1033,19 @@ void onDown(int x, int y, uint32_t now) {
     for (auto& l : lights) if (l.on && l.reachable) barRatios.push_back({l.id, m > 0 ? (float)l.brightness / m : 1.f});
     applyBar(x);
     return;
+  }
+  // Curtains controls (only while the curtains pin is selected).
+  if (curtainsSelected() && abs(x - SPD_X) <= (int)(16 * SX)) {
+    if (abs(y - CUT_Y) <= CUT_HALF + 8) {
+      curtainsCut = !curtainsCut;
+      net::setCurtainsCut(curtainsCut);
+      return;
+    }
+    if (y >= KBV_Y0 - 12 && y <= KBV_Y1 + 6) {
+      hold = Hold::Speed;
+      applySpeed(y);
+      return;
+    }
   }
   // The global-shift handle (normal mode, right edge): grab and slide every
   // pin along the locus at once.
@@ -1063,6 +1125,8 @@ void onMove(int x, int y, uint32_t now) {
     if (h != o->h || s != o->s) { o->h = h; o->s = s; o->color = hsvToRgb888(hf, sf, 100); net::setColor(o->id, h, s); }
   } else if (hold == Hold::Bar) {
     applyBar(x);
+  } else if (hold == Hold::Speed) {
+    applySpeed(y);
   } else if (hold == Hold::GlobalK) {
     float dm = yToMired((float)(y + gkGrabDY)) - gkStartMired;
     for (auto& g : gkOrbs) {

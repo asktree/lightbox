@@ -51,54 +51,73 @@ bool fxByName(const char* name, Fx& out) {
   return false;
 }
 
-// --- temporal dithering ------------------------------------------------------
-// WS2812s are 8-bit with linear PWM, so the bottom of a fade steps through
-// codes the eye can clearly see (4 -> 3 is a 25% jump). Routines that render
-// in float write their sub-LSB remainder into fxFrac (0..255 = 0..1 LSB);
-// applyDither() then flickers each byte between the two adjacent codes with a
-// duty cycle equal to the fraction. The threshold walks a golden-ratio
-// sequence per frame with a per-byte hash offset, so the time-average lands
-// exactly on the fraction and neighboring bytes never blink in sync.
+// Small integer hash. Used for per-LED phase, lit/unlit draws and jitter.
 static inline uint32_t hash3(uint32_t ix, uint32_t iy, uint32_t iz) {
   uint32_t h = (ix * 374761393u) ^ (iy * 668265263u) ^ (iz * 2147483647u);
   h = (h ^ (h >> 13)) * 1274126177u;
   return h ^ (h >> 16);
 }
 
-static uint8_t  fxFrac[NUM_LEDS * 3];   // sub-LSB fractions, zero = no dither
-static uint32_t ditherFrame = 0;
-
-static void applyDither(CRGB* fb) {
-  uint8_t* raw = reinterpret_cast<uint8_t*>(fb);
-  const uint8_t phase = (uint8_t)(ditherFrame * 158u);   // ~0.618 * 256 per frame
-  for (uint32_t i = 0; i < NUM_LEDS * 3; i++) {
-    uint8_t f = fxFrac[i];
-    if (!f) continue;
-    // Below code 8 the 1-LSB alternation is >6% contrast at our ~15Hz
-    // effective dither rate — visible as blinking on single dim pixels.
-    // Round statically there instead.
-    if (raw[i] < 8) { if (f >= 128 && raw[i] < 255) raw[i]++; continue; }
-    uint8_t t = (uint8_t)(hash3(i, 0, 7) + phase);
-    if (f > t && raw[i] < 255) raw[i]++;
-  }
-}
-
 // --- twinkle ---------------------------------------------------------------
 // Port of twinklybox's 'twinkle' pattern: each LED runs its own fade cycle
 // with a hashed phase; per (led, cycle) a hash decides whether it lights.
-// The fade envelope is computed in float and dithered, so the tail of each
-// fade glides instead of stepping.
+// The fade envelope is computed in float and rounded to the nearest code.
+// No temporal dither: at ~30fps a one-code flicker is visible, not smooth.
+//
+// Tail cut. At the last few codes the rounded colour drifts off target: a
+// warm white loses blue (yellow) and then green (red). We measure that drift
+// as CIE 1976 u'v' distance between the rounded colour and the base colour
+// (sRGB primaries as a proxy for the strip's). The fade is cut below the
+// lowest scale whose rounded colour is within TWINKLE_DUV_TOL, so the cut is
+// one contiguous piece at the very end and never a blip mid-fade. Codes that
+// sit near the target (e.g. (2,1,0) for 2700K) stay.
+// 0.04 is roughly 10x a MacAdam JND: a clear hue shift, not a subtle one.
+// For a 2700K white at ~30fps this drops (1,0,0) and (1,1,0), ~3.5 frames.
+static const float TWINKLE_DUV_TOL = 0.04f;
+static float twinkleMinScale = 0.f;   // fades below this scale show black
+static bool  twinkleCutReady = false;
+
+static void rgbToUv(float r, float g, float b, float& u, float& v) {
+  float X = 0.4124f * r + 0.3576f * g + 0.1805f * b;
+  float Y = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+  float Z = 0.0193f * r + 0.1192f * g + 0.9505f * b;
+  float d = X + 15.f * Y + 3.f * Z;
+  if (d <= 0.f) { u = v = 0.f; return; }
+  u = 4.f * X / d; v = 9.f * Y / d;
+}
+
+static CRGB twinkleBase() {
+  if (fxParams.useRgb) return CRGB(fxParams.r, fxParams.g, fxParams.b);
+  return CHSV(fxParams.hue, fxParams.sat, 255);   // jitter ignored for the cut
+}
+
+// Scan the tail once per param change: walk the scale up from zero and stop
+// at the first rounded colour that is near the target.
+static void twinkleComputeCut() {
+  twinkleCutReady = true;
+  twinkleMinScale = 0.f;
+  if (!fxParams.cut) return;
+  CRGB base = twinkleBase();
+  float bu, bv; rgbToUv(base.r, base.g, base.b, bu, bv);
+  for (float s = 0.0001f; s < 0.1f; s += 0.0001f) {
+    float r = roundf(base.r * s), g = roundf(base.g * s), b = roundf(base.b * s);
+    if (r + g + b <= 0.f) continue;
+    float u, v; rgbToUv(r, g, b, u, v);
+    float du = u - bu, dv = v - bv;
+    if (sqrtf(du * du + dv * dv) <= TWINKLE_DUV_TOL) { twinkleMinScale = s; return; }
+  }
+}
+
 static void fxTwinkle(CRGB* fb, uint32_t nowMs) {
+  if (!twinkleCutReady) twinkleComputeCut();   // boot defaults, before any POST
   const uint32_t period = fxParams.periodMs < 500 ? 500 : fxParams.periodMs;
   for (uint16_t i = 0; i < NUM_LEDS; i++) {
-    uint32_t o = (uint32_t)i * 3;
     // Per-LED phase offset in ms so fades desynchronize.
     uint32_t phase = hash3(i, 101, 0) % period;
     uint32_t t = nowMs + phase;
     uint32_t n = t / period;
     if ((hash3(i, n, 1) & 0xFF) >= fxParams.density) {
       fb[i] = CRGB::Black;
-      fxFrac[o] = fxFrac[o + 1] = fxFrac[o + 2] = 0;
       continue;
     }
     float u = (t % period) / (float)period;                // cycle position 0..1
@@ -116,12 +135,8 @@ static void fxTwinkle(CRGB* fb, uint32_t nowMs) {
       base = CHSV(h, fxParams.sat, 255);
     }
     float scale = fxParams.val * env / 255.f;              // 0..1
-    for (int c = 0; c < 3; c++) {
-      float v = base.raw[c] * scale;
-      uint8_t hi = (uint8_t)v;
-      fb[i].raw[c] = hi;
-      fxFrac[o + c] = (uint8_t)((v - hi) * 255.f);
-    }
+    if (scale < twinkleMinScale) { fb[i] = CRGB::Black; continue; }
+    for (int c = 0; c < 3; c++) fb[i].raw[c] = (uint8_t)(base.raw[c] * scale + 0.5f);
   }
 }
 
@@ -130,11 +145,14 @@ static uint32_t lastSoapFrame = 0;
 
 void fxOnSwitch() {
   fxSoapReset();
-  memset(fxFrac, 0, sizeof(fxFrac));   // routines that don't dither leave it 0
+  twinkleComputeCut();
+}
+
+void fxParamsChanged() {
+  twinkleComputeCut();
 }
 
 void fxRender(CRGB* fb, uint32_t nowMs) {
-  ditherFrame++;
   switch (fxParams.kind) {
     case Fx::Off:
       fill_solid(fb, NUM_LEDS, CRGB::Black);
@@ -152,5 +170,4 @@ void fxRender(CRGB* fb, uint32_t nowMs) {
       break;
     }
   }
-  applyDither(fb);
 }

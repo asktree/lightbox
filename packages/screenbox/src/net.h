@@ -48,5 +48,7 @@ void setMode(bool normal);
 // brightness 0-255. Coalesced like light commands; POSTs /api/ambience/twinkle.
 void setCurtainsKelvin(int kelvin);
 void setCurtainsVal(int val);
+void setCurtainsPeriod(int periodMs);   // one fade in->out
+void setCurtainsCut(bool cut);          // drop off-hue fade-tail frames
 
 }  // namespace net

@@ -21,7 +21,7 @@ Two modes, interleaved automatically:
 |---|---|
 | `GET /json/info` | WLED-shaped info — twinklybox's driver/health probes work unchanged (incl. the "Timecode Buffer" usermod strings its buffer-mode autodetect looks for) |
 | `GET/POST /json/state` | `{"bri":0-255}` master brightness; `{"rb":true}` reboot |
-| `GET/POST /api/routine` | `{"kind":"soap"\|"twinkle"\|"solid"\|"off", ...params}` — soap: `speed`, `smoothness`, `palette` (name); twinkle: `hue,sat,val,density,periodMs,hueJitter` |
+| `GET/POST /api/routine` | `{"kind":"soap"\|"twinkle"\|"solid"\|"off", ...params}` — soap: `speed`, `smoothness`, `palette` (name); twinkle: `hue,sat,val,density,periodMs,hueJitter,cut` (`cut`: drop fade-tail frames whose rounded colour drifts off target) |
 | `GET /api/stats` | stream buffer depth/delay/drops, heap |
 | `POST /update` | firmware OTA: `curl -F "update=@firmware.bin" http://<box>/update` |
 

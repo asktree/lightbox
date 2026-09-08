@@ -67,7 +67,17 @@ async function postRoutine(body: object): Promise<Record<string, boolean>> {
   return results;
 }
 
-async function setCurtains(mode: Mode, twinkleKelvin: number, twinkleVal: number): Promise<Record<string, boolean>> {
+function twinkleBody(): object {
+  return {
+    kind: 'twinkle',
+    rgb: kelvinToRgbBytes(state.curtainsKelvin),
+    val: state.curtainsVal,
+    periodMs: state.curtainsPeriodMs,
+    cut: state.curtainsCut,
+  };
+}
+
+async function setCurtains(mode: Mode): Promise<Record<string, boolean>> {
   // An active twinklybox stream would paint over the native routine.
   await fetch(`${TWINKLYBOX}/api/stream/stop`, {
     method: 'POST',
@@ -75,7 +85,7 @@ async function setCurtains(mode: Mode, twinkleKelvin: number, twinkleVal: number
   }).catch(() => {});
 
   if (mode === 'normal') {
-    return postRoutine({ kind: 'twinkle', rgb: kelvinToRgbBytes(twinkleKelvin), val: twinkleVal });
+    return postRoutine(twinkleBody());
   }
   return postRoutine({ kind: 'soap' });
 }
@@ -92,6 +102,8 @@ interface AmbienceState {
   lastKelvin: Record<string, number>;
   curtainsKelvin: number;    // the twinkle dots' blackbody color (normal mode)
   curtainsVal: number;       // the twinkle dots' peak brightness, 0-255
+  curtainsPeriodMs: number;  // one twinkle fade in->out
+  curtainsCut: boolean;      // cut off-hue fade-tail frames on the box
 }
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = join(__dirname, '../../data/state/ambience.json');
@@ -100,10 +112,14 @@ function loadState(): AmbienceState {
   try {
     const s = JSON.parse(readFileSync(STATE_FILE, 'utf8')) as AmbienceState;
     if (s.mode === 'color' || s.mode === 'normal') {
-      return { mode: s.mode, lastColor: s.lastColor ?? {}, lastKelvin: s.lastKelvin ?? {}, curtainsKelvin: s.curtainsKelvin ?? 2900, curtainsVal: s.curtainsVal ?? 200 };
+      return {
+        mode: s.mode, lastColor: s.lastColor ?? {}, lastKelvin: s.lastKelvin ?? {},
+        curtainsKelvin: s.curtainsKelvin ?? 2900, curtainsVal: s.curtainsVal ?? 200,
+        curtainsPeriodMs: s.curtainsPeriodMs ?? 6000, curtainsCut: s.curtainsCut ?? true,
+      };
     }
   } catch { /* first run / unreadable — start fresh */ }
-  return { mode: 'color', lastColor: {}, lastKelvin: {}, curtainsKelvin: 2900, curtainsVal: 200 };
+  return { mode: 'color', lastColor: {}, lastKelvin: {}, curtainsKelvin: 2900, curtainsVal: 200, curtainsPeriodMs: 6000, curtainsCut: true };
 }
 
 function saveState(s: AmbienceState): void {
@@ -136,29 +152,37 @@ export async function shiftCurtainsKelvin(deltaMired: number): Promise<void> {
   if (k === state.curtainsKelvin) return;
   state.curtainsKelvin = k;
   saveStateDebounced();
-  await postRoutine({ kind: 'twinkle', rgb: kelvinToRgbBytes(k), val: state.curtainsVal });
+  await postRoutine(twinkleBody());
 }
 
 export function createAmbienceRouter(lightManager: LightManager): Router {
   const router = Router();
 
-  router.get('/', (_req, res) => res.json({ mode: state.mode, curtainsKelvin: state.curtainsKelvin, curtainsVal: state.curtainsVal }));
+  const curtainsJson = () => ({
+    kelvin: state.curtainsKelvin, val: state.curtainsVal, periodMs: state.curtainsPeriodMs, cut: state.curtainsCut,
+  });
+  router.get('/', (_req, res) => res.json({ mode: state.mode, curtainsKelvin: state.curtainsKelvin, curtainsVal: state.curtainsVal, curtains: curtainsJson() }));
 
-  // The twinkle dots' color (kelvin, along the blackbody locus) and/or peak
-  // brightness (val 0-255) — screenbox drags the curtains pin / its rail row.
-  // Applies live; save is debounced so a drag doesn't hammer the disk.
+  // The twinkle dots: color (kelvin, along the blackbody locus), peak
+  // brightness (val 0-255), fade period (periodMs) and the tail cut (cut) —
+  // screenbox drags the curtains pin / its rail rows. Applies live; save is
+  // debounced so a drag doesn't hammer the disk.
   router.post('/twinkle', async (req, res) => {
     const k = Number(req.body?.kelvin);
     const v = Number(req.body?.val);
-    if (!Number.isFinite(k) && !Number.isFinite(v)) {
-      res.status(400).json({ error: 'kelvin and/or val required' });
+    const p = Number(req.body?.periodMs);
+    const cut = req.body?.cut;
+    if (!Number.isFinite(k) && !Number.isFinite(v) && !Number.isFinite(p) && typeof cut !== 'boolean') {
+      res.status(400).json({ error: 'kelvin, val, periodMs and/or cut required' });
       return;
     }
     if (Number.isFinite(k)) state.curtainsKelvin = Math.max(KELVIN_MIN, Math.min(KELVIN_MAX, Math.round(k)));
     if (Number.isFinite(v)) state.curtainsVal = Math.max(0, Math.min(255, Math.round(v)));
+    if (Number.isFinite(p)) state.curtainsPeriodMs = Math.max(500, Math.min(60000, Math.round(p)));
+    if (typeof cut === 'boolean') state.curtainsCut = cut;
     saveStateDebounced();
-    const curtains = await postRoutine({ kind: 'twinkle', rgb: kelvinToRgbBytes(state.curtainsKelvin), val: state.curtainsVal });
-    res.json({ kelvin: state.curtainsKelvin, val: state.curtainsVal, curtains });
+    const curtains = await postRoutine(twinkleBody());
+    res.json({ ...curtainsJson(), curtains });
   });
 
   router.post('/', async (req, res) => {
@@ -206,7 +230,7 @@ export function createAmbienceRouter(lightManager: LightManager): Router {
 
     state.mode = m;
     saveState(state);
-    const curtains = await setCurtains(m, state.curtainsKelvin, state.curtainsVal);
+    const curtains = await setCurtains(m);
     res.json({ mode: state.mode, changed, curtains });
   });
 

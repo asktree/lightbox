@@ -70,11 +70,11 @@ static void sendRoutine() {
   char buf[320];
   snprintf(buf, sizeof(buf),
     "{\"kind\":\"%s\",\"hue\":%u,\"sat\":%u,\"val\":%u,"
-    "\"density\":%u,\"periodMs\":%u,\"hueJitter\":%u,"
+    "\"density\":%u,\"periodMs\":%u,\"hueJitter\":%u,\"cut\":%s,"
     "\"speed\":%u,\"smoothness\":%u,\"palette\":\"%s\","
     "\"useRgb\":%s,\"rgb\":{\"r\":%u,\"g\":%u,\"b\":%u}}",
     fxName(fxParams.kind), fxParams.hue, fxParams.sat, fxParams.val,
-    fxParams.density, fxParams.periodMs, fxParams.hueJitter,
+    fxParams.density, fxParams.periodMs, fxParams.hueJitter, fxParams.cut ? "true" : "false",
     fxParams.speed, fxParams.smoothness, fxPaletteName(fxParams.palette),
     fxParams.useRgb ? "true" : "false", fxParams.r, fxParams.g, fxParams.b);
   server.send(200, "application/json", buf);
@@ -106,6 +106,7 @@ static void handleRoutine() {
   if (doc["density"].is<int>())    fxParams.density = doc["density"];
   if (doc["periodMs"].is<int>())   fxParams.periodMs = doc["periodMs"];
   if (doc["hueJitter"].is<int>())  fxParams.hueJitter = doc["hueJitter"];
+  if (doc["cut"].is<bool>())       fxParams.cut = doc["cut"];
   if (doc["speed"].is<int>())      fxParams.speed = doc["speed"];
   if (doc["smoothness"].is<int>()) fxParams.smoothness = doc["smoothness"];
   if (doc["palette"].is<const char*>()) {
@@ -116,6 +117,7 @@ static void handleRoutine() {
     uint8_t i = doc["palette"];
     if (i < fxPaletteCount()) fxParams.palette = i;
   }
+  fxParamsChanged();
   sendRoutine();
 }
 
