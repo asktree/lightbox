@@ -62,6 +62,16 @@ export class LightManager extends EventEmitter {
         };
       }
 
+      if ('onReachable' in driver) {
+        (driver as any).onReachable = (deviceId: string, reachable: boolean) => {
+          const light = this.lights.get(`${driver.brand}:${deviceId}`);
+          if (!light || light.reachable === reachable) return;
+          light.reachable = reachable;
+          console.log(`${driver.brand}: ${light.name} ${reachable ? 'reachable' : 'unreachable'}`);
+          this.emit('update', light);
+        };
+      }
+
       // Set up debug callbacks for drivers that support it
       if ('onDebug' in driver) {
         (driver as any).onDebug = (id: string, deviceName: string, message: string, direction: 'in' | 'out') => {

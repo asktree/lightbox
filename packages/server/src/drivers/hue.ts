@@ -40,6 +40,12 @@ export class HueDriver implements LightDriver {
   // Non-light CLIP v2 EventStream items (button, relative_rotary). The
   // tap-dial service consumes these.
   onRemoteEvent?: (item: any) => void;
+  // Reachability changes. Fed by zigbee_connectivity EventStream items, by
+  // any light update (a light that reports is reachable), and by a periodic
+  // v1 read-back so a light that came back while the stream was down is
+  // not stuck unreachable until the next server boot.
+  onReachable?: (deviceId: string, reachable: boolean) => void;
+  private reachableTimer?: NodeJS.Timeout;
 
   // Debug logging callbacks (initialized so 'in' check works)
   onDebug: ((id: string, deviceName: string, message: string, direction: 'in' | 'out') => void) | undefined = undefined;
@@ -335,7 +341,19 @@ export class HueDriver implements LightDriver {
     }
   }
 
+  // Read reachability from the v1 lights list. Bounded by the driver's
+  // 10s clipV2/v1 timeouts.
+  async refreshReachability(): Promise<void> {
+    if (!this.api) return;
+    const hueLights = await this.api.lights.getAll();
+    for (const hueLight of hueLights) {
+      this.lights.set(String(hueLight.id), hueLight);
+      this.onReachable?.(String(hueLight.id), hueLight.state.reachable ?? true);
+    }
+  }
+
   async dispose(): Promise<void> {
+    if (this.reachableTimer) { clearInterval(this.reachableTimer); this.reachableTimer = undefined; }
     // Close EventStream connection
     if (this.eventStreamReq) {
       this.eventStreamReq.destroy();
@@ -344,6 +362,11 @@ export class HueDriver implements LightDriver {
   }
 
   async startListening(): Promise<void> {
+    if (!this.reachableTimer) {
+      this.reachableTimer = setInterval(() => {
+        this.refreshReachability().catch(() => { /* bridge flap; next tick */ });
+      }, 60_000);
+    }
     if (!this.config || this.v2IdToV1Id.size === 0) {
       console.log('Hue: EventStream not available, will rely on polling');
       return;
@@ -432,10 +455,19 @@ export class HueDriver implements LightDriver {
           this.onRemoteEvent?.(item);
           continue;
         }
+        if (item.type === 'zigbee_connectivity') {
+          // id_v1 is "/lights/N" for a light's radio
+          const idV1: string = typeof item.id_v1 === 'string' ? item.id_v1 : '';
+          if (idV1.startsWith('/lights/') && typeof item.status === 'string') {
+            this.onReachable?.(idV1.slice('/lights/'.length), item.status === 'connected');
+          }
+          continue;
+        }
         if (item.type !== 'light') continue;
 
         const v1Id = this.v2IdToV1Id.get(item.id);
         if (!v1Id) continue;
+        this.onReachable?.(v1Id, true);   // it reported, so it is reachable
 
         // Parse CLIP v2 state format
         const state = this.mapV2State(item);
