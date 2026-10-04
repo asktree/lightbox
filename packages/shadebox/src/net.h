@@ -8,6 +8,8 @@
 //   POST /go?open=0..100   → go to an openness
 //   POST /pair?s=180       → open the Zigbee network for joining
 //   POST /radio?hold=&max= → set the Zigbee window lengths, in ms (radio.h)
+//   GET  /log              → the last log lines as text (logbuf.h)
+//   POST /dp | /attr       → raw frames for experiments (see net.cpp)
 //
 // Every POST answers with the state JSON from before the command. Commands
 // are queued and sent in a Zigbee window after the reply.

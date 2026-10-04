@@ -20,7 +20,7 @@
 
 namespace radio {
 
-enum class Kind : uint8_t { None, Open, Close, Stop, Go, Refresh };
+enum class Kind : uint8_t { None, Open, Close, Stop, Go, Refresh, Probe };
 
 struct Stats {
   bool zigbee;         // true while a Zigbee window is open
@@ -39,6 +39,10 @@ void tick();  // call every loop
 
 // Queue a command. Returns false if no blind is paired.
 bool submit(Kind kind, int arg = 0);
+
+// Queue a raw frame (blind.h). It uses the same slot as a command. The
+// window stays open some seconds after the acknowledge, for the answer.
+bool submitProbe(const blind::Probe &probe);
 
 // Stay in Zigbee mode for `ms` (pairing, boot rejoin). If `untilHeard`, the
 // hold ends soon after the first frame from the blind.

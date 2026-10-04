@@ -36,6 +36,19 @@ struct State {
   uint8_t endpoint;
 };
 
+// A raw frame for experiments on the motor: travel limits and direction
+// (HANDOVER §6.2). The answer from the blind goes to the log (GET /log).
+struct Probe {
+  enum class Op : uint8_t { TuyaQuery, TuyaWrite, AttrRead, AttrWrite };
+  Op op;
+  uint8_t dp;        // TuyaWrite: datapoint id
+  uint8_t type;      // TuyaWrite: 1 bool, 2 value, 4 enum, 5 bitmap. AttrWrite: ZCL type id
+  uint16_t cluster;  // AttrRead, AttrWrite
+  uint16_t attr;
+  uint16_t manuf;    // AttrRead, AttrWrite: manufacturer code, 0 = none
+  uint32_t value;
+};
+
 class BlindEndpoint : public ZigbeeEP {
 public:
   explicit BlindEndpoint(uint8_t endpoint);
@@ -52,6 +65,7 @@ public:
   bool stop();
   bool goTo(int openPct);
   void refresh();          // ask the blind for its current position
+  bool probe(const Probe &p);  // send a raw frame; does not change the state
   void setInverted(bool inverted);
   void setProtocol(Protocol p);  // override the auto-detected dialect
   bool inverted() const { return _inverted; }
@@ -63,6 +77,7 @@ private:
   void findEndpoint(esp_zb_zdo_match_desc_req_param_t *req) override;
   void zbAttributeRead(uint16_t cluster, const esp_zb_zcl_attribute_t *attr, uint8_t srcEp, esp_zb_zcl_addr_t src) override;
   void zbCustomClusterCommand(const esp_zb_zcl_custom_cluster_command_message_t *msg) override;
+  void zbWriteAttributeResponse(uint16_t cluster, uint16_t attr, esp_zb_zcl_status_t status, uint8_t srcEp, esp_zb_zcl_addr_t src) override;
 
   static void onActiveEndpoints(esp_zb_zdp_status_t status, uint8_t count, uint8_t *eps, void *ctx);
   static void onSimpleDescriptor(esp_zb_zdp_status_t status, esp_zb_af_simple_desc_1_1_t *desc, void *ctx);
@@ -76,7 +91,8 @@ private:
   // ─── Wire helpers (caller holds the Zigbee lock) ────────────────────────
   void zclCommand(uint8_t cmd, uint8_t *value);
   void tuyaSend(uint8_t dp, uint8_t type, const uint8_t *val, uint8_t len);
-  void readAttrs(uint16_t cluster, uint16_t *attrs, uint8_t count);
+  void readAttrs(uint16_t cluster, uint16_t *attrs, uint8_t count, uint16_t manuf = 0);
+  void writeAttr(uint16_t cluster, uint16_t attr, uint8_t type, uint32_t value, uint16_t manuf);
 
   void persist();
   void beginMove(int dir, int target);

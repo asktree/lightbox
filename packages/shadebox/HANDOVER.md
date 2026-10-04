@@ -25,6 +25,11 @@ a short window around each command. See `src/radio.h`.
 - Pairing and the first 20 s after boot hold Zigbee mode. Wi-Fi is not reliable
   during that time.
 
+**Remote log and probes (built, not tested on the board).** The board has no
+serial reader in the bedroom. `GET /log` returns the last 8 KB of log lines,
+each with the uptime in seconds. `POST /dp` and `POST /attr` send raw frames
+for the travel-limit experiment (section 6.2).
+
 **To measure after the first flash:** `ackMs` for some commands, the `timeouts`
 count, and `heardAgoS` when idle. The blind reports its position at least each
 300 s, so a large `heardAgoS` means the blind cannot reach the board in Wi-Fi
@@ -183,8 +188,35 @@ tried it on this motor. Candidates:
   motors: DP 5 = motor direction, DP 16 = "border" (set or delete the up and down
   limits). This motor may not use the same numbers.
 
-The firmware does not send these yet. Add a console command to write them, then
-test. Use the remote method if this fails.
+The firmware can send these as raw frames (probes). Each probe goes through the
+radio queue, like a command. The Zigbee window stays open 3 s after the
+acknowledge, for the answer. Read the answer with `GET /log`.
+
+```
+POST /dp                                  ask for all Tuya datapoints
+POST /dp?id=5&type=4&value=1              write a datapoint
+                                          (type 1 bool, 2 value, 4 enum, 5 bitmap)
+POST /attr?id=0x0017                      read an attribute (cluster default 0x0102)
+POST /attr?id=0x0017&type=0x18&value=2    write it (type = ZCL type id)
+     optional: &cluster=0x0102 &manuf=0x1002
+GET  /log                                 the log, oldest line first
+```
+
+Rules to read the log:
+
+- `[probe] …` is the frame that was sent.
+- `[tuya] dp <id> type <t> len <n> = <value>` is a datapoint from the blind.
+- `[zb] attr <cluster>/<id> type <t> size <n> = <bytes>` is an attribute value.
+  The bytes are little-endian.
+- `[zb] write attr on <cluster>: status 0x00` means that the blind accepted a write.
+- A refused read or write gives **no line**. The Arduino core drops it. If
+  `ackMs` is 0 or more and there is no answer line, the blind refused the frame.
+- A read on the Basic cluster (0x0000) gives no line. The core keeps the answer.
+
+Suggested order: `POST /dp` to see which datapoints exist. Then read `0x0017`,
+`0x0007` and `0xF000`–`0xF003` on cluster 0x0102. Write only after that. Stop
+the motor (`POST /stop`) if it moves in a way that is not expected. Use the
+remote method if this fails.
 
 ## 7. Firmware
 
@@ -194,6 +226,7 @@ test. Use the remote method if this fails.
 | `src/blind.h/.cpp` | Zigbee endpoint: pair, commands (ZCL and Tuya), state, movement inference |
 | `src/net.h/.cpp` | Wi-Fi, mDNS, HTTP API, OTA |
 | `src/radio.h/.cpp` | Wi-Fi/Zigbee time-slicing, command queue |
+| `src/logbuf.h/.cpp` | Log lines to Serial and to a ring buffer (`GET /log`) |
 | `platformio.ini` | Envs `xiao_c6` (USB) and `xiao_c6_ota` (Wi-Fi) |
 | `partitions.csv` | Includes the Zigbee storage partitions |
 | `toolchain_path.py` | Fixes the PATH for the pioarduino RISC-V toolchain |
@@ -210,11 +243,15 @@ GET  /state            state JSON
 POST /open | /close | /stop | /refresh
 POST /go?open=0..100   go to an openness
 POST /pair?s=180       open the Zigbee network for joining
+POST /radio?hold=&max= set the Zigbee window lengths (ms)
+GET  /log              log lines, oldest first
+POST /dp, POST /attr   raw frames, see section 6.2
 ```
 
 **Serial console** (115200 baud, one command for each line):
 `pair [s]`, `open`, `close`, `stop`, `go <0-100>`, `refresh`, `state`, `invert`,
-`forget`, `reset` (wipes the Zigbee network and reboots), `coex <idle> <txrx> <txrx_at>`.
+`forget`, `reset` (wipes the Zigbee network and reboots), `coex <idle> <txrx> <txrx_at>`,
+`dp [<id> <type> <value>]`, `attr <cluster> <id> [<type> <value>]`.
 
 ## 8. Set up on hearth
 

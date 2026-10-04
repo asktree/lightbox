@@ -2,6 +2,7 @@
 
 #include <Preferences.h>
 
+#include "logbuf.h"
 #include "radio.h"
 
 namespace blind {
@@ -20,6 +21,13 @@ static constexpr uint8_t DP_POSITION = 3;  // value: current %
 static constexpr uint8_t DP_WORK_STATE = 7;  // enum (some models): 0 opening, 1 closing
 static constexpr uint8_t TUYA_TYPE_VALUE = 0x02;
 static constexpr uint8_t TUYA_TYPE_ENUM = 0x04;
+
+// " 01 02 …" for the first bytes of a frame, for the log.
+static const char *hexBytes(const uint8_t *p, uint16_t n, char *out, size_t cap) {
+  out[0] = 0;
+  for (uint16_t i = 0; p && i < n && 3u * (i + 1) < cap; i++) snprintf(out + 3 * i, 4, " %02x", p[i]);
+  return out;
+}
 
 // Movement inference. Blinds don't reliably say "I've stopped", so we call
 // it stopped when position reports go quiet, or after a hard ceiling.
@@ -91,7 +99,7 @@ void BlindEndpoint::restore() {
   p.getBytes("ieee", _ieee, sizeof(_ieee));
   p.end();
   if (_proto != Protocol::Unknown) {
-    Serial.printf("[blind] restored %s blind %s ep %u\n", protoName(_proto), Zigbee.formatIEEEAddress(_ieee), _ep);
+    logbuf::line("[blind] restored %s blind %s ep %u", protoName(_proto), Zigbee.formatIEEEAddress(_ieee), _ep);
   }
 }
 
@@ -113,19 +121,19 @@ void BlindEndpoint::forget() {
   _open = -1;
   memset(_ieee, 0, sizeof(_ieee));
   persist();
-  Serial.println("[blind] forgotten");
+  logbuf::line("[blind] forgotten");
 }
 
 void BlindEndpoint::setProtocol(Protocol proto) {
   _proto = proto;
   persist();
-  Serial.printf("[blind] protocol=%s\n", protoName(proto));
+  logbuf::line("[blind] protocol=%s", protoName(proto));
 }
 
 void BlindEndpoint::setInverted(bool inv) {
   _inverted = inv;
   persist();
-  Serial.printf("[blind] inverted=%d\n", inv);
+  logbuf::line("[blind] inverted=%d", inv);
 }
 
 // ─── Pairing & discovery ────────────────────────────────────────────────────
@@ -137,7 +145,7 @@ void BlindEndpoint::startPairing(uint8_t seconds) {
   _pairingUntilMs = millis() + seconds * 1000UL;
   radio::hold(seconds * 1000UL);  // a joining device needs the radio all the time
   Zigbee.openNetwork(seconds);
-  Serial.printf("[blind] network open for %us — put the blind in pairing mode\n", seconds);
+  logbuf::line("[blind] network open for %us — put the blind in pairing mode", seconds);
 }
 
 // Called by the Arduino Zigbee core on every device announce (join/rejoin).
@@ -145,20 +153,20 @@ void BlindEndpoint::findEndpoint(esp_zb_zdo_match_desc_req_param_t *req) {
   uint16_t addr = req->dst_nwk_addr;
   esp_zb_ieee_addr_t ieee;
   esp_zb_ieee_address_by_short(addr, ieee);
-  Serial.printf("[zb] device announce 0x%04x %s\n", addr, Zigbee.formatIEEEAddress(ieee));
+  logbuf::line("[zb] device announce 0x%04x %s", addr, Zigbee.formatIEEEAddress(ieee));
 
   // Our blind rejoining (e.g. after a power cut) — just track its new address.
   if (_proto != Protocol::Unknown && memcmp(ieee, _ieee, sizeof(ieee)) == 0) {
     radio::heard();
     _short = addr;
     persist();
-    Serial.printf("[blind] rejoined as 0x%04x\n", addr);
+    logbuf::line("[blind] rejoined as 0x%04x", addr);
     configure();
     return;
   }
   // A stranger. Only interrogate it if we asked for joiners.
   if ((int32_t)(millis() - _pairingUntilMs) > 0) {
-    Serial.println("[zb] not pairing, ignoring");
+    logbuf::line("[zb] not pairing, ignoring");
     return;
   }
   esp_zb_zdo_active_ep_req_param_t ep_req = {.addr_of_interest = addr};
@@ -168,10 +176,10 @@ void BlindEndpoint::findEndpoint(esp_zb_zdo_match_desc_req_param_t *req) {
 void BlindEndpoint::onActiveEndpoints(esp_zb_zdp_status_t status, uint8_t count, uint8_t *eps, void *ctx) {
   uint16_t addr = (uint16_t)(uintptr_t)ctx;
   if (status != ESP_ZB_ZDP_STATUS_SUCCESS) {
-    Serial.printf("[zb] active ep request failed (%d)\n", status);
+    logbuf::line("[zb] active ep request failed (%d)", status);
     return;
   }
-  Serial.printf("[zb] 0x%04x has %u endpoint(s)\n", addr, count);
+  logbuf::line("[zb] 0x%04x has %u endpoint(s)", addr, count);
   for (uint8_t i = 0; i < count; i++) {
     esp_zb_zdo_simple_desc_req_param_t req = {.addr_of_interest = addr, .endpoint = eps[i]};
     esp_zb_zdo_simple_desc_req(&req, onSimpleDescriptor, ctx);
@@ -183,17 +191,24 @@ void BlindEndpoint::onSimpleDescriptor(esp_zb_zdp_status_t status, esp_zb_af_sim
   if (status != ESP_ZB_ZDP_STATUS_SUCCESS || !d) return;
 
   // Log everything: this is the one moment we learn what the device is.
-  Serial.printf("[zb] 0x%04x ep %u profile 0x%04x device 0x%04x\n  in :", addr, d->endpoint, d->app_profile_id, d->app_device_id);
+  logbuf::line("[zb] 0x%04x ep %u profile 0x%04x device 0x%04x", addr, d->endpoint, d->app_profile_id, d->app_device_id);
   bool covering = false, tuya = false;
+  char list[150];
+  size_t n = 0;
+  list[0] = 0;
   for (uint8_t i = 0; i < d->app_input_cluster_count; i++) {
     uint16_t c = d->app_cluster_list[i];
-    Serial.printf(" 0x%04x", c);
+    if (n + 8 < sizeof(list)) n += snprintf(list + n, sizeof(list) - n, " 0x%04x", c);
     covering |= c == CLUSTER_COVERING;
     tuya |= c == CLUSTER_TUYA;
   }
-  Serial.print("\n  out:");
-  for (uint8_t i = 0; i < d->app_output_cluster_count; i++) Serial.printf(" 0x%04x", d->app_cluster_list[d->app_input_cluster_count + i]);
-  Serial.println();
+  logbuf::line("[zb]   in :%s", list);
+  n = 0;
+  list[0] = 0;
+  for (uint8_t i = 0; i < d->app_output_cluster_count; i++) {
+    if (n + 8 < sizeof(list)) n += snprintf(list + n, sizeof(list) - n, " 0x%04x", d->app_cluster_list[d->app_input_cluster_count + i]);
+  }
+  logbuf::line("[zb]   out:%s", list);
 
   if (!s_self) return;
   if (covering) s_self->adopt(addr, d->endpoint, Protocol::Zcl);
@@ -208,7 +223,7 @@ void BlindEndpoint::adopt(uint16_t addr, uint8_t ep, Protocol proto) {
   _proto = proto;
   esp_zb_ieee_address_by_short(addr, _ieee);
   persist();
-  Serial.printf("[blind] paired: %s blind 0x%04x ep %u\n", protoName(proto), addr, ep);
+  logbuf::line("[blind] paired: %s blind 0x%04x ep %u", protoName(proto), addr, ep);
   configure();
 }
 
@@ -257,7 +272,7 @@ void BlindEndpoint::configure() {
 }
 
 void BlindEndpoint::onBind(esp_zb_zdp_status_t status, void *) {
-  Serial.printf("[zb] bind %s\n", status == ESP_ZB_ZDP_STATUS_SUCCESS ? "ok" : "failed");
+  logbuf::line("[zb] bind %s", status == ESP_ZB_ZDP_STATUS_SUCCESS ? "ok" : "failed");
 }
 
 // ─── Incoming: position reports ─────────────────────────────────────────────
@@ -268,13 +283,26 @@ void BlindEndpoint::zbAttributeRead(uint16_t cluster, const esp_zb_zcl_attribute
     if (attr->id == 0x0004 || attr->id == 0x0005) {
       // Manufacturer / model strings: first byte is the length.
       const uint8_t *s = (const uint8_t *)attr->data.value;
-      if (s) Serial.printf("[zb] basic 0x%04x = %.*s\n", attr->id, s[0], s + 1);
+      if (s) logbuf::line("[zb] basic 0x%04x = %.*s", attr->id, s[0], s + 1);
     }
     return;
   }
-  if (cluster == CLUSTER_COVERING && attr->id == ATTR_LIFT_PCT && attr->data.value) {
-    onPosition(*(const uint8_t *)attr->data.value);
+  if (cluster == CLUSTER_COVERING && attr->id == ATTR_LIFT_PCT) {
+    if (attr->data.value) onPosition(*(const uint8_t *)attr->data.value);
+    return;
   }
+  // All other attributes: a read from a probe, or a report nobody asked for.
+  // Multi-byte values are little-endian.
+  char hex[3 * 16 + 1];
+  logbuf::line("[zb] attr 0x%04x/0x%04x type 0x%02x size %u =%s", cluster, attr->id, attr->data.type, attr->data.size,
+               hexBytes((const uint8_t *)attr->data.value, attr->data.size, hex, sizeof(hex)));
+}
+
+// The Arduino core calls this only for a write that the blind accepted. A
+// refused read or write gives no line at all.
+void BlindEndpoint::zbWriteAttributeResponse(uint16_t cluster, uint16_t, esp_zb_zcl_status_t status, uint8_t, esp_zb_zcl_addr_t) {
+  radio::heard();
+  logbuf::line("[zb] write attr on 0x%04x: status 0x%02x", cluster, status);
 }
 
 // Tuya frames: [status][seq] then repeated {dp, type, len(2, BE), value}.
@@ -285,9 +313,8 @@ void BlindEndpoint::zbCustomClusterCommand(const esp_zb_zcl_custom_cluster_comma
   radio::heard();
   const uint8_t *p = (const uint8_t *)msg->data.value;
   uint16_t n = msg->data.size;
-  Serial.printf("[tuya] cmd 0x%02x len %u:", msg->info.command.id, n);
-  for (uint16_t i = 0; i < n; i++) Serial.printf(" %02x", p[i]);
-  Serial.println();
+  char hex[3 * 40 + 1];
+  logbuf::line("[tuya] cmd 0x%02x len %u:%s", msg->info.command.id, n, hexBytes(p, n, hex, sizeof(hex)));
   if (n < 2) return;
   for (uint16_t i = 2; i + 4 <= n;) {
     uint8_t dp = p[i], type = p[i + 1];
@@ -301,7 +328,7 @@ void BlindEndpoint::zbCustomClusterCommand(const esp_zb_zcl_custom_cluster_comma
 void BlindEndpoint::tuyaDatapoint(uint8_t dp, uint8_t type, const uint8_t *v, uint16_t len) {
   uint32_t value = 0;
   for (uint16_t i = 0; i < len && i < 4; i++) value = (value << 8) | v[i];
-  Serial.printf("[tuya] dp %u type %u = %lu\n", dp, type, (unsigned long)value);
+  logbuf::line("[tuya] dp %u type %u len %u = %lu", dp, type, len, (unsigned long)value);
   if (dp == DP_POSITION) onPosition((int)value);
 }
 
@@ -319,7 +346,7 @@ void BlindEndpoint::onPosition(int raw) {
   if (_moving && prev != open) _reportSinceMove = true;
   if (_moving && _target >= 0 && abs(open - _target) <= 1) _moving = false, _dir = 0;
   if (_moving && _target < 0 && (open == 0 || open == 100)) _moving = false, _dir = 0;
-  Serial.printf("[blind] open=%d%%%s\n", open, _moving ? " (moving)" : "");
+  logbuf::line("[blind] open=%d%% (raw %d)%s", open, raw, _moving ? " (moving)" : "");
 }
 
 // ─── Movement inference ─────────────────────────────────────────────────────
@@ -340,7 +367,7 @@ void BlindEndpoint::tick() {
   if (quiet || timeout) {
     _moving = false;
     _dir = 0;
-    Serial.printf("[blind] settled at %d%% (%s)\n", (int)_open, quiet ? "quiet" : "timeout");
+    logbuf::line("[blind] settled at %d%% (%s)", (int)_open, quiet ? "quiet" : "timeout");
   }
 }
 
@@ -387,16 +414,47 @@ void BlindEndpoint::tuyaSend(uint8_t dp, uint8_t type, const uint8_t *val, uint8
   esp_zb_zcl_custom_cluster_cmd_req(&req);
 }
 
-void BlindEndpoint::readAttrs(uint16_t cluster, uint16_t *attrs, uint8_t count) {
+void BlindEndpoint::readAttrs(uint16_t cluster, uint16_t *attrs, uint8_t count, uint16_t manuf) {
   esp_zb_zcl_read_attr_cmd_t req = {};
   req.zcl_basic_cmd.dst_addr_u.addr_short = _short;
   req.zcl_basic_cmd.dst_endpoint = _ep;
   req.zcl_basic_cmd.src_endpoint = _endpoint;
   req.address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT;
   req.clusterID = cluster;
+  req.manuf_specific = manuf ? 1 : 0;
+  req.manuf_code = manuf;
   req.attr_number = count;
   req.attr_field = attrs;
   esp_zb_zcl_read_attr_cmd_req(&req);
+}
+
+// Byte count of the ZCL types that fit a probe value. The low three bits of
+// the fixed-size type ids give the size, minus one.
+static uint8_t zclSize(uint8_t type) {
+  if (type == ESP_ZB_ZCL_ATTR_TYPE_BOOL) return 1;
+  bool sized = (type >= 0x08 && type <= 0x0b) || (type >= 0x18 && type <= 0x1b) || (type >= 0x20 && type <= 0x23) || (type >= 0x28 && type <= 0x2b);
+  if (sized) return (type & 0x07) + 1;
+  if (type == ESP_ZB_ZCL_ATTR_TYPE_16BIT_ENUM) return 2;
+  return 1;  // 8-bit enum, and a guess for all other types
+}
+
+void BlindEndpoint::writeAttr(uint16_t cluster, uint16_t attrId, uint8_t type, uint32_t value, uint16_t manuf) {
+  esp_zb_zcl_attribute_t attr = {};
+  attr.id = attrId;
+  attr.data.type = (esp_zb_zcl_attr_type_t)type;
+  attr.data.size = zclSize(type);
+  attr.data.value = &value;  // little-endian, as on the wire
+  esp_zb_zcl_write_attr_cmd_t req = {};
+  req.zcl_basic_cmd.dst_addr_u.addr_short = _short;
+  req.zcl_basic_cmd.dst_endpoint = _ep;
+  req.zcl_basic_cmd.src_endpoint = _endpoint;
+  req.address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT;
+  req.clusterID = cluster;
+  req.manuf_specific = manuf ? 1 : 0;
+  req.manuf_code = manuf;
+  req.attr_number = 1;
+  req.attr_field = &attr;
+  esp_zb_zcl_write_attr_cmd_req(&req);
 }
 
 // Public commands: lock the stack, speak the right dialect, update intent.
@@ -474,6 +532,37 @@ void BlindEndpoint::refresh() {
   } else {
     tuyaSend(0, 0, nullptr, 0);
   }
+}
+
+bool BlindEndpoint::probe(const Probe &p) {
+  if (_proto == Protocol::Unknown) return false;
+  ZbLock lock;
+  switch (p.op) {
+    case Probe::Op::TuyaQuery:
+      logbuf::line("[probe] tuya query");
+      tuyaSend(0, 0, nullptr, 0);
+      break;
+    case Probe::Op::TuyaWrite: {
+      // Tuya numbers are big-endian. A value has 4 bytes; the other types
+      // that a probe can send have 1.
+      uint8_t v[4] = {(uint8_t)(p.value >> 24), (uint8_t)(p.value >> 16), (uint8_t)(p.value >> 8), (uint8_t)p.value};
+      logbuf::line("[probe] tuya dp %u type %u = %lu", p.dp, p.type, (unsigned long)p.value);
+      if (p.type == TUYA_TYPE_VALUE) tuyaSend(p.dp, p.type, v, 4);
+      else tuyaSend(p.dp, p.type, v + 3, 1);
+      break;
+    }
+    case Probe::Op::AttrRead: {
+      uint16_t attr = p.attr;
+      logbuf::line("[probe] read attr 0x%04x/0x%04x manuf 0x%04x", p.cluster, p.attr, p.manuf);
+      readAttrs(p.cluster, &attr, 1, p.manuf);
+      break;
+    }
+    case Probe::Op::AttrWrite:
+      logbuf::line("[probe] write attr 0x%04x/0x%04x type 0x%02x = %lu manuf 0x%04x", p.cluster, p.attr, p.type, (unsigned long)p.value, p.manuf);
+      writeAttr(p.cluster, p.attr, p.type, p.value, p.manuf);
+      break;
+  }
+  return true;
 }
 
 State BlindEndpoint::state() const {
