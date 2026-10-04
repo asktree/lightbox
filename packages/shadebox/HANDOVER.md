@@ -4,6 +4,59 @@ Status of the Yoolax blind project on 2026-10-03, for the next Claude session on
 **hearth**. All the code and all the known facts are in this file and in `src/`.
 The project was started from the laptop on 2026-10-02.
 
+## 0. Update 2026-10-04 (hearth)
+
+Iggy's decisions: the board stays on a USB charger in the bedroom, on Wi-Fi.
+The gesture is a chord: hold **button 2** and turn the dial. Sections 4.1 and 5
+below are history; this section replaces them.
+
+**Radio: time-slicing (built, not tested on the board).** The board stays in
+Wi-Fi mode (stock coexistence priorities). It gives the radio to Zigbee only for
+a short window around each command. See `src/radio.h`.
+
+- A command gets its HTTP reply first. Then the Zigbee window opens and the
+  command is sent. The window closes `holdMs` (400) after the blind acknowledges,
+  or after `maxMs` (8000) with no acknowledge.
+- Commands use a one-slot queue. The newest command wins.
+- `/state` has new fields: `radio`, `rssi`, `windows`, `timeouts`, `ackMs` (send
+  to acknowledge time, the blind's poll delay), `windowMs`, `heardAgoS`.
+- `POST /radio?hold=<ms>&max=<ms>` sets the window lengths. Serial: `radio <hold>
+  <max>` and `hold <s>`.
+- Pairing and the first 20 s after boot hold Zigbee mode. Wi-Fi is not reliable
+  during that time.
+
+**To measure after the first flash:** `ackMs` for some commands, the `timeouts`
+count, and `heardAgoS` when idle. The blind reports its position at least each
+300 s, so a large `heardAgoS` means the blind cannot reach the board in Wi-Fi
+mode. Fall back to hearth USB only if this cannot be made reliable.
+
+**Blocker:** the old firmware booted with Zigbee priority high and does not get
+on Wi-Fi from the bedroom charger. `shadebox.local` does not resolve, so OTA is
+not possible. Flash the new firmware one time by USB on hearth. After that, OTA
+works.
+
+**Lightbox side (built, live on hearth):**
+
+- `packages/server/src/services/shade.ts`: HTTP client with a latest-wins queue.
+  It retries for 30 s, because the board does not answer during a Zigbee window.
+- `packages/server/src/routes/shade.ts`: `GET /api/shade`, `POST
+  /api/shade/open|close|stop`, `POST /api/shade/go {open}`.
+- `tap-dial.ts`: button 2 held + rotation sets the blind openness (clockwise =
+  more open). The first tick starts from the last known position. A go-to
+  command replaces a movement in progress. If the position is not known, the
+  chord sends stop.
+- Button 2 also keeps its Hue app action on the bridge. Remove that action in
+  the Hue app if it is not wanted.
+
+**PlatformIO on hearth:** the pioarduino platform needs pioarduino core 6.2.0.
+The stock `pio` 6.1.19 refuses it. The core is in its own venv,
+`~/.local/share/pio-venv-pioarduino`, so the screenbox toolchain is not changed.
+The package scripts put that venv first on PATH. `include/secrets.h` exists on
+hearth.
+
+**Next:** flash by USB, measure, set travel limits (section 6), then test the
+chord with real positions.
+
 ## 1. Goal
 
 Control the Yoolax Zigbee roller blind from lightbox. Use a gesture on the Hue
@@ -140,6 +193,7 @@ test. Use the remote method if this fails.
 | `src/main.cpp` | Boot order, coexistence, serial console |
 | `src/blind.h/.cpp` | Zigbee endpoint: pair, commands (ZCL and Tuya), state, movement inference |
 | `src/net.h/.cpp` | Wi-Fi, mDNS, HTTP API, OTA |
+| `src/radio.h/.cpp` | Wi-Fi/Zigbee time-slicing, command queue |
 | `platformio.ini` | Envs `xiao_c6` (USB) and `xiao_c6_ota` (Wi-Fi) |
 | `partitions.csv` | Includes the Zigbee storage partitions |
 | `toolchain_path.py` | Fixes the PATH for the pioarduino RISC-V toolchain |
@@ -165,9 +219,9 @@ POST /pair?s=180       open the Zigbee network for joining
 ## 8. Set up on hearth
 
 1. Pull lightbox: `git pull`.
-2. Install PlatformIO if it is not there: `brew install platformio`. The first build
-   downloads the pioarduino platform (Arduino-ESP32 3.x). This is necessary for
-   the C6 and Zigbee.
+2. PlatformIO: see section 0. Hearth uses the pioarduino core in its own venv.
+   The first build downloads the pioarduino platform (Arduino-ESP32 3.x). This
+   is necessary for the C6 and Zigbee.
 3. Make `include/secrets.h`. Copy `include/secrets.example.h`. Use the
    **2.4 GHz** SSID `emojiemojiemoji`; the emoji-named network is 5 GHz only. The
    same values are in `packages/screenbox/include/secrets.h` if it exists on

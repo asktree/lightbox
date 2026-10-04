@@ -2,6 +2,8 @@
 
 #include <Preferences.h>
 
+#include "radio.h"
+
 namespace blind {
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -133,6 +135,7 @@ void BlindEndpoint::setInverted(bool inv) {
 
 void BlindEndpoint::startPairing(uint8_t seconds) {
   _pairingUntilMs = millis() + seconds * 1000UL;
+  radio::hold(seconds * 1000UL);  // a joining device needs the radio all the time
   Zigbee.openNetwork(seconds);
   Serial.printf("[blind] network open for %us — put the blind in pairing mode\n", seconds);
 }
@@ -146,6 +149,7 @@ void BlindEndpoint::findEndpoint(esp_zb_zdo_match_desc_req_param_t *req) {
 
   // Our blind rejoining (e.g. after a power cut) — just track its new address.
   if (_proto != Protocol::Unknown && memcmp(ieee, _ieee, sizeof(ieee)) == 0) {
+    radio::heard();
     _short = addr;
     persist();
     Serial.printf("[blind] rejoined as 0x%04x\n", addr);
@@ -259,6 +263,7 @@ void BlindEndpoint::onBind(esp_zb_zdp_status_t status, void *) {
 // ─── Incoming: position reports ─────────────────────────────────────────────
 
 void BlindEndpoint::zbAttributeRead(uint16_t cluster, const esp_zb_zcl_attribute_t *attr, uint8_t, esp_zb_zcl_addr_t src) {
+  radio::heard();
   if (cluster == CLUSTER_BASIC) {
     if (attr->id == 0x0004 || attr->id == 0x0005) {
       // Manufacturer / model strings: first byte is the length.
@@ -277,6 +282,7 @@ void BlindEndpoint::zbAttributeRead(uint16_t cluster, const esp_zb_zcl_attribute
 // starts with the 2-byte sequence number.
 void BlindEndpoint::zbCustomClusterCommand(const esp_zb_zcl_custom_cluster_command_message_t *msg) {
   if (msg->info.cluster != CLUSTER_TUYA) return;
+  radio::heard();
   const uint8_t *p = (const uint8_t *)msg->data.value;
   uint16_t n = msg->data.size;
   Serial.printf("[tuya] cmd 0x%02x len %u:", msg->info.command.id, n);

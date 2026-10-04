@@ -4,10 +4,10 @@
   "private": true,
   "description": "XIAO ESP32-C6 Zigbee coordinator for the Yoolax blind. PlatformIO/C++ — package.json exists for workspace discovery and pnpm scripts only.",
   "scripts": {
-    "compile": "pio run -e xiao_c6",
-    "flash": "pio run -e xiao_c6 -t upload",
-    "flash:ota": "pio run -e xiao_c6_ota -t upload",
-    "monitor": "pio device monitor",
-    "clean": "pio run -t clean"
+    "compile": "PATH=\"$HOME/.local/share/pio-venv-pioarduino/bin:$PATH\" pio run -e xiao_c6",
+    "flash": "PATH=\"$HOME/.local/share/pio-venv-pioarduino/bin:$PATH\" pio run -e xiao_c6 -t upload",
+    "flash:ota": "PATH=\"$HOME/.local/share/pio-venv-pioarduino/bin:$PATH\" pio run -e xiao_c6_ota -t upload",
+    "monitor": "PATH=\"$HOME/.local/share/pio-venv-pioarduino/bin:$PATH\" pio device monitor",
+    "clean": "PATH=\"$HOME/.local/share/pio-venv-pioarduino/bin:$PATH\" pio run -t clean"
   }
 }

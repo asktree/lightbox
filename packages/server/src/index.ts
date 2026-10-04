@@ -19,6 +19,7 @@ import { LightManager } from './lib/light-manager.js';
 import { PaletteAnimator } from './lib/palette-animator.js';
 import { createLightsRouter } from './routes/lights.js';
 import { createAmbienceRouter } from './routes/ambience.js';
+import { createShadeRouter } from './routes/shade.js';
 import { startTapDial } from './services/tap-dial.js';
 import { startDayLog, buildSnapshot, DAY_LOG_FILE } from './services/day-log.js';
 import { createWwTestRouter } from './routes/wwtest.js';
@@ -138,6 +139,7 @@ wss.on('connection', async (ws) => {
 // Mount routes
 app.use('/api/lights', createLightsRouter(lightManager, paletteAnimator));
 app.use('/api/ambience', createAmbienceRouter(lightManager));
+app.use('/api/shade', createShadeRouter());
 app.use('/api/wwtest', createWwTestRouter(lightManager));
 app.use('/api/groups', createGroupsRouter(lightManager));
 app.use('/api/palettes', createPalettesRouter(lightManager));
@@ -191,7 +193,8 @@ async function start() {
     console.log(`Discovered ${lightManager.getAllLights().length} lights`);
 
     // Hue Tap Dial: bare rotation = brightness; button-1-held rotation =
-    // kelvin. Buttons 2-4 keep their bridge behavior.
+    // kelvin; button-2-held rotation = the blind. Buttons 3-4 keep their
+    // bridge behavior.
     startTapDial(lightManager);
 
     // Day log: 5-minute snapshots of the room settings, for the natural

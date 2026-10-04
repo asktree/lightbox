@@ -7,6 +7,7 @@
 #include <Zigbee.h>
 #include <esp_coexist.h>
 
+#include "radio.h"
 #include "secrets.h"
 
 namespace net {
@@ -33,20 +34,27 @@ static void replyState(bool ok = true) {
 
 static void routes() {
   s_http.on("/state", HTTP_GET, [] { replyState(); });
-  s_http.on("/open", HTTP_POST, [] { replyState(s_shade->open()); });
-  s_http.on("/close", HTTP_POST, [] { replyState(s_shade->close()); });
-  s_http.on("/stop", HTTP_POST, [] { replyState(s_shade->stop()); });
-  s_http.on("/refresh", HTTP_POST, [] {
-    s_shade->refresh();
+  // Commands are queued. The reply goes out first, then the Zigbee window
+  // opens (radio.h), so the state in the reply is from before the command.
+  s_http.on("/open", HTTP_POST, [] { replyState(radio::submit(radio::Kind::Open)); });
+  s_http.on("/close", HTTP_POST, [] { replyState(radio::submit(radio::Kind::Close)); });
+  s_http.on("/stop", HTTP_POST, [] { replyState(radio::submit(radio::Kind::Stop)); });
+  s_http.on("/refresh", HTTP_POST, [] { replyState(radio::submit(radio::Kind::Refresh)); });
+  s_http.on("/radio", HTTP_POST, [] {
+    radio::Stats r = radio::stats();
+    radio::tune(s_http.hasArg("hold") ? s_http.arg("hold").toInt() : r.holdMs, s_http.hasArg("max") ? s_http.arg("max").toInt() : r.maxMs);
     replyState();
   });
   s_http.on("/go", HTTP_POST, [] {
     if (!s_http.hasArg("open")) return s_http.send(400, "application/json", "{\"error\":\"missing ?open=0..100\"}");
-    replyState(s_shade->goTo(s_http.arg("open").toInt()));
+    replyState(radio::submit(radio::Kind::Go, s_http.arg("open").toInt()));
   });
+  // Reply first: pairing holds the radio in Zigbee mode.
   s_http.on("/pair", HTTP_POST, [] {
-    s_shade->startPairing(s_http.hasArg("s") ? s_http.arg("s").toInt() : 180);
     replyState();
+    s_http.client().flush();
+    delay(150);
+    s_shade->startPairing(s_http.hasArg("s") ? s_http.arg("s").toInt() : 180);
   });
   s_http.onNotFound([] { s_http.send(404, "application/json", "{\"error\":\"not found\"}"); });
 }
@@ -88,6 +96,9 @@ static void netTask(void *) {
     vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
+
+bool connected() { return WiFi.isConnected(); }
+int rssi() { return WiFi.isConnected() ? WiFi.RSSI() : 0; }
 
 // ─── Startup ────────────────────────────────────────────────────────────────
 //

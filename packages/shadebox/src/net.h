@@ -7,8 +7,10 @@
 //   POST /open | /close | /stop | /refresh
 //   POST /go?open=0..100   → go to an openness
 //   POST /pair?s=180       → open the Zigbee network for joining
+//   POST /radio?hold=&max= → set the Zigbee window lengths, in ms (radio.h)
 //
-// Every POST answers with the (post-command) state JSON.
+// Every POST answers with the state JSON from before the command. Commands
+// are queued and sent in a Zigbee window after the reply.
 
 #pragma once
 #include <Arduino.h>
@@ -19,5 +21,8 @@ namespace net {
 
 // Call BEFORE Zigbee.begin(): Wi-Fi must be up when coexistence is enabled.
 void begin(blind::BlindEndpoint &shade, String (*stateJson)());
+
+bool connected();
+int rssi();  // dBm, or 0 when Wi-Fi is not connected
 
 }  // namespace net
