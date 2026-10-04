@@ -14,3 +14,6 @@ tinytuya.json
 tuya-raw.json
 snapshot.json
 tuya_devices.json
+
+# Stray clone of asktree/iggymanager (separate repo, see Linear)
+/iggymanager/

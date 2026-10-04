@@ -1,0 +1,12 @@
+# zigbee_zczr.csv with the 1.3 MB SPIFFS dropped so each OTA app slot gets
+# 1.9 MB (Wi-Fi + Zigbee + HTTP doesn't fit in 1.25 MB). nvs / zb_storage /
+# zb_fct keep their original offsets so the paired network survives reflash.
+# Name,     Type, SubType, Offset,  Size, Flags
+nvs,        data, nvs,     0x9000,  0x5000,
+otadata,    data, ota,     0xe000,  0x2000,
+app0,       app,  ota_0,   0x10000, 0x1E0000,
+app1,       app,  ota_1,   0x1F0000,0x1E0000,
+zb_storage, data, fat,     0x3EA000,0x4000,
+zb_fct,     data, fat,     0x3EE000,0x1000,
+rcp_fw,     data, spiffs,  0x3EF000,0x1000,
+coredump,   data, coredump,0x3F0000,0x10000,
