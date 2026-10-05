@@ -4,6 +4,8 @@
 //   is mostly down goes up; a blind that is mostly up goes down.
 //   After that, each tap alternates: pause, then go in the opposite
 //   direction, then pause, then the opposite direction again, and so on.
+//   A tap while the board says that the blind moves is always a pause, also
+//   for a move that another control started.
 //
 // This module has no I/O, so the rules can be tested without a blind.
 
@@ -32,12 +34,16 @@ export class ShadeTap {
    * A tap at time `now` (ms). `open` is the last known position, 0 closed to
    * 100 open, or null. `moving` is the board's fresh "the blind moves" flag,
    * or null if no fresh state is available; then our own estimate is used.
+   * `boardDir` is the board's direction of that move (1 up, -1 down), if known.
    */
-  tap(now: number, open: number | null, moving: boolean | null): TapAction {
+  tap(now: number, open: number | null, moving: boolean | null, boardDir: number | null = null): TapAction {
     const fresh = now - this.lastUsedAt > TAP_FRESH_MS;
     this.lastUsedAt = now;
 
-    if (!fresh && (moving ?? now < this.movingUntil)) {
+    if (moving === true || (!fresh && (moving ?? now < this.movingUntil))) {
+      // After a long pause our own direction is old. Take the direction of
+      // the move that this tap stops, so the next tap goes the opposite way.
+      if (fresh) this.dir = boardDir === 1 || boardDir === -1 ? boardDir : 0;
       this.movingUntil = now;
       return { kind: 'stop' };
     }

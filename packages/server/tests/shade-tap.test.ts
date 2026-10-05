@@ -50,11 +50,33 @@ describe('ShadeTap', () => {
     expect(t.tap(5 * S + TAP_FRESH_MS + 1, 25, false)).toEqual({ kind: 'go', open: 100 });
   });
 
-  it('does not pause on a first tap after 3 minutes, even if the blind moves', () => {
+  it('pauses on a first tap after 3 minutes if the board says that the blind moves', () => {
     const t = new ShadeTap();
     expect(t.tap(0, 0, false)).toEqual({ kind: 'go', open: 100 });
-    // Something else (the remote) moves the blind 4 minutes later.
-    expect(t.tap(4 * 60 * S, 70, true)).toEqual({ kind: 'go', open: 0 });
+    // Another control moves the blind down 4 minutes later.
+    expect(t.tap(4 * 60 * S, 70, true, -1)).toEqual({ kind: 'stop' });
+    // The next tap goes opposite to the move that the tap stopped.
+    expect(t.tap(4 * 60 * S + 2 * S, 70, false)).toEqual({ kind: 'go', open: 100 });
+    expect(t.tap(4 * 60 * S + 4 * S, 75, true)).toEqual({ kind: 'stop' });
+    expect(t.tap(4 * 60 * S + 6 * S, 75, false)).toEqual({ kind: 'go', open: 0 });
+  });
+
+  it('uses the position rule after that pause when the board gives no direction', () => {
+    const t = new ShadeTap();
+    expect(t.tap(0, 0, false)).toEqual({ kind: 'go', open: 100 });   // our last direction: up
+    expect(t.tap(4 * 60 * S, 30, true)).toEqual({ kind: 'stop' });
+    // Mostly down, so up. Our old direction (up) would give down.
+    expect(t.tap(4 * 60 * S + 2 * S, 30, false)).toEqual({ kind: 'go', open: 100 });
+    const u = new ShadeTap();
+    expect(u.tap(0, 80, true, 0)).toEqual({ kind: 'stop' });          // very first tap, blind moves
+    expect(u.tap(2 * S, 80, false)).toEqual({ kind: 'go', open: 0 }); // mostly up, so down
+  });
+
+  it('does not pause on a first tap after 3 minutes from its own old estimate', () => {
+    const t = new ShadeTap();
+    expect(t.tap(0, 0, null)).toEqual({ kind: 'go', open: 100 });
+    // No fresh board state 4 minutes later: the blind is taken as stopped.
+    expect(t.tap(4 * 60 * S, 70, null)).toEqual({ kind: 'go', open: 0 });
   });
 
   it('counts a dial move as use and as the last direction', () => {
