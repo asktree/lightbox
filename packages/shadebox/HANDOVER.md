@@ -16,24 +16,44 @@ a short window around each command. See `src/radio.h`.
 
 - A command gets its HTTP reply first. Then the Zigbee window opens and the
   command is sent. The window closes `holdMs` (400) after the blind acknowledges,
-  or after `maxMs` (8000) with no acknowledge.
+  or after `maxMs` (6000) with no acknowledge.
 - Commands use a one-slot queue. The newest command wins.
 - `/state` has new fields: `radio`, `rssi`, `windows`, `timeouts`, `ackMs` (send
   to acknowledge time, the blind's poll delay), `windowMs`, `heardAgoS`.
 - `POST /radio?hold=<ms>&max=<ms>` sets the window lengths. Serial: `radio <hold>
   <max>` and `hold <s>`.
-- Pairing and the first 20 s after boot hold Zigbee mode. Wi-Fi is not reliable
-  during that time.
+- Pairing holds Zigbee mode. Wi-Fi is not reliable during that time.
+- There is no Zigbee window at boot. See the measurements below.
+
+**Measured on the board, 2026-10-05 (board on hearth's USB, blind in range):**
+
+- The blind acknowledges a command in 0.36 s to 0.41 s (`ackMs`). A window
+  with an acknowledge is about 1 s long.
+- Wi-Fi survives a 6 s window when it was connected for some time before.
+- A window that opens when Wi-Fi has just connected makes Wi-Fi lose the
+  access point (`BEACON_TIMEOUT`), for 20 s to 35 s. A 20 s window and a 6 s
+  window both did this. So the boot window is removed.
+- With no boot window, Wi-Fi is up 4 s after boot and stays up.
+- After a reboot of the board, the blind is not reachable until it joins
+  again. It does this without help, in Wi-Fi mode. The delay was 3 s, 5 s and
+  72 s in three boots, and more than 100 s in a fourth. A command in that
+  time gets no acknowledge.
+- To open the serial port resets the board (`rst:0x15 USB_UART_HPSYS`).
+
+**Remote log and probes (the log is tested; the probes are not).** The board has no
+serial reader in the bedroom. `GET /log` returns the last 8 KB of log lines,
+each with the uptime in seconds. `POST /dp` and `POST /attr` send raw frames
+for the travel-limit experiment (section 6.2).
 
 **To measure after the first flash:** `ackMs` for some commands, the `timeouts`
 count, and `heardAgoS` when idle. The blind reports its position at least each
 300 s, so a large `heardAgoS` means the blind cannot reach the board in Wi-Fi
 mode. Fall back to hearth USB only if this cannot be made reliable.
 
-**Blocker:** the old firmware booted with Zigbee priority high and does not get
-on Wi-Fi from the bedroom charger. `shadebox.local` does not resolve, so OTA is
-not possible. Flash the new firmware one time by USB on hearth. After that, OTA
-works.
+**USB flash: done on 2026-10-05.** The new firmware is on the board, and OTA
+works (about 55 s for one upload). Hearth asks "Allow accessory to connect?" on
+its screen for a new USB device; until someone clicks Allow, the board has no
+serial port.
 
 **Lightbox side (built, live on hearth):**
 
@@ -54,8 +74,8 @@ The stock `pio` 6.1.19 refuses it. The core is in its own venv,
 The package scripts put that venv first on PATH. `include/secrets.h` exists on
 hearth.
 
-**Next:** flash by USB, measure, set travel limits (section 6), then test the
-chord with real positions.
+**Next:** check Wi-Fi from the bedroom charger, set the travel limits
+(section 6), then test the chord with real positions.
 
 ## 1. Goal
 
@@ -68,7 +88,7 @@ system, and it runs on hearth.
 | Item | Facts |
 |---|---|
 | Blind | Yoolax motorized roller shade, **Zigbee** motor. Yoolax support confirmed this (order 111-3828171-0633027). Hubitat users report it as model **TS0301**. It speaks standard ZCL Window Covering (cluster `0x0102`) and Tuya `0xEF00`. Both work. Battery motor, so it is a "sleepy" end device: commands can take some seconds. |
-| Remote | Long white 16-channel remote with a screen. **P1/P2** are inside the battery compartment, above the AAA bay. |
+| Remote | Long white 16-channel remote with a screen. **P1/P2** are inside the battery compartment, above the AAA bay. (2026-10-05: Iggy calls it the "easyone" remote; the exact model is not known, see section 6.1.) |
 | Board | Seeed **XIAO ESP32-C6**. It is the Zigbee coordinator: it makes a one-device Zigbee network for the blind. |
 | Server | **hearth** (`hearth.local`), the always-on Mac. Lightbox runs there. |
 
@@ -146,30 +166,51 @@ blind driver.
 
 ## 6. Travel limits and direction
 
-### 6.1 With the remote (known method)
+### 6.1 With the remote (the method from the manual)
 
-The sequence comes from users of this model and from search snippets of the
-Yoolax manual. It is not fully verified. If the motor goes into a strange state,
-stop and wait about one minute before you try again.
+**Open point, 2026-10-05:** Iggy says that her remote is the "easyone" remote
+with a small screen, and that it is not the 16-channel remote in the pictures
+of this manual. No manual for an "easyone" remote was found. Get a photo or the
+model text of her remote, and find its steps, before she presses key pairs.
+The steps below are for the Yoolax 16-channel remote only.
 
-1. **Pair the remote again.** Hold the motor button for about 2 s, until the blind
-   jogs one time. Then press **P2** one time. Then press **P1** one time. The blind
-   jogs to confirm.
-2. **Start limit setup.** Hold **up/down + ♥** for 6 s, until the blind jogs one time.
-3. **Top limit.** Move the blind to the top position. Hold **up/down + ♥** for 2 s,
-   until the blind jogs two times.
-4. **Bottom limit.** Move the blind to the bottom position. Hold **up/down + ♥** for
-   2 s, until the blind jogs two times.
-5. If up and down are reversed, look in the remote manual for a direction-reverse
-   step. If you reverse the motor, send `invert` on the console to turn the
-   firmware flip off.
+Source: the Yoolax manual 58630 (link below), section "16-channel remote
+control", pages 35 to 47. That manual is for the Matter motor. They are not
+tested here. An earlier version of this section had steps from user reports
+(hold up/down + ♥ for 6 s); their source remote is not known.
+
+The remote: top row **∧** (open), **□** (stop), **∨** (close). Second row: two
+round-arrow buttons for small steps. Third row: **CH−**, **♥** (favorite),
+**CH+**. **P1** (left) and **P2** (right) are in the battery compartment.
+
+With no limits, the blind does not stop by itself. Stop it with **□**.
+
+1. **Channel.** Press **CH−** or **CH+** to the channel of this blind.
+2. **Setting mode.** Hold **P1** for 3 s. The screen flashes `nn`. Setting mode
+   stops after 3 minutes with no button press, or when P1 is held for 5 s.
+3. **Top limit.** Move the blind to the top position. Press **∧ and ♥**
+   together. Two jogs: the limit is set. One jog: an old top limit was deleted;
+   press again to set it.
+4. **Bottom limit.** Move the blind to the bottom position. Press **∨ and ♥**
+   together. Two jogs: set. One jog: deleted; press again.
+5. Other key pairs in setting mode: **∧ and ∨** deletes both limits (and the
+   favorite). **∧ and □** unpairs the remote from the motor. The manual also has
+   pairs for direction, speed and the favorite position (pages 40 and 41).
+6. **Pair the remote again** (page 46), in setting mode: hold the motor button
+   for 2 s until the blind jogs one time. Press **P2** one time; the blind jogs
+   two times. Press **P1** one time.
+7. If you reverse the motor direction, send `invert` on the console to turn
+   the firmware flip off.
+
+To see if the limits are set (page 45): press the motor button one time. If the
+blind moves, the limits are set. Press it again to stop.
 
 Motor button reference: 2 s = sleep on/off, 6 s = Zigbee pairing (blue flash),
 16 s = **factory reset** (do not do this by accident; it also removes the remote
 pairing). Three orange flashes = asleep.
 
 Manuals: Zigbee manual is model 58628/58629 on the Yoolax product-manual page.
-Matter version (different motor, for reference):
+Matter version (different motor, same 16-channel remote; it has a text layer):
 https://cdn.shopify.com/s/files/1/0558/5109/0060/files/58630-Program_Matter_Shades_with_Remote.pdf
 
 ### 6.2 Over Zigbee (not tested — an experiment)
@@ -183,8 +224,72 @@ tried it on this motor. Candidates:
   motors: DP 5 = motor direction, DP 16 = "border" (set or delete the up and down
   limits). This motor may not use the same numbers.
 
-The firmware does not send these yet. Add a console command to write them, then
-test. Use the remote method if this fails.
+The firmware can send these as raw frames (probes). Each probe goes through the
+radio queue, like a command. The Zigbee window stays open 3 s after the
+acknowledge, for the answer. Read the answer with `GET /log`.
+
+```
+POST /dp                                  ask for all Tuya datapoints
+POST /dp?id=5&type=4&value=1              write a datapoint
+                                          (type 1 bool, 2 value, 4 enum, 5 bitmap)
+POST /attr?id=0x0017                      read an attribute (cluster default 0x0102)
+POST /attr?id=0x0017&type=0x18&value=2    write it (type = ZCL type id)
+     optional: &cluster=0x0102 &manuf=0x1002
+GET  /log                                 the log, oldest line first
+```
+
+Rules to read the log:
+
+- `[probe] …` is the frame that was sent.
+- `[tuya] dp <id> type <t> len <n> = <value>` is a datapoint from the blind.
+- `[zb] attr <cluster>/<id> type <t> size <n> = <bytes>` is an attribute value.
+  The bytes are little-endian.
+- `[zb] write attr on <cluster>: status 0x00` means that the blind accepted a write.
+- A refused read or write gives **no line**. The Arduino core drops it. If
+  `ackMs` is 0 or more and there is no answer line, the blind refused the frame.
+- A read on the Basic cluster (0x0000) gives no line. The core keeps the answer.
+
+**Read results, 2026-10-05 (limits not set, blind did not move):**
+
+| Item | Value | Meaning |
+|---|---|---|
+| dp 1 (enum) | 1 | control: 0 open, 1 stop, 2 close |
+| dp 2 (value) | 0 | go-to position |
+| dp 3 (value) | 0 | position |
+| dp 5 (enum) | 0 | motor direction: 0 forward, 1 back |
+| dp 10 (value) | 0 | not known (travel time on other Tuya motors) |
+| dp 11 (enum) | 1 | not known |
+| dp 12 (bitmap) | 0 | fault |
+| dp 13 (value) | 81 | battery % |
+| dp 21 (value) | 35 | not known |
+| dp 107 (bool) | 0 | not known (a limit state on one other TS0301 motor) |
+| 0x0001/0x0021 | 0xa2 | battery, half-percent units (81 %) |
+| 0x0102/0x0000 | 0 | type: roller shade |
+| 0x0102/0x0007 | 0x03 | ConfigStatus: operational, online, **not closed loop** |
+| 0x0102/0x0008 | 0 | lift % |
+| 0x0102/0x0017 | 0x00 | Mode; the attribute exists (bit 0 reverse, bit 1 calibration) |
+| 0x0102/0xF000 | 0 (u8) | Tuya attribute, meaning not known |
+| 0x0102/0xF001 | 0 (bool) | Tuya attribute (calibration on other devices) |
+| 0x0102/0xF002 | 0 (enum8) | Tuya attribute (motor reversal on other devices) |
+| 0x0102/0xF003 | no answer | refused |
+| 0x0102/0xF006 | 0 (enum8) | Tuya attribute, meaning not known |
+
+The dump has no dp 7 and no dp 16. Read these again after the limits are set;
+a value that changed shows what holds the limit state.
+
+**Research, 2026-10-05:** no source documents a Zigbee command that sets the
+limits on this motor. Zigbee2MQTT has three TS0301 covers. `TS0301_cover_1`
+(A-OK AM25) has the same dp 1, 2, 3, 5, 13 as this motor and no limit
+datapoint. `TS0301_cover_2` uses dp 16 for limits but has a different datapoint
+layout. The plain `TS0301` entry (Yookee) uses only the standard cluster. A
+Zemismart ZM15B converter uses dp 107 (enum) as limit state and dp 118 for
+limit commands. Hubitat users of the Yoolax TS0301 set the limits with the
+remote.
+
+**Do not write a limit or calibration command with nobody at the blind.** A
+shade with no limits has no stop; a wrong command can roll it too far. Stop the
+motor (`POST /stop`) if it moves in a way that is not expected. The remote
+method (section 6.1) is the safe one.
 
 ## 7. Firmware
 
@@ -194,6 +299,7 @@ test. Use the remote method if this fails.
 | `src/blind.h/.cpp` | Zigbee endpoint: pair, commands (ZCL and Tuya), state, movement inference |
 | `src/net.h/.cpp` | Wi-Fi, mDNS, HTTP API, OTA |
 | `src/radio.h/.cpp` | Wi-Fi/Zigbee time-slicing, command queue |
+| `src/logbuf.h/.cpp` | Log lines to Serial and to a ring buffer (`GET /log`) |
 | `platformio.ini` | Envs `xiao_c6` (USB) and `xiao_c6_ota` (Wi-Fi) |
 | `partitions.csv` | Includes the Zigbee storage partitions |
 | `toolchain_path.py` | Fixes the PATH for the pioarduino RISC-V toolchain |
@@ -210,11 +316,16 @@ GET  /state            state JSON
 POST /open | /close | /stop | /refresh
 POST /go?open=0..100   go to an openness
 POST /pair?s=180       open the Zigbee network for joining
+POST /radio?hold=&max= set the Zigbee window lengths (ms)
+POST /invert?on=0|1    set the open/closed flip (kept in flash)
+GET  /log              log lines, oldest first
+POST /dp, POST /attr   raw frames, see section 6.2
 ```
 
 **Serial console** (115200 baud, one command for each line):
 `pair [s]`, `open`, `close`, `stop`, `go <0-100>`, `refresh`, `state`, `invert`,
-`forget`, `reset` (wipes the Zigbee network and reboots), `coex <idle> <txrx> <txrx_at>`.
+`forget`, `reset` (wipes the Zigbee network and reboots), `coex <idle> <txrx> <txrx_at>`,
+`dp [<id> <type> <value>]`, `attr <cluster> <id> [<type> <value>]`.
 
 ## 8. Set up on hearth
 

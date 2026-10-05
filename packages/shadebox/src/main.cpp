@@ -19,12 +19,19 @@
 //   invert      flip open/closed if the blind turns out backwards
 //   forget      drop the paired blind
 //   reset       wipe the Zigbee network entirely (reboots)
+// Raw frames for experiments on the motor (HANDOVER §6.2); numbers can be
+// decimal or 0x hex, and the answer from the blind goes to the log:
+//   dp                              ask for all Tuya datapoints
+//   dp <id> <type> <value>          write one (type 1 bool, 2 value, 4 enum, 5 bitmap)
+//   attr <cluster> <id>             read one ZCL attribute
+//   attr <cluster> <id> <type> <value>   write it (type = ZCL type id)
 
 #include <Arduino.h>
 #include <Zigbee.h>
 #include <esp_ieee802154.h>
 
 #include "blind.h"
+#include "logbuf.h"
 #include "net.h"
 #include "radio.h"
 
@@ -92,6 +99,38 @@ static void runCommand(String line) {
     int h = 0, m = 0;
     if (sscanf(arg.c_str(), "%d %d", &h, &m) == 2) radio::tune(h, m);
   }
+  else if (cmd == "dp") {
+    blind::Probe p = {};
+    int id = 0, type = 0, value = 0;
+    int n = sscanf(arg.c_str(), "%i %i %i", &id, &type, &value);
+    if (n == 3) {
+      p.op = blind::Probe::Op::TuyaWrite;
+      p.dp = id;
+      p.type = type;
+      p.value = value;
+    } else if (n <= 0) {
+      p.op = blind::Probe::Op::TuyaQuery;
+    } else {
+      Serial.println("? dp, or dp <id> <type> <value>");
+      return;
+    }
+    ok = radio::submitProbe(p);
+  }
+  else if (cmd == "attr") {
+    blind::Probe p = {};
+    int cluster = 0, id = 0, type = 0, value = 0;
+    int n = sscanf(arg.c_str(), "%i %i %i %i", &cluster, &id, &type, &value);
+    if (n != 2 && n != 4) {
+      Serial.println("? attr <cluster> <id>, or attr <cluster> <id> <type> <value>");
+      return;
+    }
+    p.op = n == 4 ? blind::Probe::Op::AttrWrite : blind::Probe::Op::AttrRead;
+    p.cluster = cluster;
+    p.attr = id;
+    p.type = type;
+    p.value = value;
+    ok = radio::submitProbe(p);
+  }
   else if (cmd == "invert") shade.setInverted(!shade.inverted());
   else if (cmd == "forget") shade.forget();
   else if (cmd == "proto") shade.setProtocol(arg == "tuya" ? blind::Protocol::Tuya : blind::Protocol::Zcl);
@@ -129,19 +168,20 @@ static void pollSerial() {
 void setup() {
   Serial.begin(115200);
   delay(1500);  // let USB CDC enumerate so early logs aren't lost
-  Serial.println("\n[shadebox] boot");
+  Serial.println();
+  logbuf::line("[shadebox] boot");
 
   shade.setManufacturerAndModel("iggy", "shadebox");
   // Every command we send gets a ZCL default response; log it so a blind
   // that silently refuses (unsupported command, not calibrated…) says why.
   Zigbee.onGlobalDefaultResponse([](zb_cmd_type_t cmd, esp_zb_zcl_status_t status, uint8_t ep, uint16_t cluster) {
-    Serial.printf("[zb] default response: cluster 0x%04x cmd %d status 0x%02x\n", cluster, (int)cmd, status);
+    logbuf::line("[zb] default response: cluster 0x%04x cmd %d status 0x%02x", cluster, (int)cmd, status);
     radio::heard();
   });
   Zigbee.addEndpoint(&shade);
   net::begin(shade, stateJson);  // Wi-Fi first — see net.cpp
   if (!Zigbee.begin(ZIGBEE_COORDINATOR)) {
-    Serial.println("[zb] failed to start — rebooting");
+    logbuf::line("[zb] failed to start — rebooting");
     delay(2000);
     ESP.restart();
   }
@@ -152,14 +192,10 @@ void setup() {
 }
 
 void loop() {
-  // One Zigbee window after boot, so the blind can find its parent again
-  // quickly. It starts when Wi-Fi is up, because Wi-Fi cannot connect
-  // during the window.
-  static bool bootHold = false;
-  if (!bootHold && shade.state().paired && (net::connected() || millis() > 30000)) {
-    bootHold = true;
-    radio::hold(20000, true);
-  }
+  // No Zigbee window at boot. The blind finds its parent again in Wi-Fi mode
+  // without help (measured: 3 s to 72 s after boot). A window that opens
+  // when Wi-Fi has just connected makes Wi-Fi lose the access point for 20 s
+  // or more, even if the window is only 6 s long.
   pollSerial();
   radio::tick();
   shade.tick();
