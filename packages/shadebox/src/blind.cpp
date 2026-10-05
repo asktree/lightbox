@@ -2,6 +2,7 @@
 
 #include <Preferences.h>
 
+#include "liftrule.h"
 #include "logbuf.h"
 #include "radio.h"
 
@@ -241,6 +242,7 @@ void BlindEndpoint::adopt(uint16_t addr, uint8_t ep, Protocol proto) {
 // The first try waits for the bind and report setup: datapoint frames that
 // came in that time were lost (seen: the first 5 of 10).
 void BlindEndpoint::wantPosition() {
+  _liftStale = true;
   _posTries = 0;
   _posTryAtMs = millis() + POS_FIRST_TRY_MS;
   _needPos = true;
@@ -309,9 +311,15 @@ void BlindEndpoint::zbAttributeRead(uint16_t cluster, const esp_zb_zcl_attribute
     return;
   }
   if (cluster == CLUSTER_COVERING && attr->id == ATTR_LIFT_PCT) {
-    // A motor that also gives a Tuya position: use only that one. Its lift
-    // attribute can be stale (see configure()).
-    if (attr->data.value && !_tuyaPos) onPosition(*(const uint8_t *)attr->data.value);
+    // The lift reports give the live position during a move. For a motor
+    // that also gives a Tuya position, some of them can be stale.
+    if (!attr->data.value) return;
+    uint8_t raw = *(const uint8_t *)attr->data.value;
+    uint32_t now = millis();
+    if (liftrule::usable(_tuyaPos, _liftStale, raw, _moving, now - _lastLiftMs)) {
+      _lastLiftMs = now;
+      onPosition(raw);
+    }
     return;
   }
   // All other attributes: a read from a probe, or a report nobody asked for.
@@ -358,6 +366,7 @@ void BlindEndpoint::tuyaDatapoint(uint8_t dp, uint8_t type, const uint8_t *v, ui
       persist();
     }
     _needPos = false;
+    _liftStale = false;
     onPosition((int)value);
   } else if (dp == DP_TRAVEL_MS) {
     _travelMs = value;
