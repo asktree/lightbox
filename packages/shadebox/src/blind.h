@@ -116,9 +116,14 @@ private:
   volatile bool _reportSinceMove = false;
   uint32_t _pairingUntilMs = 0;
   uint16_t _tuyaSeq = 0;
-  // The motor gives its position as Tuya dp 3. Then that is the only
-  // position source; its ZCL lift attribute can be stale. Kept in NVS.
+  // The motor gives its position as Tuya dp 3. Its ZCL lift attribute can
+  // be stale after a join; liftrule.h tells which lift reports to use.
+  // Kept in NVS.
   bool _tuyaPos = false;
+  // No Tuya position came after the last join, rejoin or restart.
+  volatile bool _liftStale = true;
+  // Time of the last lift report that was used.
+  volatile uint32_t _lastLiftMs = 0;
   volatile uint32_t _travelMs = 0;
   // A position read is due (wantPosition); tick() sends it and tries again.
   volatile bool _needPos = false;

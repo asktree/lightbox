@@ -277,6 +277,23 @@ Rules to read the log:
 The dump has no dp 7 and no dp 16. Read these again after the limits are set;
 a value that changed shows what holds the limit state.
 
+**Position sources (found 2026-10-05, limits set):**
+
+- The lift attribute `0x0102/0x0008` follows the blind while it moves. The
+  board asks for a report for each 1 % (at most one each second), and the
+  move tests before 2026-10-05 03:18Z got these reports. This is the live
+  position.
+- After a rejoin the motor gives lift 0 to a read, at any height. It is not
+  known when this value becomes right again.
+- The Tuya position (dp 3) was right each time. It comes as the answer to a
+  query (`POST /refresh`). After one move with the dial (2026-10-05 14:14Z)
+  the motor sent no dp 3 by itself.
+- So the board uses dp 3 after a join, and uses the lift reports when they
+  cannot be the stale 0. The rule is in `src/liftrule.h`.
+- When a move starts, the motor sends `0x0102/0xF008` = the target (raw).
+- Raw 100 = bottom (closed), raw 0 = top (open), in the two sources.
+- dp 10 = travel time in ms (32099). dp 2 = the target of the last move.
+
 **Research, 2026-10-05:** no source documents a Zigbee command that sets the
 limits on this motor. Zigbee2MQTT has three TS0301 covers. `TS0301_cover_1`
 (A-OK AM25) has the same dp 1, 2, 3, 5, 13 as this motor and no limit
