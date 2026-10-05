@@ -8,6 +8,7 @@
 //   POST /go?open=0..100   → go to an openness
 //   POST /pair?s=180       → open the Zigbee network for joining
 //   POST /radio?hold=&max= → set the Zigbee window lengths, in ms (radio.h)
+//   POST /radio?window=0|1 → 0 sends commands with no Zigbee window (experiment)
 //   POST /invert?on=0|1    → set the open/closed flip (kept in flash)
 //   GET  /log              → the last log lines as text (logbuf.h)
 //   POST /dp | /attr       → raw frames for experiments (see net.cpp)
@@ -26,6 +27,7 @@ namespace net {
 void begin(blind::BlindEndpoint &shade, String (*stateJson)());
 
 bool connected();
+uint32_t connectedForMs();  // time since Wi-Fi connected, or 0 when it is not
 int rssi();  // dBm, or 0 when Wi-Fi is not connected
 
 }  // namespace net

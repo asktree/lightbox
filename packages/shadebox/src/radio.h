@@ -31,6 +31,7 @@ struct Stats {
   int32_t heardAgoS;   // seconds since the last frame from the blind; -1 = never
   uint32_t holdMs;     // tunables, see tune()
   uint32_t maxMs;
+  bool windowless;     // see setWindowless()
 };
 
 // Call after Zigbee.begin(). Records the stock priorities as "Wi-Fi mode".
@@ -54,6 +55,11 @@ void heard();
 
 // Window lengths: `holdMs` after the acknowledge, `maxMs` without one.
 void tune(uint32_t holdMs, uint32_t maxMs);
+
+// Experiment: with `on`, a command goes out at once in Wi-Fi mode, and no
+// Zigbee window opens. Faster, and Wi-Fi stays up, if the blind still
+// acknowledges. Not kept across a restart.
+void setWindowless(bool on);
 
 Stats stats();
 

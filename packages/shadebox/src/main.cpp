@@ -14,6 +14,7 @@
 //               not reliable during that time
 //   open | close | stop | go <0-100> | refresh
 //   radio <hold ms> <max ms>   set the Zigbee window lengths
+//   window <0|1>   0 = send commands with no Zigbee window (experiment)
 //   hold <s>    stay in Zigbee mode for s seconds
 //   state       print state as JSON
 //   invert      flip open/closed if the blind turns out backwards
@@ -69,12 +70,13 @@ String stateJson() {
   char buf[520];
   snprintf(buf, sizeof(buf),
            "{\"up\":%lu,\"zb\":%s,\"pan\":\"0x%04x\",\"channel\":%u,\"paired\":%s,\"pairing\":%s,\"protocol\":\"%s\",\"open\":%d,\"moving\":%s,\"dir\":%d,\"target\":%d,\"inverted\":%s,"
-           "\"radio\":\"%s\",\"rssi\":%d,\"windows\":%lu,\"timeouts\":%lu,\"ackMs\":%ld,\"windowMs\":%lu,\"heardAgoS\":%ld,\"holdMs\":%lu,\"maxMs\":%lu}",
+           "\"radio\":\"%s\",\"rssi\":%d,\"windows\":%lu,\"timeouts\":%lu,\"ackMs\":%ld,\"windowMs\":%lu,\"heardAgoS\":%ld,\"holdMs\":%lu,\"maxMs\":%lu,\"windowless\":%s}",
            (unsigned long)(millis() / 1000), Zigbee.started() ? "true" : "false", esp_zb_get_pan_id(), esp_zb_get_current_channel(),
            s.paired ? "true" : "false", s.pairing ? "true" : "false", blind::protocolName(s.protocol), s.open,
            s.moving ? "true" : "false", s.dir, s.target, shade.inverted() ? "true" : "false",
            r.zigbee ? "zigbee" : "wifi", net::rssi(), (unsigned long)r.windows, (unsigned long)r.timeouts, (long)r.ackMs,
-           (unsigned long)r.windowMs, (long)r.heardAgoS, (unsigned long)r.holdMs, (unsigned long)r.maxMs);
+           (unsigned long)r.windowMs, (long)r.heardAgoS, (unsigned long)r.holdMs, (unsigned long)r.maxMs,
+           r.windowless ? "true" : "false");
   return buf;
 }
 
@@ -99,6 +101,7 @@ static void runCommand(String line) {
     int h = 0, m = 0;
     if (sscanf(arg.c_str(), "%d %d", &h, &m) == 2) radio::tune(h, m);
   }
+  else if (cmd == "window") radio::setWindowless(arg.toInt() == 0);
   else if (cmd == "dp") {
     blind::Probe p = {};
     int id = 0, type = 0, value = 0;

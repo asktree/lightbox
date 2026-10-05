@@ -18,6 +18,7 @@ static constexpr const char *HOSTNAME = "shadebox";
 static blind::BlindEndpoint *s_shade = nullptr;
 static String (*s_stateJson)() = nullptr;
 static WebServer s_http(80);
+static volatile uint32_t s_connectedAtMs = 0;  // 0 = Wi-Fi is not connected
 
 // ─── HTTP routes ────────────────────────────────────────────────────────────
 
@@ -91,7 +92,10 @@ static void routes() {
   s_http.on("/refresh", HTTP_POST, [] { replyState(radio::submit(radio::Kind::Refresh)); });
   s_http.on("/radio", HTTP_POST, [] {
     radio::Stats r = radio::stats();
-    radio::tune(s_http.hasArg("hold") ? s_http.arg("hold").toInt() : r.holdMs, s_http.hasArg("max") ? s_http.arg("max").toInt() : r.maxMs);
+    if (s_http.hasArg("hold") || s_http.hasArg("max")) {
+      radio::tune(s_http.hasArg("hold") ? s_http.arg("hold").toInt() : r.holdMs, s_http.hasArg("max") ? s_http.arg("max").toInt() : r.maxMs);
+    }
+    if (s_http.hasArg("window")) radio::setWindowless(s_http.arg("window").toInt() == 0);
     replyState();
   });
   // POST /invert?on=0|1 sets the open/closed flip for commands and positions.
@@ -122,6 +126,12 @@ static void netTask(void *) {
 
   for (;;) {
     if (!WiFi.isConnected()) {
+      if (s_connectedAtMs) {
+        // Just lost. Give the automatic reconnect 20 s before a new begin().
+        s_connectedAtMs = 0;
+        lastAttempt = millis();
+        logbuf::line("[net] wifi lost (status %d)", (int)WiFi.status());
+      }
       if (millis() - lastAttempt > 20000) {
         logbuf::line("[net] still not connected (status %d), retrying", (int)WiFi.status());
         WiFi.disconnect();
@@ -130,6 +140,10 @@ static void netTask(void *) {
       }
       vTaskDelay(pdMS_TO_TICKS(200));
       continue;
+    }
+    if (!s_connectedAtMs) {
+      s_connectedAtMs = millis() | 1;
+      if (services) logbuf::line("[net] wifi back, rssi=%d", WiFi.RSSI());
     }
 
     if (!services) {
@@ -153,6 +167,10 @@ static void netTask(void *) {
 }
 
 bool connected() { return WiFi.isConnected(); }
+uint32_t connectedForMs() {
+  uint32_t at = s_connectedAtMs;
+  return at && WiFi.isConnected() ? millis() - at : 0;
+}
 int rssi() { return WiFi.isConnected() ? WiFi.RSSI() : 0; }
 
 // ─── Startup ────────────────────────────────────────────────────────────────
