@@ -50,5 +50,8 @@ void setCurtainsKelvin(int kelvin);
 void setCurtainsVal(int val);
 void setCurtainsPeriod(int periodMs);   // one fade in->out
 void setCurtainsCut(bool cut);          // drop off-hue fade-tail frames
+// Ask the server to rescan the LAN for lights that were missing (powered
+// off at boot), then reload the room list. Called when the panel wakes.
+void recheck();
 
 }  // namespace net

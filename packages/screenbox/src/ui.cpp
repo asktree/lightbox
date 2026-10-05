@@ -1232,6 +1232,9 @@ void loop() {
     setCpuFrequencyMhz(idleCool ? 80 : 240);
     lcd.setBrightness(idleCool ? 60 : 220);
     Serial.printf("[ui] %s\n", idleCool ? "idle: dim + 80MHz" : "awake: bright + 240MHz");
+    // A touch that wakes the panel: lights may have come online since the
+    // last sync. (Remote wakes skip this; they already carry fresh state.)
+    if (!idleCool && touched) net::recheck();
   }
 
   if (now - lastFrameMs >= (idleCool ? 167u : 33u)) {

@@ -142,13 +142,24 @@ static void applyLightsArray(JsonArrayConst arr) {
 
 static void applyLightUpdate(JsonObjectConst o) {
   const char* id = o["id"];
-  if (!id || roomIndex(id) < 0) return;
+  int idx = id ? roomIndex(id) : -1;
+  if (idx < 0) return;
   Light l = parseLight(o);
   xSemaphoreTake(s_mutex, portMAX_DELAY);
   if (ignoring(l.id, &l)) { xSemaphoreGive(s_mutex); return; }
+  bool found = false;
   for (auto& existing : s_lights) {
-    if (existing.id == l.id) { existing = l; s_version++; break; }
+    if (existing.id == l.id) { existing = l; found = true; break; }
   }
+  if (!found) {
+    // A room light the server found after boot (LAN rescan). Insert it in
+    // room order so the ring layout stays stable.
+    auto at = s_lights.begin();
+    while (at != s_lights.end() && roomIndex(at->id.c_str()) < idx) ++at;
+    s_lights.insert(at, l);
+    Serial.printf("[net] room light added: %s\n", id);
+  }
+  s_version++;
   xSemaphoreGive(s_mutex);
 }
 
@@ -199,6 +210,21 @@ static bool fetchLights() {
 // Ambience mode request: 0 = none pending, 1 = color, 2 = normal. Written by
 // the UI thread, consumed (and sent) by the net task.
 static volatile int s_modeRequest = 0;
+// Wake recheck request (UI thread -> net task).
+static volatile bool s_recheckRequest = false;
+
+// Server-side LAN rescan (Govee, WiZ). The server pushes a lights_sync when
+// the rescan adds a light; the reply itself is not needed.
+static void sendDiscover() {
+  HTTPClient http;
+  http.setTimeout(9000);   // the rescan window is a few seconds
+  String url = String("http://") + s_host + ":" + LIGHTBOX_PORT + "/api/lights/discover";
+  if (!http.begin(url)) return;
+  http.addHeader("Content-Type", "application/json");
+  int code = http.POST("{}");
+  Serial.printf("[net] discover -> %d\n", code);
+  http.end();
+}
 // Curtains twinkle kelvin/val/period/cut: -1 = none pending. Coalesced
 // (latest wins).
 static volatile int s_curtainsKelvin = -1;
@@ -354,6 +380,7 @@ static void netTask(void*) {
 
     flushPending();
     if (s_modeRequest) { int m = s_modeRequest; s_modeRequest = 0; sendMode(m == 2); }
+    if (s_recheckRequest) { s_recheckRequest = false; sendDiscover(); fetched = false; }
     if ((s_curtainsKelvin >= 0 || s_curtainsVal >= 0 || s_curtainsPeriod >= 0 || s_curtainsCut >= 0)
         && millis() - s_curtainsSentMs >= 250) {
       int k = s_curtainsKelvin, v = s_curtainsVal, p = s_curtainsPeriod, cut = s_curtainsCut;
@@ -371,6 +398,8 @@ void begin() {
 }
 
 Status status() { return s_status; }
+
+void recheck() { if (s_status == Status::Online) s_recheckRequest = true; }
 
 const char* statusText() {
   switch (s_status) {
