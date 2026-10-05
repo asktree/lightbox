@@ -94,6 +94,12 @@ static void routes() {
     radio::tune(s_http.hasArg("hold") ? s_http.arg("hold").toInt() : r.holdMs, s_http.hasArg("max") ? s_http.arg("max").toInt() : r.maxMs);
     replyState();
   });
+  // POST /invert?on=0|1 sets the open/closed flip for commands and positions.
+  // It is kept in flash. With no `on`, the reply only shows the state.
+  s_http.on("/invert", HTTP_POST, [] {
+    if (s_http.hasArg("on")) s_shade->setInverted(s_http.arg("on").toInt() != 0);
+    replyState();
+  });
   s_http.on("/go", HTTP_POST, [] {
     if (!s_http.hasArg("open")) return s_http.send(400, "application/json", "{\"error\":\"missing ?open=0..100\"}");
     replyState(radio::submit(radio::Kind::Go, s_http.arg("open").toInt()));

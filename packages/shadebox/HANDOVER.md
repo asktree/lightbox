@@ -317,6 +317,7 @@ POST /open | /close | /stop | /refresh
 POST /go?open=0..100   go to an openness
 POST /pair?s=180       open the Zigbee network for joining
 POST /radio?hold=&max= set the Zigbee window lengths (ms)
+POST /invert?on=0|1    set the open/closed flip (kept in flash)
 GET  /log              log lines, oldest first
 POST /dp, POST /attr   raw frames, see section 6.2
 ```
