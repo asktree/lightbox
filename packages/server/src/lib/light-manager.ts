@@ -54,8 +54,17 @@ export class LightManager extends EventEmitter {
           if (!light) return;
           // Driver updates can be PARTIAL (Hue EventStream sends only the
           // changed fields) — merge, never replace, or brightness/on vanish.
-          const merged = this.applyEmulatedCt(lightId, { ...light.state, ...state });
-          if (this.hasStateChanged(light.state, merged)) {
+          const mergedRaw: LightState = { ...light.state, ...state };
+          // Color and color temperature are exclusive modes. A report of one
+          // ends the other; otherwise a light moved onto the wheel from
+          // another UI kept its stale kelvin and stayed pinned to the bar.
+          if (state.color !== undefined && state.temperature === undefined) delete mergedRaw.temperature;
+          if (state.temperature !== undefined && state.color === undefined) delete mergedRaw.color;
+          const merged = this.applyEmulatedCt(lightId, mergedRaw);
+          // A state report proves the light is reachable.
+          const cameBack = !light.reachable;
+          if (cameBack) light.reachable = true;
+          if (cameBack || this.hasStateChanged(light.state, merged)) {
             light.state = merged;
             this.emit('update', light);
           }
@@ -129,33 +138,52 @@ export class LightManager extends EventEmitter {
     // Start polling for state updates (fallback for drivers without EventStream)
     this.startPolling();
 
-    // Govee LAN devices appear and vanish (LAN Control toggled in the app,
-    // power cycles) and their scan replies race curtainbox on port 4002 —
-    // periodic rescans catch what boot-time discovery missed.
-    setInterval(() => { void this.rediscoverGovee(); }, 5 * 60_000);
+    // LAN-discovered devices (Govee, WiZ) appear and vanish: LAN Control
+    // toggled in the app, power cycles, a lost broadcast reply at boot.
+    // Periodic rescans catch what boot-time discovery missed. The first
+    // rescan runs soon after boot, when a bulb that was still joining Wi-Fi
+    // is most likely to answer.
+    setTimeout(() => { void this.rediscoverLan(); }, 45_000);
+    setInterval(() => { void this.rediscoverLan(); }, 5 * 60_000);
   }
 
-  // Rescan the LAN for Govee devices; registers newly-seen ones. Returns the
-  // lights added this pass. Also invoked by POST /api/lights/discover.
-  async rediscoverGovee(): Promise<Light[]> {
-    const driver = this.getDriverByBrand<GoveeDriver>('govee');
-    if (!driver) return [];
-    const found = await driver.discover().catch(() => [] as Light[]);
+  // Rescan the LAN for broadcast-discoverable devices (Govee, WiZ);
+  // registers newly-seen ones and marks known ones reachable. Returns the
+  // lights added this pass. Emits 'added' when the list grew so the server
+  // can push a fresh lights_sync. Also invoked by POST /api/lights/discover.
+  private rediscovering = false;
+  async rediscoverLan(): Promise<Light[]> {
+    if (this.rediscovering) return [];
+    this.rediscovering = true;
     const added: Light[] = [];
-    for (const light of found) {
-      const existing = this.lights.get(light.id);
-      if (!existing) {
-        this.lights.set(light.id, light);
-        added.push(light);
-        this.emit('update', light);
-        console.log(`govee: new device ${light.id} (${light.name})`);
-      } else if (!existing.reachable) {
-        existing.reachable = true;
-        this.emit('update', existing);
+    try {
+      const brands = ['govee', 'wiz'];
+      const drivers = brands.map((b) => this.getDriverByBrand(b)).filter((d): d is LightDriver => !!d);
+      const results = await Promise.all(drivers.map((d) => d.discover().catch(() => [] as Light[])));
+      for (const found of results) {
+        for (const light of found) {
+          const existing = this.lights.get(light.id);
+          if (!existing) {
+            this.lights.set(light.id, light);
+            added.push(light);
+            this.emit('update', light);
+            console.log(`${light.brand}: new device ${light.id} (${light.name})`);
+          } else if (!existing.reachable && light.reachable) {
+            existing.reachable = true;
+            existing.state = light.state;
+            this.emit('update', existing);
+          }
+        }
       }
+      if (added.length) this.emit('added', added);
+    } finally {
+      this.rediscovering = false;
     }
     return added;
   }
+
+  /** @deprecated use rediscoverLan */
+  rediscoverGovee(): Promise<Light[]> { return this.rediscoverLan(); }
 
   // Look up a driver by brand. Used by brand-specific test routes (e.g.
   // the WiZ test page) that need to call driver-specific methods not on

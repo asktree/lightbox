@@ -12,10 +12,11 @@ export function createLightsRouter(lightManager: LightManager, paletteAnimator?:
     res.json(lightManager.getAllLights().filter((l) => !isHiddenLightName(l.name)));
   });
 
-  // Rescan for LAN-discoverable lights (currently Govee). Use after flipping
-  // "LAN Control" on in the Govee app — no server restart needed.
+  // Rescan for LAN-discoverable lights (Govee, WiZ). Use after flipping
+  // "LAN Control" on in the Govee app, or when a bulb was powered off at
+  // boot — no server restart needed. Screenbox calls this on wake.
   router.post('/discover', async (_req, res) => {
-    const added = await lightManager.rediscoverGovee();
+    const added = await lightManager.rediscoverLan();
     res.json({ added });
   });
 
