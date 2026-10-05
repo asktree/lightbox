@@ -19,6 +19,7 @@ static constexpr uint8_t DP_CONTROL = 1;   // enum: 0 open, 1 stop, 2 close
 static constexpr uint8_t DP_GOTO = 2;      // value: target %
 static constexpr uint8_t DP_POSITION = 3;  // value: current %
 static constexpr uint8_t DP_WORK_STATE = 7;  // enum (some models): 0 opening, 1 closing
+static constexpr uint8_t DP_TRAVEL_MS = 10;  // value: time for a full travel, in ms
 static constexpr uint8_t TUYA_TYPE_VALUE = 0x02;
 static constexpr uint8_t TUYA_TYPE_ENUM = 0x04;
 
@@ -96,6 +97,7 @@ void BlindEndpoint::restore() {
   _ep = p.getUChar("ep", 0);
   _short = p.getUShort("short", 0xFFFF);
   _inverted = p.getBool("inverted", false);
+  _tuyaPos = p.getBool("tuyapos", false);
   p.getBytes("ieee", _ieee, sizeof(_ieee));
   p.end();
   if (_proto != Protocol::Unknown) {
@@ -110,6 +112,7 @@ void BlindEndpoint::persist() {
   p.putUChar("ep", _ep);
   p.putUShort("short", _short);
   p.putBool("inverted", _inverted);
+  p.putBool("tuyapos", _tuyaPos);
   p.putBytes("ieee", _ieee, sizeof(_ieee));
   p.end();
 }
@@ -262,6 +265,9 @@ void BlindEndpoint::configure() {
 
     uint16_t attr = ATTR_LIFT_PCT;
     readAttrs(CLUSTER_COVERING, &attr, 1);
+    // The Yoolax motor gives lift 0 to a read after a rejoin, at any height.
+    // Its Tuya position (dp 3) is right, so ask for the datapoints too.
+    tuyaSend(0, 0, nullptr, 0);
   } else if (_proto == Protocol::Tuya) {
     // Tuya's "magic packet": reading these basic attributes is what makes
     // many Tuya MCUs start talking. Then ask for a dump of every datapoint.
@@ -288,7 +294,9 @@ void BlindEndpoint::zbAttributeRead(uint16_t cluster, const esp_zb_zcl_attribute
     return;
   }
   if (cluster == CLUSTER_COVERING && attr->id == ATTR_LIFT_PCT) {
-    if (attr->data.value) onPosition(*(const uint8_t *)attr->data.value);
+    // A motor that also gives a Tuya position: use only that one. Its lift
+    // attribute can be stale (see configure()).
+    if (attr->data.value && !_tuyaPos) onPosition(*(const uint8_t *)attr->data.value);
     return;
   }
   // All other attributes: a read from a probe, or a report nobody asked for.
@@ -329,7 +337,15 @@ void BlindEndpoint::tuyaDatapoint(uint8_t dp, uint8_t type, const uint8_t *v, ui
   uint32_t value = 0;
   for (uint16_t i = 0; i < len && i < 4; i++) value = (value << 8) | v[i];
   logbuf::line("[tuya] dp %u type %u len %u = %lu", dp, type, len, (unsigned long)value);
-  if (dp == DP_POSITION) onPosition((int)value);
+  if (dp == DP_POSITION) {
+    if (!_tuyaPos) {
+      _tuyaPos = true;
+      persist();
+    }
+    onPosition((int)value);
+  } else if (dp == DP_TRAVEL_MS) {
+    _travelMs = value;
+  }
 }
 
 // Every dialect funnels into here with its *raw* position number.
@@ -526,7 +542,7 @@ bool BlindEndpoint::goTo(int openPct) {
 void BlindEndpoint::refresh() {
   if (_proto == Protocol::Unknown) return;
   ZbLock lock;
-  if (_proto == Protocol::Zcl) {
+  if (_proto == Protocol::Zcl && !_tuyaPos) {
     uint16_t attr = ATTR_LIFT_PCT;
     readAttrs(CLUSTER_COVERING, &attr, 1);
   } else {
@@ -576,6 +592,7 @@ State BlindEndpoint::state() const {
     .target = _target,
     .shortAddr = _short,
     .endpoint = _ep,
+    .travelMs = _travelMs,
   };
 }
 

@@ -34,6 +34,7 @@ struct State {
   int target;        // -1 when not heading to a specific %
   uint16_t shortAddr;
   uint8_t endpoint;
+  uint32_t travelMs;  // time for a full travel as the motor gives it; 0 = not known
 };
 
 // A raw frame for experiments on the motor: travel limits and direction
@@ -114,6 +115,10 @@ private:
   volatile bool _reportSinceMove = false;
   uint32_t _pairingUntilMs = 0;
   uint16_t _tuyaSeq = 0;
+  // The motor gives its position as Tuya dp 3. Then that is the only
+  // position source; its ZCL lift attribute can be stale. Kept in NVS.
+  bool _tuyaPos = false;
+  volatile uint32_t _travelMs = 0;
 };
 
 }  // namespace blind

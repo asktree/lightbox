@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ShadeTap, TAP_FRESH_MS } from './shade-tap.js';
+import { ShadeTap, TAP_FRESH_MS } from '../src/services/shade-tap.js';
 
 const S = 1000;
 
@@ -33,7 +33,7 @@ describe('ShadeTap', () => {
 
   it('uses its own time estimate when the board state is not fresh', () => {
     const t = new ShadeTap();
-    expect(t.tap(0, 0, null)).toEqual({ kind: 'go', open: 100 });       // full travel, about 22 s
+    expect(t.tap(0, 0, null)).toEqual({ kind: 'go', open: 100 });       // full travel, about 33 s
     expect(t.tap(10 * S, null, null)).toEqual({ kind: 'stop' });        // still in the travel time
     expect(t.tap(12 * S, null, null)).toEqual({ kind: 'go', open: 0 }); // paused, so reverse
     const u = new ShadeTap();
@@ -65,6 +65,17 @@ describe('ShadeTap', () => {
     const u = new ShadeTap();
     u.noteMove(0, 80, 60);                                              // the dial sends it down
     expect(u.tap(30 * S, 60, false)).toEqual({ kind: 'go', open: 100 }); // stopped, so reverse: up
+  });
+
+  it('uses the travel time that the board gives', () => {
+    const t = new ShadeTap();
+    t.setTravelMs(10_000);
+    expect(t.tap(0, 0, null)).toEqual({ kind: 'go', open: 100 });       // 10 s travel + margin
+    expect(t.tap(13 * S, null, null)).toEqual({ kind: 'go', open: 0 }); // over, so reverse
+    const u = new ShadeTap();
+    u.setTravelMs(0);                                                   // not known: keep the default
+    expect(u.tap(0, 0, null)).toEqual({ kind: 'go', open: 100 });
+    expect(u.tap(13 * S, null, null)).toEqual({ kind: 'stop' });
   });
 
   it('picks a direction when the position is not known', () => {

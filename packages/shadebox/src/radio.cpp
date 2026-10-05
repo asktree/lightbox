@@ -3,13 +3,18 @@
 #include <esp_ieee802154.h>
 
 #include "logbuf.h"
+#include "net.h"
 
 namespace radio {
 
 // Let the HTTP reply leave on Wi-Fi before the radio changes owner.
-static constexpr uint32_t LEAD_MS = 150;
+static constexpr uint32_t LEAD_MS = 60;
 // Let the new priorities take effect before the frame is queued.
-static constexpr uint32_t SETTLE_MS = 30;
+static constexpr uint32_t SETTLE_MS = 20;
+// A window that opens when Wi-Fi has just connected makes Wi-Fi lose the
+// access point for 20 s or more (measured with a window 2 s after the
+// connect). Keep the command and wait until Wi-Fi is this old.
+static constexpr uint32_t WIFI_SETTLE_MS = 8000;
 // The answer to a probe comes after the acknowledge, sometimes as more than
 // one frame. Keep the window open at least this long for it.
 static constexpr uint32_t PROBE_HOLD_MS = 3000;
@@ -36,6 +41,14 @@ static blind::Probe s_pendingProbe = {};
 static uint32_t s_pendingAtMs = 0;
 
 static volatile bool s_zigbee = false;
+// Send a command at once in Wi-Fi mode, with no window (setWindowless).
+// Measured with the blind in range: 28 of 28 commands acknowledged, in
+// 0.06 s to 0.63 s, the same as with a window. With steady Wi-Fi traffic
+// some acknowledges came after 1 s to 2 s, so a window opens as a fallback.
+static volatile bool s_windowless = true;
+// In windowless mode, open a window if no acknowledge came in this time.
+// The blind polls about each 0.6 s; this is a little more than one poll.
+static constexpr uint32_t FALLBACK_MS = 750;
 static volatile bool s_awaiting = false;  // a command is sent, no acknowledge yet
 static volatile bool s_probing = false;   // that command is a probe
 static volatile uint32_t s_sentAtMs = 0;
@@ -136,6 +149,18 @@ void tune(uint32_t holdMs, uint32_t maxMs) {
   logbuf::line("[radio] hold=%lu ms max=%lu ms", (unsigned long)s_holdMs, (unsigned long)s_maxMs);
 }
 
+void setWindowless(bool on) {
+  s_windowless = on;
+  logbuf::line("[radio] windowless=%d", on);
+}
+
+// Wi-Fi must be settled before a window opens. With no Wi-Fi at all, do not
+// hold a command from the console for ever.
+static bool wifiSettled() {
+  if (net::connected()) return net::connectedForMs() >= WIFI_SETTLE_MS;
+  return millis() > 30000;
+}
+
 static void send(Kind kind, int arg, const blind::Probe &probe) {
   switch (kind) {
     case Kind::Open: s_shade->open(); break;
@@ -159,11 +184,14 @@ void tick() {
   portEXIT_CRITICAL(&s_mux);
 
   if (kind != Kind::None) {
-    if (!s_zigbee) {
-      if (!due(at + LEAD_MS)) return;
-      enterZigbee();
+    if (!s_windowless || s_zigbee) {
+      if (!s_zigbee) {
+        if (!due(at + LEAD_MS)) return;
+        if (!wifiSettled()) return;
+        enterZigbee();
+      }
+      if (!due(s_enteredAtMs + SETTLE_MS)) return;
     }
-    if (!due(s_enteredAtMs + SETTLE_MS)) return;
     portENTER_CRITICAL(&s_mux);
     bool same = s_pendingKind == kind && s_pendingArg == arg && s_pendingAtMs == at;
     blind::Probe probe = s_pendingProbe;
@@ -174,7 +202,21 @@ void tick() {
     return;
   }
 
-  if (!s_zigbee) return;
+  if (!s_zigbee) {
+    // No window is open (a windowless send).
+    if (!s_awaiting) return;
+    if (due(s_sentAtMs + s_maxMs)) {
+      s_awaiting = false;
+      s_ackMs = -1;
+      s_timeouts++;
+      logbuf::line("[radio] no acknowledge from the blind (no window)");
+    } else if (due(s_sentAtMs + FALLBACK_MS) && wifiSettled()) {
+      // The polls of the blind do not get through. Give Zigbee the radio;
+      // the frame waits in the stack for the next poll.
+      enterZigbee();
+    }
+    return;
+  }
   if (!due(s_holdUntilMs)) return;
   if (s_awaiting) {
     if (!due(s_sentAtMs + s_maxMs)) return;
@@ -201,6 +243,7 @@ Stats stats() {
     .heardAgoS = s_everHeard ? (int32_t)((millis() - s_lastHeardMs) / 1000) : -1,
     .holdMs = s_holdMs,
     .maxMs = s_maxMs,
+    .windowless = s_windowless,
   };
 }
 

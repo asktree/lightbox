@@ -39,6 +39,14 @@ const SHADE_TAP_WAIT_MS = 500;
 // show it in its state.
 const SHADE_CMD_SETTLE_MS = 1500;
 
+// For the log: the time from the bridge's own stamp on an event to its
+// arrival here. It includes the clock difference between the bridge and
+// this machine, so read it as a trend, not as an exact number.
+function bridgeLag(updated: unknown): string {
+  const t = typeof updated === 'string' ? Date.parse(updated) : NaN;
+  return Number.isNaN(t) ? '' : ` lag=${Date.now() - t}ms`;
+}
+
 export function startTapDial(lightManager: LightManager): void {
   const hue = lightManager.getDriverByBrand<HueDriver>('hue');
   if (!hue) return;
@@ -100,7 +108,7 @@ export function startTapDial(lightManager: LightManager): void {
           // A short press with no dial turn is a tap.
           if (ev === 'short_release' && !shadeRotated) void tapShade();
         }
-        console.log(`tap-dial: button2 ${ev} (blind ${shadeDown ? 'DOWN' : 'up'})`);
+        console.log(`tap-dial: button2 ${ev} (blind ${shadeDown ? 'DOWN' : 'up'})${bridgeLag(item.button?.button_report?.updated)}`);
         return;
       }
       if (item.id !== modifierButtonId) return;      // buttons 3-4 pass through
@@ -115,7 +123,7 @@ export function startTapDial(lightManager: LightManager): void {
     const steps = Number(rot?.steps) || 0;
     if (!steps) return;
     const dir = rot.direction === 'clock_wise' ? 1 : -1;
-    console.log(`tap-dial: rotary ${dir > 0 ? '+' : '-'}${steps} -> ${shadeDown ? 'blind' : modifierDown ? 'kelvin' : 'brightness'}`);
+    console.log(`tap-dial: rotary ${dir > 0 ? '+' : '-'}${steps} -> ${shadeDown ? 'blind' : modifierDown ? 'kelvin' : 'brightness'}${bridgeLag(item.relative_rotary?.rotary_report?.updated)}${rot.duration !== undefined ? ` batch=${rot.duration}ms` : ''}`);
     // The bridge delivers rotary ticks in clumps. Replaying each tick as its
     // own command made a spin land as separate ramps ("two bursts") plus a
     // backlog. Accumulate the deltas and send one command per flush window:
@@ -183,6 +191,7 @@ export function startTapDial(lightManager: LightManager): void {
     const boardKnows = st.state !== null && st.stateAgeMs !== null
       && st.stateAgeMs < SHADE_STATE_FRESH_MS
       && now - st.stateAgeMs > shadeCmdAt + SHADE_CMD_SETTLE_MS;
+    shadeTap.setTravelMs(st.state?.travelMs);
     const action = shadeTap.tap(now, shadeOpen(), boardKnows ? st.state!.moving : null);
     console.log(`tap-dial: button2 tap -> blind ${action.kind === 'go' ? `go ${action.open}` : 'stop'}`);
     commandShade(action);
