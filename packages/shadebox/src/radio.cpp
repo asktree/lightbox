@@ -24,8 +24,10 @@ static const esp_ieee802154_coex_config_t s_zigbeeCoex = {
 
 static uint32_t s_holdMs = 400;
 // The parent keeps a frame for a sleepy child for 7.68 s. After that the
-// frame is gone, so a longer window gives nothing.
-static uint32_t s_maxMs = 8000;
+// frame is gone, so a longer window gives nothing. But Wi-Fi loses the access
+// point after about 8 s in Zigbee mode (measured), so stay below that. The
+// blind acknowledges in about 0.4 s when it is in range.
+static uint32_t s_maxMs = 6000;
 
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 static Kind s_pendingKind = Kind::None;
@@ -183,6 +185,9 @@ void tick() {
   } else if (!due(s_closeAtMs)) {
     return;
   }
+  // A hold that heard nothing is over. Without this, the next frame from the
+  // blind makes its window 3 s longer.
+  s_holdUntilHeard = false;
   enterWifi();
 }
 

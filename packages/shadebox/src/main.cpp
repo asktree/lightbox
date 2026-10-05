@@ -192,14 +192,10 @@ void setup() {
 }
 
 void loop() {
-  // One Zigbee window after boot, so the blind can find its parent again
-  // quickly. It starts when Wi-Fi is up, because Wi-Fi cannot connect
-  // during the window.
-  static bool bootHold = false;
-  if (!bootHold && shade.state().paired && (net::connected() || millis() > 30000)) {
-    bootHold = true;
-    radio::hold(20000, true);
-  }
+  // No Zigbee window at boot. The blind finds its parent again in Wi-Fi mode
+  // without help (measured: 3 s to 72 s after boot). A window that opens
+  // when Wi-Fi has just connected makes Wi-Fi lose the access point for 20 s
+  // or more, even if the window is only 6 s long.
   pollSerial();
   radio::tick();
   shade.tick();

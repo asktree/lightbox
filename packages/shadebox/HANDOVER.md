@@ -16,16 +16,31 @@ a short window around each command. See `src/radio.h`.
 
 - A command gets its HTTP reply first. Then the Zigbee window opens and the
   command is sent. The window closes `holdMs` (400) after the blind acknowledges,
-  or after `maxMs` (8000) with no acknowledge.
+  or after `maxMs` (6000) with no acknowledge.
 - Commands use a one-slot queue. The newest command wins.
 - `/state` has new fields: `radio`, `rssi`, `windows`, `timeouts`, `ackMs` (send
   to acknowledge time, the blind's poll delay), `windowMs`, `heardAgoS`.
 - `POST /radio?hold=<ms>&max=<ms>` sets the window lengths. Serial: `radio <hold>
   <max>` and `hold <s>`.
-- Pairing and the first 20 s after boot hold Zigbee mode. Wi-Fi is not reliable
-  during that time.
+- Pairing holds Zigbee mode. Wi-Fi is not reliable during that time.
+- There is no Zigbee window at boot. See the measurements below.
 
-**Remote log and probes (built, not tested on the board).** The board has no
+**Measured on the board, 2026-10-05 (board on hearth's USB, blind in range):**
+
+- The blind acknowledges a command in 0.36 s to 0.41 s (`ackMs`). A window
+  with an acknowledge is about 1 s long.
+- Wi-Fi survives a 6 s window when it was connected for some time before.
+- A window that opens when Wi-Fi has just connected makes Wi-Fi lose the
+  access point (`BEACON_TIMEOUT`), for 20 s to 35 s. A 20 s window and a 6 s
+  window both did this. So the boot window is removed.
+- With no boot window, Wi-Fi is up 4 s after boot and stays up.
+- After a reboot of the board, the blind is not reachable until it joins
+  again. It does this without help, in Wi-Fi mode. The delay was 3 s, 5 s and
+  72 s in three boots, and more than 100 s in a fourth. A command in that
+  time gets no acknowledge.
+- To open the serial port resets the board (`rst:0x15 USB_UART_HPSYS`).
+
+**Remote log and probes (the log is tested; the probes are not).** The board has no
 serial reader in the bedroom. `GET /log` returns the last 8 KB of log lines,
 each with the uptime in seconds. `POST /dp` and `POST /attr` send raw frames
 for the travel-limit experiment (section 6.2).
@@ -35,10 +50,10 @@ count, and `heardAgoS` when idle. The blind reports its position at least each
 300 s, so a large `heardAgoS` means the blind cannot reach the board in Wi-Fi
 mode. Fall back to hearth USB only if this cannot be made reliable.
 
-**Blocker:** the old firmware booted with Zigbee priority high and does not get
-on Wi-Fi from the bedroom charger. `shadebox.local` does not resolve, so OTA is
-not possible. Flash the new firmware one time by USB on hearth. After that, OTA
-works.
+**USB flash: done on 2026-10-05.** The new firmware is on the board, and OTA
+works (about 55 s for one upload). Hearth asks "Allow accessory to connect?" on
+its screen for a new USB device; until someone clicks Allow, the board has no
+serial port.
 
 **Lightbox side (built, live on hearth):**
 
@@ -59,8 +74,8 @@ The stock `pio` 6.1.19 refuses it. The core is in its own venv,
 The package scripts put that venv first on PATH. `include/secrets.h` exists on
 hearth.
 
-**Next:** flash by USB, measure, set travel limits (section 6), then test the
-chord with real positions.
+**Next:** check Wi-Fi from the bedroom charger, set the travel limits
+(section 6), then test the chord with real positions.
 
 ## 1. Goal
 

@@ -44,8 +44,9 @@ bool submit(Kind kind, int arg = 0);
 // window stays open some seconds after the acknowledge, for the answer.
 bool submitProbe(const blind::Probe &probe);
 
-// Stay in Zigbee mode for `ms` (pairing, boot rejoin). If `untilHeard`, the
-// hold ends soon after the first frame from the blind.
+// Stay in Zigbee mode for `ms` (pairing). If `untilHeard`, the hold ends
+// soon after the first frame from the blind. Wi-Fi can lose the access point
+// during a hold of more than some seconds.
 void hold(uint32_t ms, bool untilHeard = false);
 
 // A frame came from the blind, or the stack confirmed delivery to it.
