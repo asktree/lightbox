@@ -41,8 +41,14 @@ static blind::Probe s_pendingProbe = {};
 static uint32_t s_pendingAtMs = 0;
 
 static volatile bool s_zigbee = false;
-// Experiment: send commands in Wi-Fi mode, with no window (setWindowless).
-static volatile bool s_windowless = false;
+// Send a command at once in Wi-Fi mode, with no window (setWindowless).
+// Measured with the blind in range: 28 of 28 commands acknowledged, in
+// 0.06 s to 0.63 s, the same as with a window. With steady Wi-Fi traffic
+// some acknowledges came after 1 s to 2 s, so a window opens as a fallback.
+static volatile bool s_windowless = true;
+// In windowless mode, open a window if no acknowledge came in this time.
+// The blind polls about each 0.6 s; this is a little more than one poll.
+static constexpr uint32_t FALLBACK_MS = 750;
 static volatile bool s_awaiting = false;  // a command is sent, no acknowledge yet
 static volatile bool s_probing = false;   // that command is a probe
 static volatile uint32_t s_sentAtMs = 0;
@@ -197,12 +203,17 @@ void tick() {
   }
 
   if (!s_zigbee) {
-    // No window is open (a windowless send). Only count a lost command.
-    if (s_awaiting && due(s_sentAtMs + s_maxMs)) {
+    // No window is open (a windowless send).
+    if (!s_awaiting) return;
+    if (due(s_sentAtMs + s_maxMs)) {
       s_awaiting = false;
       s_ackMs = -1;
       s_timeouts++;
       logbuf::line("[radio] no acknowledge from the blind (no window)");
+    } else if (due(s_sentAtMs + FALLBACK_MS) && wifiSettled()) {
+      // The polls of the blind do not get through. Give Zigbee the radio;
+      // the frame waits in the stack for the next poll.
+      enterZigbee();
     }
     return;
   }

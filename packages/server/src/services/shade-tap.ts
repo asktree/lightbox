@@ -11,8 +11,9 @@ export type TapAction = { kind: 'go'; open: 0 | 100 } | { kind: 'stop' };
 
 // After this time with no use, a tap starts again from the position rule.
 export const TAP_FRESH_MS = 3 * 60_000;
-// Full travel between the limits. Measured: 20.3 s (Tuya dp 10).
-const FULL_TRAVEL_MS = 20_500;
+// Full travel between the limits, until the board gives the motor's own
+// number (Tuya dp 10; 32.1 s with the limits of 2026-10-05).
+const DEFAULT_TRAVEL_MS = 32_000;
 // The motor ramps up and down, and its reports arrive late.
 const TRAVEL_MARGIN_MS = 1_500;
 
@@ -20,6 +21,12 @@ export class ShadeTap {
   private lastUsedAt = Number.NEGATIVE_INFINITY;
   private dir: 1 | -1 | 0 = 0;   // last movement: 1 = up (open), -1 = down
   private movingUntil = 0;       // our own estimate of the end of that movement
+  private travelMs = DEFAULT_TRAVEL_MS;
+
+  /** The motor's time for a full travel, in ms, when the board knows it. */
+  setTravelMs(ms: unknown): void {
+    if (typeof ms === 'number' && ms >= 3_000 && ms <= 180_000) this.travelMs = ms;
+  }
 
   /**
    * A tap at time `now` (ms). `open` is the last known position, 0 closed to
@@ -53,6 +60,6 @@ export class ShadeTap {
   private started(now: number, dir: 1 | -1, open: number | null, target: number): void {
     this.dir = dir;
     const distance = open === null ? 100 : Math.abs(target - open);
-    this.movingUntil = now + (distance / 100) * FULL_TRAVEL_MS + TRAVEL_MARGIN_MS;
+    this.movingUntil = now + (distance / 100) * this.travelMs + TRAVEL_MARGIN_MS;
   }
 }

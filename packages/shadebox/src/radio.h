@@ -56,9 +56,10 @@ void heard();
 // Window lengths: `holdMs` after the acknowledge, `maxMs` without one.
 void tune(uint32_t holdMs, uint32_t maxMs);
 
-// Experiment: with `on`, a command goes out at once in Wi-Fi mode, and no
-// Zigbee window opens. Faster, and Wi-Fi stays up, if the blind still
-// acknowledges. Not kept across a restart.
+// With `on` (the default), a command goes out at once in Wi-Fi mode. A
+// Zigbee window opens only if the blind does not acknowledge in 0.75 s.
+// With `off`, each command gets a window, as before. Not kept across a
+// restart.
 void setWindowless(bool on);
 
 Stats stats();

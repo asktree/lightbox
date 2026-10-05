@@ -70,13 +70,13 @@ String stateJson() {
   char buf[520];
   snprintf(buf, sizeof(buf),
            "{\"up\":%lu,\"zb\":%s,\"pan\":\"0x%04x\",\"channel\":%u,\"paired\":%s,\"pairing\":%s,\"protocol\":\"%s\",\"open\":%d,\"moving\":%s,\"dir\":%d,\"target\":%d,\"inverted\":%s,"
-           "\"radio\":\"%s\",\"rssi\":%d,\"windows\":%lu,\"timeouts\":%lu,\"ackMs\":%ld,\"windowMs\":%lu,\"heardAgoS\":%ld,\"holdMs\":%lu,\"maxMs\":%lu,\"windowless\":%s}",
+           "\"radio\":\"%s\",\"rssi\":%d,\"windows\":%lu,\"timeouts\":%lu,\"ackMs\":%ld,\"windowMs\":%lu,\"heardAgoS\":%ld,\"holdMs\":%lu,\"maxMs\":%lu,\"windowless\":%s,\"travelMs\":%lu}",
            (unsigned long)(millis() / 1000), Zigbee.started() ? "true" : "false", esp_zb_get_pan_id(), esp_zb_get_current_channel(),
            s.paired ? "true" : "false", s.pairing ? "true" : "false", blind::protocolName(s.protocol), s.open,
            s.moving ? "true" : "false", s.dir, s.target, shade.inverted() ? "true" : "false",
            r.zigbee ? "zigbee" : "wifi", net::rssi(), (unsigned long)r.windows, (unsigned long)r.timeouts, (long)r.ackMs,
            (unsigned long)r.windowMs, (long)r.heardAgoS, (unsigned long)r.holdMs, (unsigned long)r.maxMs,
-           r.windowless ? "true" : "false");
+           r.windowless ? "true" : "false", (unsigned long)s.travelMs);
   return buf;
 }
 
