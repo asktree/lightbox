@@ -86,6 +86,7 @@ private:
 
   void adopt(uint16_t shortAddr, uint8_t ep, Protocol proto);
   void configure();        // bind + reporting (ZCL) or wake-up queries (Tuya)
+  void wantPosition();     // read the position soon, and try again until it comes
   void onPosition(int raw);
   void tuyaDatapoint(uint8_t dp, uint8_t type, const uint8_t *val, uint16_t len);
 
@@ -119,6 +120,10 @@ private:
   // position source; its ZCL lift attribute can be stale. Kept in NVS.
   bool _tuyaPos = false;
   volatile uint32_t _travelMs = 0;
+  // A position read is due (wantPosition); tick() sends it and tries again.
+  volatile bool _needPos = false;
+  volatile uint32_t _posTryAtMs = 0;
+  volatile uint8_t _posTries = 0;
 };
 
 }  // namespace blind

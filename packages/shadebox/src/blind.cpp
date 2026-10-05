@@ -33,6 +33,11 @@ static const char *hexBytes(const uint8_t *p, uint16_t n, char *out, size_t cap)
 // Movement inference. Blinds don't reliably say "I've stopped", so we call
 // it stopped when position reports go quiet, or after a hard ceiling.
 static constexpr uint32_t QUIET_MS = 3500;
+
+// Position read after a join or a rejoin (wantPosition).
+static constexpr uint32_t POS_FIRST_TRY_MS = 2500;
+static constexpr uint32_t POS_RETRY_MS = 5000;
+static constexpr uint8_t POS_MAX_TRIES = 6;
 static constexpr uint32_t MAX_TRAVEL_MS = 90000;
 
 static const char *protoName(Protocol p) {
@@ -165,6 +170,7 @@ void BlindEndpoint::findEndpoint(esp_zb_zdo_match_desc_req_param_t *req) {
     persist();
     logbuf::line("[blind] rejoined as 0x%04x", addr);
     configure();
+    wantPosition();
     return;
   }
   // A stranger. Only interrogate it if we asked for joiners.
@@ -228,6 +234,16 @@ void BlindEndpoint::adopt(uint16_t addr, uint8_t ep, Protocol proto) {
   persist();
   logbuf::line("[blind] paired: %s blind 0x%04x ep %u", protoName(proto), addr, ep);
   configure();
+  wantPosition();
+}
+
+// After a join or a rejoin, ask for the position until the motor gives it.
+// The first try waits for the bind and report setup: datapoint frames that
+// came in that time were lost (seen: the first 5 of 10).
+void BlindEndpoint::wantPosition() {
+  _posTries = 0;
+  _posTryAtMs = millis() + POS_FIRST_TRY_MS;
+  _needPos = true;
 }
 
 // Ask the blind to keep us informed. Runs in the Zigbee task (no lock).
@@ -263,11 +279,10 @@ void BlindEndpoint::configure() {
     cfg.record_field = &rec;
     esp_zb_zcl_config_report_cmd_req(&cfg);
 
-    uint16_t attr = ATTR_LIFT_PCT;
-    readAttrs(CLUSTER_COVERING, &attr, 1);
     // The Yoolax motor gives lift 0 to a read after a rejoin, at any height.
-    // Its Tuya position (dp 3) is right, so ask for the datapoints too.
-    tuyaSend(0, 0, nullptr, 0);
+    // Its Tuya position (dp 3) is right; wantPosition() asks for it.
+    uint16_t attr = ATTR_LIFT_PCT;
+    if (!_tuyaPos) readAttrs(CLUSTER_COVERING, &attr, 1);
   } else if (_proto == Protocol::Tuya) {
     // Tuya's "magic packet": reading these basic attributes is what makes
     // many Tuya MCUs start talking. Then ask for a dump of every datapoint.
@@ -342,6 +357,7 @@ void BlindEndpoint::tuyaDatapoint(uint8_t dp, uint8_t type, const uint8_t *v, ui
       _tuyaPos = true;
       persist();
     }
+    _needPos = false;
     onPosition((int)value);
   } else if (dp == DP_TRAVEL_MS) {
     _travelMs = value;
@@ -376,6 +392,15 @@ void BlindEndpoint::beginMove(int dir, int target) {
 }
 
 void BlindEndpoint::tick() {
+  if (_needPos && _proto != Protocol::Unknown && (int32_t)(millis() - _posTryAtMs) >= 0 && !radio::busy()) {
+    if (_posTries++ >= POS_MAX_TRIES) {
+      _needPos = false;
+      logbuf::line("[blind] no position from the blind after %u tries", POS_MAX_TRIES);
+    } else {
+      _posTryAtMs = millis() + POS_RETRY_MS;
+      radio::submit(radio::Kind::Refresh);
+    }
+  }
   if (!_moving) return;
   uint32_t now = millis();
   bool quiet = _reportSinceMove && now - _lastReportMs > QUIET_MS;
@@ -542,12 +567,13 @@ bool BlindEndpoint::goTo(int openPct) {
 void BlindEndpoint::refresh() {
   if (_proto == Protocol::Unknown) return;
   ZbLock lock;
+  // A ZCL blind can also give Tuya datapoints (the Yoolax motor does). Until
+  // a dp 3 came, ask both ways; after that, only the Tuya way.
   if (_proto == Protocol::Zcl && !_tuyaPos) {
     uint16_t attr = ATTR_LIFT_PCT;
     readAttrs(CLUSTER_COVERING, &attr, 1);
-  } else {
-    tuyaSend(0, 0, nullptr, 0);
   }
+  tuyaSend(0, 0, nullptr, 0);
 }
 
 bool BlindEndpoint::probe(const Probe &p) {

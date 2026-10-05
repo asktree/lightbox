@@ -110,6 +110,8 @@ bool submit(Kind kind, int arg) {
   return true;
 }
 
+bool busy() { return s_pendingKind != Kind::None || s_awaiting; }
+
 bool submitProbe(const blind::Probe &probe) {
   if (!s_shade || !s_shade->state().paired) return false;
   portENTER_CRITICAL(&s_mux);
