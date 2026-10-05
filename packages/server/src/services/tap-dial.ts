@@ -250,7 +250,7 @@ export function startTapDial(lightManager: LightManager): void {
       && st.stateAgeMs < SHADE_STATE_FRESH_MS
       && now - st.stateAgeMs > shadeCmdAt + SHADE_CMD_SETTLE_MS;
     shadeTap.setTravelMs(st.state?.travelMs);
-    const action = shadeTap.tap(now, shadeOpen(), boardKnows ? st.state!.moving : null);
+    const action = shadeTap.tap(now, shadeOpen(), boardKnows ? st.state!.moving : null, boardKnows ? st.state!.dir : null);
     console.log(`tap-dial: button2 tap -> blind ${action.kind === 'go' ? `go ${action.open}` : 'stop'}`);
     commandShade(action);
   }
