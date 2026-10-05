@@ -12,8 +12,9 @@ import { AgentChat } from './components/AgentChat';
 import { DebugPanel } from './components/DebugPanel';
 import { StreamTest } from './components/StreamTest';
 import { WizTest } from './components/WizTest';
+import { Curtains } from './components/Curtains';
 
-type View = 'grid' | 'wheel' | 'stream' | 'wiz';
+type View = 'grid' | 'wheel' | 'stream' | 'wiz' | 'curtains';
 
 // Set via .env.roommate (`vite --mode roommate`, :5176): pins the UI to one
 // room and hides owner-only chrome (room switcher, stream/wiz/debug, agent).
@@ -32,7 +33,7 @@ export default function App() {
 
   const [view, setView] = useState<View>(() => {
     const saved = localStorage.getItem('lightbox:viewMode');
-    const allowed = LOCKED_ROOM ? ['grid', 'wheel'] : ['grid', 'wheel', 'stream', 'wiz'];
+    const allowed = LOCKED_ROOM ? ['grid', 'wheel'] : ['grid', 'wheel', 'stream', 'wiz', 'curtains'];
     return saved && allowed.includes(saved) ? (saved as View) : 'wheel';
   });
   const [currentRoom, setCurrentRoom] = useState<string>(() => {
@@ -237,6 +238,14 @@ export default function App() {
                 >
                   WiZ
                 </button>
+                <button
+                  onClick={() => setView('curtains')}
+                  className={`px-3 py-1 text-sm rounded-md transition-all ${
+                    view === 'curtains' ? 'bg-zinc-600 text-white' : 'text-zinc-400'
+                  }`}
+                >
+                  Curtains
+                </button>
               </>
             )}
           </div>
@@ -392,6 +401,8 @@ export default function App() {
 
       {/* WiZ UDP test view */}
       {view === 'wiz' && <WizTest />}
+
+      {view === 'curtains' && <Curtains />}
 
       {/* Light Pane - shown when a light is selected */}
       {selectedLight && (

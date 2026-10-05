@@ -1,7 +1,8 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import type { Palette, PaletteNode, Light } from '@lightbox/shared';
-import { getPointOnPalette, findClosestPointOnTrack, ROOMS } from '@lightbox/shared';
-import { usePalettesStore } from '../stores/palettes';
+import { getPointOnPalette, findClosestPointOnTrack, positionToColor, ROOMS } from '@lightbox/shared';
+import { usePalettesStore, useRoomPlayState } from '../stores/palettes';
+import { useAnimatedPositions } from '../hooks/useAnimatedPositions';
 import { useLightsStore } from '../stores/lights';
 import { useDebugStore } from '../stores/debug';
 
@@ -66,6 +67,31 @@ function normalizedToHs(x: number, y: number): { h: number; s: number } {
   };
 }
 
+// Reported (h, s) → normalized wheel point (same frame as the track).
+function hsToNormalized(h: number, s: number): { x: number; y: number } {
+  const angle = (h - 90) * Math.PI / 180;
+  const distance = (s / 100) * 0.5;
+  return { x: 0.5 + distance * Math.cos(angle), y: 0.5 + distance * Math.sin(angle) };
+}
+
+// Desync check. A bulb lags its command by one tick plus its own fade, so
+// compare the reported colour to the track over the last LAG_WINDOW_S
+// before calling it out of sync. Distances are in normalized wheel units
+// (wheel radius = 0.5).
+const LAG_WINDOW_S = 1.0;
+const DESYNC_THRESHOLD = 0.06;
+
+function desyncDistance(palette: Palette, position: number, rate: number, reported: { x: number; y: number }): number {
+  const span = rate * LAG_WINDOW_S;
+  const samples = span > 0 ? 6 : 1;
+  let best = Infinity;
+  for (let i = 0; i < samples; i++) {
+    const p = getPointOnPalette(palette, (((position - (span * i) / Math.max(1, samples - 1)) % 1) + 1) % 1);
+    best = Math.min(best, Math.hypot(p.x - reported.x, p.y - reported.y));
+  }
+  return best;
+}
+
 // Generate SVG path for the track
 function generateTrackPath(palette: Palette, size: number): string {
   if (palette.nodes.length < 2) return '';
@@ -109,8 +135,14 @@ export function PaletteTrack({ palette, size, lightPositions, roomId, isEditing,
     return light.reachable;
   }, [diagnostics]);
 
+  // Pins move at the display frame rate between server ticks.
+  const { isPlaying, secondsPerNode } = useRoomPlayState(roomId ?? '');
+  const rate = isPlaying && roomId && !isPreview && !isEditing && palette.nodes.length >= 2
+    ? 1 / (secondsPerNode * palette.nodes.length)
+    : 0;
+
   const nodeRadius = isPreview ? 8 : 14;
-  const pathD = generateTrackPath(palette, size);
+  const pathD = useMemo(() => generateTrackPath(palette, size), [palette, size]);
   const strokeColor = isPreview
     ? 'rgba(168, 85, 247, 0.45)'
     : isEditing ? 'rgba(251, 191, 36, 0.7)' : 'rgba(168, 85, 247, 0.7)';
@@ -133,6 +165,8 @@ export function PaletteTrack({ palette, size, lightPositions, roomId, isEditing,
       Object.entries(lightPositions).filter(([lightId]) => roomLightSet.has(lightId))
     );
   }, [roomId, lightPositions]);
+
+  const animatedPositions = useAnimatedPositions(filteredLightPositions, rate, draggingLight);
 
   // Double-click on a node to delete it (if more than 2 nodes)
   const handleNodeDoubleClick = useCallback((e: React.MouseEvent, index: number) => {
@@ -332,8 +366,34 @@ export function PaletteTrack({ palette, size, lightPositions, roomId, isEditing,
           );
         })}
 
+        {/* Desync markers: where the bulb reports it is, when that is off
+            the track near its pin. A dashed line joins it to the pin. */}
+        {!isPreview && !isEditing && Object.entries(animatedPositions).map(([lightId, position]) => {
+          const light = lights[lightId];
+          if (!light || !isLightConnected(light) || draggingLight === lightId) return null;
+          const reported = light.state.color;
+          if (!reported || light.state.temperature !== undefined) return null;
+          const r = hsToNormalized(reported.h, reported.s);
+          if (desyncDistance(palette, position, rate, r) < DESYNC_THRESHOLD) return null;
+          const pin = toCanvasCoords(getPointOnPalette(palette, position), size);
+          const ghost = toCanvasCoords(r, size);
+          return (
+            <g key={`desync-${lightId}`} style={{ pointerEvents: 'none' }}>
+              <line
+                x1={pin.x} y1={pin.y} x2={ghost.x} y2={ghost.y}
+                stroke="rgba(255,255,255,0.6)" strokeWidth={1.5} strokeDasharray="3 3"
+              />
+              <circle
+                cx={ghost.x} cy={ghost.y} r={6}
+                fill={hsvToHex(reported.h, reported.s)}
+                stroke="rgba(255,255,255,0.8)" strokeWidth={1.5} strokeDasharray="2 2"
+              />
+            </g>
+          );
+        })}
+
         {/* Light positions on track - styled pins with colors and labels */}
-        {Object.entries(filteredLightPositions).map(([lightId, position]) => {
+        {Object.entries(animatedPositions).map(([lightId, position]) => {
           const light = lights[lightId];
           if (!light) return null;
 
@@ -342,7 +402,12 @@ export function PaletteTrack({ palette, size, lightPositions, roomId, isEditing,
 
           const point = getPointOnPalette(palette, position);
           const { x, y } = toCanvasCoords(point, size);
-          const color = light.state.color ?? { h: 0, s: 0 };
+          // Pin colour is the palette colour at this position (what the
+          // server is sending). A preview pin is not on this palette yet,
+          // so it keeps the reported colour.
+          const color = isPreview
+            ? (light.state.color ?? { h: 0, s: 0 })
+            : positionToColor(point);
           const pinColor = hsvToHex(color.h, color.s);
           const isSelected = selectedLightId === lightId;
           const isDragging = draggingLight === lightId;
@@ -354,7 +419,7 @@ export function PaletteTrack({ palette, size, lightPositions, roomId, isEditing,
               style={{
                 cursor: canDragLights ? 'grab' : (onLightClick && !editPaletteMode ? 'pointer' : 'default'),
                 transform: `translate(${x}px, ${y}px)`,
-                transition: isDragging ? 'none' : 'transform 100ms ease-out',
+                transition: isDragging || rate > 0 ? 'none' : 'transform 100ms ease-out',
               }}
               onMouseDown={(e) => handleLightMouseDown(e, lightId)}
               onClick={(e) => {
