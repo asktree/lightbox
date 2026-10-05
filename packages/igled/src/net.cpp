@@ -67,15 +67,15 @@ static void handleState() {
 
 // --- /api/routine ----------------------------------------------------------
 static void sendRoutine() {
-  char buf[320];
+  char buf[400];
   snprintf(buf, sizeof(buf),
     "{\"kind\":\"%s\",\"hue\":%u,\"sat\":%u,\"val\":%u,"
     "\"density\":%u,\"periodMs\":%u,\"hueJitter\":%u,\"cut\":%s,"
-    "\"speed\":%u,\"smoothness\":%u,\"palette\":\"%s\","
+    "\"speed\":%u,\"smoothness\":%u,\"palette\":\"%s\",\"black\":%u,\"bri\":%u,"
     "\"useRgb\":%s,\"rgb\":{\"r\":%u,\"g\":%u,\"b\":%u}}",
     fxName(fxParams.kind), fxParams.hue, fxParams.sat, fxParams.val,
     fxParams.density, fxParams.periodMs, fxParams.hueJitter, fxParams.cut ? "true" : "false",
-    fxParams.speed, fxParams.smoothness, fxPaletteName(fxParams.palette),
+    fxParams.speed, fxParams.smoothness, fxPaletteName(fxParams.palette), fxParams.black, fxParams.bri,
     fxParams.useRgb ? "true" : "false", fxParams.r, fxParams.g, fxParams.b);
   server.send(200, "application/json", buf);
 }
@@ -109,6 +109,8 @@ static void handleRoutine() {
   if (doc["cut"].is<bool>())       fxParams.cut = doc["cut"];
   if (doc["speed"].is<int>())      fxParams.speed = doc["speed"];
   if (doc["smoothness"].is<int>()) fxParams.smoothness = doc["smoothness"];
+  if (doc["black"].is<int>())      fxParams.black = doc["black"];
+  if (doc["bri"].is<int>())        fxParams.bri = doc["bri"];
   if (doc["palette"].is<const char*>()) {
     const char* want = doc["palette"];
     for (uint8_t i = 0; i < fxPaletteCount(); i++)

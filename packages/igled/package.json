@@ -6,8 +6,8 @@
   "scripts": {
     "compile": "pio run -e couch1 -e window",
     "flash": "pio run -e igled -t upload",
-    "ota:couch1": "pio run -e couch1_ota -t upload",
-    "ota:window": "pio run -e window_ota -t upload",
+    "ota:couch1": "node scripts/ota.mjs couch1",
+    "ota:window": "node scripts/ota.mjs window",
     "monitor": "pio device monitor -b 115200"
   }
 }
