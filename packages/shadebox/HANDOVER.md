@@ -307,6 +307,9 @@ a value that changed shows what holds the limit state.
   motors, dp 16 and some dp above 100 set or delete the limits.
 - If the speed is changed with the remote, read dp 21 again. If it changes,
   dp 21 is the speed number.
+- To measure the speed: `scripts/timed-move.sh shadebox.local <open> 17`.
+  It moves the blind, so get Iggy's go first. On 2026-10-05 test moves with
+  no word to her surprised her ("my blinds are moving on their own").
 
 **Research, 2026-10-05:** no source documents a Zigbee command that sets the
 limits on this motor. Zigbee2MQTT has three TS0301 covers. `TS0301_cover_1`
