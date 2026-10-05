@@ -261,7 +261,7 @@ Rules to read the log:
 | dp 11 (enum) | 1 | not known |
 | dp 12 (bitmap) | 0 | fault |
 | dp 13 (value) | 81 | battery % |
-| dp 21 (value) | 35 | not known |
+| dp 21 (value) | 35 | not known; a write is not kept (see "Speed" below) |
 | dp 107 (bool) | 0 | not known (a limit state on one other TS0301 motor) |
 | 0x0001/0x0021 | 0xa2 | battery, half-percent units (81 %) |
 | 0x0102/0x0000 | 0 | type: roller shade |
@@ -293,6 +293,20 @@ a value that changed shows what holds the limit state.
 - When a move starts, the motor sends `0x0102/0xF008` = the target (raw).
 - Raw 100 = bottom (closed), raw 0 = top (open), in the two sources.
 - dp 10 = travel time in ms (32099). dp 2 = the target of the last move.
+
+**Speed (tested 2026-10-05, limits set):**
+
+- The motor runs at 3.1 % each second, up and down (26 % in 8.39 s between
+  lift reports, four runs). Full travel: 32.1 s.
+- dp 21 is not a speed setting that Zigbee can write. The motor echoes a
+  written value (25, 34, 45, 100), but the next data query gives 35 again,
+  and a move right after a write of 25 ran at the same speed.
+- A data query lists only dp 1, 2, 3, 5, 10, 11, 12, 13, 21 and 107. So the
+  speed setting that the remote has is not on Zigbee.
+- Do not write to a datapoint that the motor does not list. On other Tuya
+  motors, dp 16 and some dp above 100 set or delete the limits.
+- If the speed is changed with the remote, read dp 21 again. If it changes,
+  dp 21 is the speed number.
 
 **Research, 2026-10-05:** no source documents a Zigbee command that sets the
 limits on this motor. Zigbee2MQTT has three TS0301 covers. `TS0301_cover_1`
