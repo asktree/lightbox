@@ -92,6 +92,17 @@ export class TuyaDriver implements LightDriver {
   // Callback for real-time updates (set by LightManager)
   onUpdate?: (deviceId: string, state: LightState) => void;
 
+  // Reachability changes (set by LightManager). Without this the manager's
+  // Light kept the reachable flag from boot — a bulb that connected later
+  // stayed "offline" in every UI until a server restart.
+  onReachable?: (deviceId: string, reachable: boolean) => void;
+
+  private setReachable(device: TuyaDevice, reachable: boolean): void {
+    const changed = device.reachable !== reachable;
+    device.reachable = reachable;
+    if (changed) this.onReachable?.(device.config.id, reachable);
+  }
+
   // Callbacks for debug messages
   onDebug?: (id: string, deviceName: string, message: string, direction: 'in' | 'out') => void;
   onDebugUpdate?: (id: string, message: string) => void;
@@ -250,7 +261,7 @@ export class TuyaDriver implements LightDriver {
       version: device.config.version || '3.3',
     });
     device.connected = false;
-    device.reachable = false;
+    this.setReachable(device, false);
     this.setupDeviceEvents(device, id);
   }
 
@@ -291,7 +302,7 @@ export class TuyaDriver implements LightDriver {
 
     api.on('connected', () => {
       device.connected = true;
-      device.reachable = true;
+      driver.setReachable(device, true);
       device.reconnectAttempts = 0; // Reset backoff on successful connection
       emitDebug(config.name, 'connected', 'in');
       if (driver.onDiagnosticsChange) driver.onDiagnosticsChange();
@@ -299,6 +310,7 @@ export class TuyaDriver implements LightDriver {
 
     api.on('disconnected', () => {
       device.connected = false;
+      driver.setReachable(device, false);
       emitDebug(config.name, 'disconnected', 'in');
       if (driver.onDiagnosticsChange) driver.onDiagnosticsChange();
       scheduleReconnect(device, id);
@@ -317,7 +329,7 @@ export class TuyaDriver implements LightDriver {
         const newState = parseState(config, data.dps);
         // Merge with existing state (data events may only have changed dps)
         device.state = { ...device.state, ...newState };
-        device.reachable = true;
+        driver.setReachable(device, true);
 
         // Notify LightManager of update
         if (driver.onUpdate) {
@@ -339,11 +351,11 @@ export class TuyaDriver implements LightDriver {
       if (status?.dps) {
         device.state = this.parseState(config, status.dps);
       }
-      device.reachable = true;
       device.connected = true;
+      this.setReachable(device, true);
     } catch (err: any) {
-      device.reachable = false;
       device.connected = false;
+      this.setReachable(device, false);
       throw err;
     }
   }

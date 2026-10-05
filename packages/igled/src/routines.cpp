@@ -17,16 +17,77 @@ static const CRGBPalette16 DefaultDark_p(
   CRGB(0xDD2200), CRGB::Black,    CRGB(0xC2003E), CRGB(0x8F0071),
   CRGB::Black,    CRGB(0x5F00A1), CRGB::Black,    CRGB(0x0007F9));
 
+// ember: deep reds and red-orange over black, 8 black valleys
+static const CRGBPalette16 Ember_p(
+  CRGB(0xE5001B), CRGB::Black, CRGB(0x8B0000), CRGB::Black,
+  CRGB(0xDD2200), CRGB(0xE81700), CRGB::Black, CRGB::Black,
+  CRGB(0xA00010), CRGB::Black, CRGB(0xFF1A00), CRGB::Black,
+  CRGB(0x6A0000), CRGB(0xC2003E), CRGB::Black, CRGB(0xE5001B));
+// rose: pinks and magentas, softer, 6 black valleys
+static const CRGBPalette16 Rose_p(
+  CRGB(0xFF2E7A), CRGB::Black, CRGB(0xC2003E), CRGB(0xFF4FA3),
+  CRGB::Black, CRGB(0x8F0071), CRGB(0xFF1F8F), CRGB::Black,
+  CRGB(0xD1006B), CRGB::Black, CRGB(0xFF69B4), CRGB(0xB0004F),
+  CRGB::Black, CRGB(0xFF2E7A), CRGB::Black, CRGB(0x8F0071));
+// violet: purples into blue, 6 black valleys
+static const CRGBPalette16 Violet_p(
+  CRGB(0x5500AB), CRGB::Black, CRGB(0x8F0071), CRGB(0x5F00A1),
+  CRGB::Black, CRGB(0x2F00D0), CRGB(0x0007F9), CRGB::Black,
+  CRGB(0x6A00C8), CRGB::Black, CRGB(0x84007C), CRGB(0x3A00B8),
+  CRGB::Black, CRGB(0x0007F9), CRGB(0x5500AB), CRGB::Black);
+// midnight: blues only, mostly black
+static const CRGBPalette16 Midnight_p(
+  CRGB(0x0007F9), CRGB::Black, CRGB::Black, CRGB(0x0000A0),
+  CRGB::Black, CRGB::Black, CRGB(0x1030FF), CRGB::Black,
+  CRGB::Black, CRGB(0x000070), CRGB::Black, CRGB(0x0007F9),
+  CRGB::Black, CRGB::Black, CRGB(0x2020C0), CRGB::Black);
+// neon: magenta and electric blue, hard contrast, 6 black valleys
+static const CRGBPalette16 Neon_p(
+  CRGB(0xFF00FF), CRGB::Black, CRGB(0x0040FF), CRGB::Black,
+  CRGB(0xFF00C8), CRGB(0x2000FF), CRGB::Black, CRGB(0xFF00FF),
+  CRGB::Black, CRGB(0x0060FF), CRGB::Black, CRGB(0xFF0090),
+  CRGB::Black, CRGB(0x0040FF), CRGB(0xFF00FF), CRGB::Black);
+// blood: dark red, mostly black, one bright flash
+static const CRGBPalette16 Blood_p(
+  CRGB(0x8B0000), CRGB::Black, CRGB::Black, CRGB(0x600000),
+  CRGB::Black, CRGB::Black, CRGB(0xA00000), CRGB::Black,
+  CRGB::Black, CRGB(0xFF0000), CRGB::Black, CRGB::Black,
+  CRGB(0x700000), CRGB::Black, CRGB(0x8B0000), CRGB::Black);
+// candy: pink and blue alternating, 5 black valleys
+static const CRGBPalette16 Candy_p(
+  CRGB(0xFF2E7A), CRGB(0x0040FF), CRGB::Black, CRGB(0xFF4FA3),
+  CRGB(0x2000FF), CRGB::Black, CRGB(0xFF1F8F), CRGB(0x0007F9),
+  CRGB::Black, CRGB(0xFF69B4), CRGB(0x1030FF), CRGB::Black,
+  CRGB(0xFF2E7A), CRGB::Black, CRGB(0x0040FF), CRGB(0xFF00C8));
+
+// coal: midnight's shape in 1000 K blackbody (linear RGB 255,7,0), mostly black
+static const CRGBPalette16 Coal_p(
+  CRGB(0xFF0700), CRGB::Black, CRGB::Black, CRGB(0xA00400),
+  CRGB::Black, CRGB::Black, CRGB(0xFF0800), CRGB::Black,
+  CRGB::Black, CRGB(0x700200), CRGB::Black, CRGB(0xFF0700),
+  CRGB::Black, CRGB::Black, CRGB(0xC00500), CRGB::Black);
+
+// kiln: coal's shape in 1400 K blackbody (linear RGB 255,31,0)
+static const CRGBPalette16 Kiln_p(
+  CRGB(0xFF1F00), CRGB::Black, CRGB::Black, CRGB(0xA01300),
+  CRGB::Black, CRGB::Black, CRGB(0xFF2000), CRGB::Black,
+  CRGB::Black, CRGB(0x700E00), CRGB::Black, CRGB(0xFF1F00),
+  CRGB::Black, CRGB::Black, CRGB(0xC01700), CRGB::Black);
+
 struct PaletteEntry { const char* name; const CRGBPalette16 pal; };
+// No greens, yellows or oranges anywhere in the bank (owner's taste).
+// Mirrored by SOAP_PALETTES in packages/server/src/routes/curtains.ts.
 static const PaletteEntry PALETTES[] = {
   { "default", DefaultDark_p },
-  { "party",   CRGBPalette16(PartyColors_p) },
-  { "lava",    CRGBPalette16(LavaColors_p) },
-  { "ocean",   CRGBPalette16(OceanColors_p) },
-  { "forest",  CRGBPalette16(ForestColors_p) },
-  { "rainbow", CRGBPalette16(RainbowColors_p) },
-  { "heat",    CRGBPalette16(HeatColors_p) },
-  { "cloud",   CRGBPalette16(CloudColors_p) },
+  { "ember", Ember_p },
+  { "rose", Rose_p },
+  { "violet", Violet_p },
+  { "midnight", Midnight_p },
+  { "coal", Coal_p },
+  { "kiln", Kiln_p },
+  { "neon", Neon_p },
+  { "blood", Blood_p },
+  { "candy", Candy_p },
 };
 static const uint8_t N_PALETTES = sizeof(PALETTES) / sizeof(PALETTES[0]);
 
@@ -142,6 +203,39 @@ static void fxTwinkle(CRGB* fb, uint32_t nowMs) {
 
 // --- dispatch --------------------------------------------------------------
 static uint32_t lastSoapFrame = 0;
+static CRGB soapFb[NUM_LEDS];
+
+// Black + brightness for soap. The palette blends linearly toward its
+// black entries, so a pixel's peak channel m is its position on the
+// black->colour ramp. `black` bends that ramp with a power curve,
+// m' = 255 * (m/255)^gamma, gamma = 1 + black/32: the dark end stretches
+// (black valleys grow) and the bright end compresses, but the ramp stays
+// continuous and monotone — no cut, every pixel stays on the gradient.
+// The curve is a 256-entry LUT rebuilt on param change.
+static uint8_t blackLut[256];
+static uint8_t blackLutFor = 255;   // param value the LUT was built for
+
+static void buildBlackLut() {
+  blackLutFor = fxParams.black;
+  const float gamma = 1.f + fxParams.black / 32.f;
+  blackLut[0] = 0;
+  for (int m = 1; m < 256; m++) blackLut[m] = (uint8_t)(255.f * powf(m / 255.f, gamma) + 0.5f);
+}
+
+static void soapPost(CRGB* out, const CRGB* in) {
+  if (blackLutFor != fxParams.black) buildBlackLut();
+  const uint8_t bri = fxParams.bri;
+  for (uint16_t i = 0; i < NUM_LEDS; i++) {
+    CRGB c = in[i];
+    uint8_t m = c.r > c.g ? (c.r > c.b ? c.r : c.b) : (c.g > c.b ? c.g : c.b);
+    if (fxParams.black && m) {
+      uint32_t nm = blackLut[m];
+      for (int k = 0; k < 3; k++) c.raw[k] = (uint8_t)(((uint32_t)c.raw[k] * nm + m / 2) / m);
+    }
+    if (bri < 255) c.nscale8(bri);
+    out[i] = c;
+  }
+}
 
 void fxOnSwitch() {
   fxSoapReset();
@@ -165,7 +259,10 @@ void fxRender(CRGB* fb, uint32_t nowMs) {
       break;
     case Fx::Soap: {
       uint8_t pi = fxParams.palette < N_PALETTES ? fxParams.palette : 0;
-      fxSoap(fb, fxParams.speed, fxParams.smoothness, PALETTES[pi].pal);
+      // Soap shifts its own previous frame, so it must keep an untouched
+      // buffer; black level and brightness are applied on the copy out.
+      fxSoap(soapFb, fxParams.speed, fxParams.smoothness, PALETTES[pi].pal);
+      soapPost(fb, soapFb);
       lastSoapFrame = nowMs;
       break;
     }

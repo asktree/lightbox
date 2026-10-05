@@ -19,18 +19,18 @@ type Mode = 'color' | 'normal';
 
 // 1000K floor: below CT hardware's 2000K limit, into ember/coal territory —
 // the LightManager emulates sub-2000K with the color engine (planckian xy).
-const KELVIN_MIN = 1000;
-const KELVIN_MAX = 6500;
+export const KELVIN_MIN = 1000;
+export const KELVIN_MAX = 6500;
 
 // The two igled curtain boxes. Their native routine is what shows whenever
 // twinklybox isn't streaming.
-const CURTAIN_HOSTS = ['couch1.local', 'window.local'];
+export const CURTAIN_HOSTS = ['couch1.local', 'window.local'] as const;
 const TWINKLYBOX = 'http://localhost:3010';
 
 // macOS getaddrinfo stalls ~5s on these .local names waiting for an AAAA
 // answer the boxes never send — resolve IPv4 explicitly and cache.
 const ipCache = new Map<string, { ip: string; at: number }>();
-async function resolveIp(host: string): Promise<string> {
+export async function resolveIp(host: string): Promise<string> {
   const c = ipCache.get(host);
   if (c && Date.now() - c.at < 10 * 60_000) return c.ip;
   const { address } = await lookup(host, { family: 4 });
@@ -43,16 +43,16 @@ async function resolveIp(host: string): Promise<string> {
 // render the low channels far too bright (2900K came out yellow-white).
 // Normalized so the peak channel is 255 (brightest version of that
 // chromaticity — the twinkle's own envelope handles brightness).
-function kelvinToRgbBytes(k: number): { r: number; g: number; b: number } {
+export function kelvinToRgbBytes(k: number): { r: number; g: number; b: number } {
   let { r, g, b } = xyToLinearRgb(blackbodyXy(Math.max(1000, k)));
   r = Math.max(0, r); g = Math.max(0, g); b = Math.max(0, b);
   const m = Math.max(r, g, b, 1e-6);
   return { r: Math.round((r / m) * 255), g: Math.round((g / m) * 255), b: Math.round((b / m) * 255) };
 }
 
-async function postRoutine(body: object): Promise<Record<string, boolean>> {
+export async function postRoutine(body: object, hosts: readonly string[] = CURTAIN_HOSTS): Promise<Record<string, boolean>> {
   const results: Record<string, boolean> = {};
-  await Promise.all(CURTAIN_HOSTS.map(async (host) => {
+  await Promise.all(hosts.map(async (host) => {
     try {
       const ip = await resolveIp(host);
       const r = await fetch(`http://${ip}/api/routine`, {
@@ -69,7 +69,18 @@ async function postRoutine(body: object): Promise<Record<string, boolean>> {
   return results;
 }
 
-function twinkleBody(): object {
+export function soapBody(): object {
+  return {
+    kind: 'soap',
+    speed: state.soapSpeed,
+    smoothness: state.soapSmoothness,
+    palette: state.soapPalette,
+    black: state.soapBlack,
+    bri: state.soapBri,
+  };
+}
+
+export function twinkleBody(): object {
   return {
     kind: 'twinkle',
     rgb: kelvinToRgbBytes(state.curtainsKelvin),
@@ -79,17 +90,20 @@ function twinkleBody(): object {
   };
 }
 
-async function setCurtains(mode: Mode): Promise<Record<string, boolean>> {
-  // An active twinklybox stream would paint over the native routine.
+// An active twinklybox stream would paint over the native routine.
+export async function stopTwinklyboxStream(): Promise<void> {
   await fetch(`${TWINKLYBOX}/api/stream/stop`, {
     method: 'POST',
     signal: AbortSignal.timeout(2000),
   }).catch(() => {});
+}
 
+async function setCurtains(mode: Mode): Promise<Record<string, boolean>> {
+  await stopTwinklyboxStream();
   if (mode === 'normal') {
     return postRoutine(twinkleBody());
   }
-  return postRoutine({ kind: 'soap' });
+  return postRoutine(soapBody());
 }
 
 // --- per-light position memory ----------------------------------------------
@@ -106,6 +120,11 @@ interface AmbienceState {
   curtainsVal: number;       // the twinkle dots' peak brightness, 0-255
   curtainsPeriodMs: number;  // one twinkle fade in->out
   curtainsCut: boolean;      // cut off-hue fade-tail frames on the box
+  soapSpeed: number;         // soap routine (color mode), 0-255
+  soapSmoothness: number;    // 0-255
+  soapPalette: string;       // palette name from the firmware bank
+  soapBlack: number;         // black level 0-240 (grows black valleys)
+  soapBri: number;           // soap brightness 0-255
 }
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = join(__dirname, '../../data/state/ambience.json');
@@ -118,10 +137,15 @@ function loadState(): AmbienceState {
         mode: s.mode, lastColor: s.lastColor ?? {}, lastKelvin: s.lastKelvin ?? {},
         curtainsKelvin: s.curtainsKelvin ?? 2900, curtainsVal: s.curtainsVal ?? 200,
         curtainsPeriodMs: s.curtainsPeriodMs ?? 6000, curtainsCut: s.curtainsCut ?? true,
+        soapSpeed: s.soapSpeed ?? 32, soapSmoothness: s.soapSmoothness ?? 200, soapPalette: s.soapPalette ?? 'default',
+        soapBlack: s.soapBlack ?? 0, soapBri: s.soapBri ?? 255,
       };
     }
   } catch { /* first run / unreadable — start fresh */ }
-  return { mode: 'color', lastColor: {}, lastKelvin: {}, curtainsKelvin: 2900, curtainsVal: 200, curtainsPeriodMs: 6000, curtainsCut: true };
+  return {
+    mode: 'color', lastColor: {}, lastKelvin: {}, curtainsKelvin: 2900, curtainsVal: 200, curtainsPeriodMs: 6000, curtainsCut: true,
+    soapSpeed: 32, soapSmoothness: 200, soapPalette: 'default', soapBlack: 0, soapBri: 255,
+  };
 }
 
 function saveState(s: AmbienceState): void {
@@ -139,8 +163,11 @@ const state = loadState();
 /** Read-only view for the day-log snapshot. */
 export function getAmbienceState(): Readonly<AmbienceState> { return state; }
 
+/** Mutable access for the curtains router (same process, same file). */
+export function getMutableAmbienceState(): AmbienceState { return state; }
+
 let saveTimer: NodeJS.Timeout | null = null;
-function saveStateDebounced(): void {
+export function saveStateDebounced(): void {
   if (saveTimer) return;
   saveTimer = setTimeout(() => { saveTimer = null; saveState(state); }, 1000);
 }

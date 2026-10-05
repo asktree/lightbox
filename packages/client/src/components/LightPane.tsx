@@ -5,6 +5,7 @@ import { usePalettesStore, useRoomPlayState, useRoomPositions } from '../stores/
 import { useLightsStore } from '../stores/lights';
 import { useDebugStore } from '../stores/debug';
 import { PaletteWheel } from './PaletteWheel';
+import { useAnimatedPositions } from '../hooks/useAnimatedPositions';
 import { DebugPanel } from './DebugPanel';
 
 // Convert normalized x,y (0-1, center at 0.5) to H/S
@@ -81,7 +82,13 @@ export function LightPane({ light, roomId, onClose, variant = 'fixed' }: LightPa
   const diag = diagnostics[light.id];
 
   const activePalette = palettes.find((p) => p.id === activePaletteId);
-  const lightPosition = lightPositions[light.id] ?? 0;
+  const [wheelDragging, setWheelDragging] = useState(false);
+  const { isPlaying, secondsPerNode } = useRoomPlayState(roomId);
+  const rate = isPlaying && activePalette && activePalette.nodes.length >= 2
+    ? 1 / (secondsPerNode * activePalette.nodes.length)
+    : 0;
+  const animatedPositions = useAnimatedPositions(lightPositions, rate, wheelDragging ? light.id : null);
+  const lightPosition = animatedPositions[light.id] ?? 0;
 
   // Palette exclusion state
   const [excludedFromPalette, setExcludedFromPalette] = useState(false);
@@ -199,11 +206,13 @@ export function LightPane({ light, roomId, onClose, variant = 'fixed' }: LightPa
   const handleDragStart = useCallback(() => {
     startControlling(light.id);
     startDraggingLight(light.id);
+    setWheelDragging(true);
   }, [light.id, startControlling, startDraggingLight]);
 
   const handleDragEnd = useCallback(() => {
     stopControlling(light.id);
     stopDraggingLight();
+    setWheelDragging(false);
   }, [light.id, stopControlling, stopDraggingLight]);
 
   // Handle brightness change

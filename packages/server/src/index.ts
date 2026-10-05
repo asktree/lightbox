@@ -19,6 +19,7 @@ import { LightManager } from './lib/light-manager.js';
 import { PaletteAnimator } from './lib/palette-animator.js';
 import { createLightsRouter } from './routes/lights.js';
 import { createAmbienceRouter } from './routes/ambience.js';
+import { createCurtainsRouter } from './routes/curtains.js';
 import { createShadeRouter } from './routes/shade.js';
 import { startTapDial } from './services/tap-dial.js';
 import { startDayLog, buildSnapshot, DAY_LOG_FILE } from './services/day-log.js';
@@ -88,6 +89,12 @@ lightManager.on('update', (light: Light) => {
   broadcast({ type: 'light_update', light });
 });
 
+// New lights found by a LAN rescan: push the whole list. Thin clients
+// (screenbox) only patch known ids from light_update.
+lightManager.on('added', () => {
+  broadcast({ type: 'lights_sync', lights: lightManager.getAllLights() });
+});
+
 // Subscribe to debug logs
 lightManager.on('debug', (entry: DebugLogEntry) => {
   broadcast({ type: 'debug_log', entry });
@@ -139,6 +146,7 @@ wss.on('connection', async (ws) => {
 // Mount routes
 app.use('/api/lights', createLightsRouter(lightManager, paletteAnimator));
 app.use('/api/ambience', createAmbienceRouter(lightManager));
+app.use('/api/curtains', createCurtainsRouter());
 app.use('/api/shade', createShadeRouter());
 app.use('/api/wwtest', createWwTestRouter(lightManager));
 app.use('/api/groups', createGroupsRouter(lightManager));

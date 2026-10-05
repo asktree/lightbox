@@ -1,4 +1,5 @@
 import { createSocket, Socket, RemoteInfo } from 'dgram';
+import { networkInterfaces } from 'os';
 import type { Light, LightState, LightDriver, Brand, Capability } from '@lightbox/shared';
 
 // Philips WiZ LAN driver. JSON over UDP on port 38899.
@@ -35,6 +36,21 @@ interface WizPilotResult {
   g?: number;
   b?: number;
   sceneId?: number;
+}
+
+// Directed broadcast address of every non-internal IPv4 interface.
+function subnetBroadcasts(): string[] {
+  const out: string[] = [];
+  for (const addrs of Object.values(networkInterfaces())) {
+    for (const a of addrs ?? []) {
+      if (a.family !== 'IPv4' || a.internal) continue;
+      const ip = a.address.split('.').map(Number);
+      const mask = a.netmask.split('.').map(Number);
+      if (ip.length !== 4 || mask.length !== 4) continue;
+      out.push(ip.map((o, i) => (o | (~mask[i] & 255))).join('.'));
+    }
+  }
+  return out;
 }
 
 export class WizDriver implements LightDriver {
@@ -81,9 +97,17 @@ export class WizDriver implements LightDriver {
       method: 'registration',
       params: { phoneMac: 'AAAAAAAAAAAA', register: false, phoneIp: '0.0.0.0' },
     });
-    this.socket.send(payload, WIZ_PORT, BROADCAST_ADDR);
-
-    await new Promise((r) => setTimeout(r, DISCOVERY_WINDOW_MS));
+    // The limited broadcast alone missed the kitchen bulb at boot. Send to
+    // every interface's directed broadcast as well, and repeat: a bulb
+    // answers each registration once, and UDP on Wi-Fi drops packets.
+    const targets = new Set<string>([BROADCAST_ADDR, ...subnetBroadcasts()]);
+    const rounds = 3;
+    for (let i = 0; i < rounds; i++) {
+      for (const addr of targets) {
+        this.socket.send(payload, WIZ_PORT, addr, () => { /* send errors surface on the socket */ });
+      }
+      await new Promise((r) => setTimeout(r, DISCOVERY_WINDOW_MS / rounds));
+    }
     this.socket.removeListener('message', onMessage);
 
     // Pull initial pilot for each bulb.

@@ -7,6 +7,12 @@ import { fileURLToPath } from 'url';
 import https from 'https';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// EventStream liveness: the bridge pushes every light/sensor change, plus SSE
+// keepalive comments; ES_IDLE_MS of silence means the stream is dead.
+const ES_IDLE_MS = 120_000;
+// Backstop: recycle the stream this often even if it looks alive.
+const ES_MAX_AGE_MS = 30 * 60_000;
 const CONFIG_DIR = join(__dirname, '../../data');
 const CONFIG_FILE = join(CONFIG_DIR, 'hue-config.json');
 
@@ -381,7 +387,12 @@ export class HueDriver implements LightDriver {
     }
   }
 
+  private disposed = false;
+
   async dispose(): Promise<void> {
+    this.disposed = true;
+    this.clearEsTimers();
+    if (this.esReconnectTimer) { clearTimeout(this.esReconnectTimer); this.esReconnectTimer = undefined; }
     if (this.reachableTimer) { clearInterval(this.reachableTimer); this.reachableTimer = undefined; }
     // Close EventStream connection
     if (this.eventStreamReq) {
@@ -400,8 +411,45 @@ export class HueDriver implements LightDriver {
       console.log('Hue: EventStream not available, will rely on polling');
       return;
     }
+    this.openEventStream();
+  }
 
-    const url = `https://${this.config.bridgeIp}/eventstream/clip/v2`;
+  // EventStream lifecycle. One connection at a time; every way it can end
+  // (non-200, socket error, close, silence, the age backstop) funnels into
+  // scheduleReconnect(), which runs at most once per connection. A stream can
+  // die silently (socket stays ESTABLISHED, bridge stops sending), so a
+  // liveness timer forces a reconnect after ES_IDLE_MS without data, and a
+  // backstop recycles any stream older than ES_MAX_AGE_MS.
+  private esGen = 0;
+  private esReconnectTimer?: NodeJS.Timeout;
+  private esIdleTimer?: NodeJS.Timeout;
+  private esAgeTimer?: NodeJS.Timeout;
+  private esBackoffMs = 0;
+
+  private clearEsTimers(): void {
+    if (this.esIdleTimer) { clearTimeout(this.esIdleTimer); this.esIdleTimer = undefined; }
+    if (this.esAgeTimer) { clearTimeout(this.esAgeTimer); this.esAgeTimer = undefined; }
+  }
+
+  private scheduleReconnect(gen: number, reason: string): void {
+    if (gen !== this.esGen || this.disposed) return;   // stale connection or already handled
+    this.esGen++;                                       // later events from this connection are ignored
+    this.clearEsTimers();
+    this.eventStreamReq?.destroy();
+    this.eventStreamReq = undefined;
+    // 2s, 4s, 8s ... capped at 60s; reset once a connection delivers data
+    this.esBackoffMs = Math.min(60_000, this.esBackoffMs ? this.esBackoffMs * 2 : 2_000);
+    console.log(`Hue: EventStream reconnect in ${this.esBackoffMs / 1000}s (${reason})`);
+    if (this.esReconnectTimer) clearTimeout(this.esReconnectTimer);
+    this.esReconnectTimer = setTimeout(() => {
+      this.esReconnectTimer = undefined;
+      this.openEventStream();
+    }, this.esBackoffMs);
+  }
+
+  private openEventStream(): void {
+    if (!this.config || this.disposed) return;
+    const gen = ++this.esGen;
     console.log('Hue: connecting to EventStream...');
 
     const options = {
@@ -415,25 +463,31 @@ export class HueDriver implements LightDriver {
       rejectUnauthorized: false, // Hue bridge uses self-signed cert
     };
 
-    // Connect-phase timeout only: once headers arrive the stream may sit
-    // silent indefinitely (that's normal SSE), so an idle timeout would kill
-    // healthy connections — but a connect that never answers must not hang.
-    const connectTimer = setTimeout(() => {
-      console.log('Hue: EventStream connect timeout');
-      this.eventStreamReq?.destroy(new Error('EventStream connect timeout'));
-    }, 10_000);
+    const armIdle = () => {
+      if (this.esIdleTimer) clearTimeout(this.esIdleTimer);
+      this.esIdleTimer = setTimeout(() => this.scheduleReconnect(gen, `no data for ${ES_IDLE_MS / 1000}s`), ES_IDLE_MS);
+    };
+    // Connect-phase timeout: a connect that never answers must not hang.
+    this.esIdleTimer = setTimeout(() => this.scheduleReconnect(gen, 'connect timeout'), 10_000);
 
-    this.eventStreamReq = https.request(options, (res) => {
-      clearTimeout(connectTimer);
+    const req = https.request(options, (res) => {
+      if (gen !== this.esGen) { res.destroy(); return; }
       if (res.statusCode !== 200) {
-        console.log(`Hue: EventStream failed with status ${res.statusCode}`);
+        res.resume();
+        this.scheduleReconnect(gen, `status ${res.statusCode}`);
         return;
       }
 
       console.log('Hue: EventStream connected');
+      armIdle();
+      if (this.esAgeTimer) clearTimeout(this.esAgeTimer);
+      this.esAgeTimer = setTimeout(() => this.scheduleReconnect(gen, 'periodic refresh'), ES_MAX_AGE_MS);
       let buffer = '';
 
       res.on('data', (chunk: Buffer) => {
+        if (gen !== this.esGen) return;
+        this.esBackoffMs = 0;
+        armIdle();
         buffer += chunk.toString();
 
         // SSE messages are "\n\n"-separated blocks of lines. The bridge
@@ -455,24 +509,13 @@ export class HueDriver implements LightDriver {
         }
       });
 
-      res.on('end', () => {
-        console.log('Hue: EventStream disconnected, reconnecting...');
-        setTimeout(() => this.startListening(), 2000);
-      });
-
-      res.on('error', (err) => {
-        console.log('Hue: EventStream error:', err.message);
-        setTimeout(() => this.startListening(), 5000);
-      });
+      res.on('end', () => this.scheduleReconnect(gen, 'stream ended'));
+      res.on('error', (err) => this.scheduleReconnect(gen, `stream error: ${err.message}`));
     });
 
-    this.eventStreamReq.on('error', (err) => {
-      clearTimeout(connectTimer);
-      console.log('Hue: EventStream request error:', err.message);
-      setTimeout(() => this.startListening(), 5000);
-    });
-
-    this.eventStreamReq.end();
+    req.on('error', (err) => this.scheduleReconnect(gen, `request error: ${err.message}`));
+    this.eventStreamReq = req;
+    req.end();
   }
 
   private handleEventStreamData(events: any[]): void {
@@ -543,8 +586,12 @@ export class HueDriver implements LightDriver {
       hasData = true;
     }
 
-    if (v2Light.color_temperature !== undefined && v2Light.color_temperature.mirek) {
-      state.temperature = Math.round(1000000 / v2Light.color_temperature.mirek);
+    // A valid mirek means the bulb is in CT mode: the xy it reports alongside
+    // is only the locus point of that white. Report one mode, not both.
+    const ct = v2Light.color_temperature;
+    if (ct !== undefined && ct.mirek && ct.mirek_valid !== false) {
+      state.temperature = Math.round(1000000 / ct.mirek);
+      delete state.color;
       hasData = true;
     }
 
@@ -579,7 +626,12 @@ export class HueDriver implements LightDriver {
         s: Math.round(hueState.sat / 2.54),
       };
     }
-    if (hueState.ct !== undefined) {
+    // v1 reports xy AND ct whatever the mode; colormode says which one the
+    // bulb is actually showing. Keep only that one.
+    if (hueState.ct !== undefined && hueState.colormode === 'ct') {
+      state.temperature = Math.round(1000000 / hueState.ct);
+      delete state.color;
+    } else if (hueState.ct !== undefined && hueState.colormode === undefined && state.color === undefined) {
       state.temperature = Math.round(1000000 / hueState.ct);
     }
 

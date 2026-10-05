@@ -24,6 +24,9 @@ struct FxParams {
   uint8_t speed = 32;
   uint8_t smoothness = 200;
   uint8_t palette = 0;       // index into the palette bank
+  uint8_t black = 0;         // bends the black->colour ramp (gamma 1 + black/32):
+                             // black valleys grow, colours compress, still a gradient
+  uint8_t bri = 255;         // soap output brightness
 };
 
 extern FxParams fxParams;
