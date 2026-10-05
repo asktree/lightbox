@@ -15,6 +15,7 @@ import type { LightManager } from '../lib/light-manager.js';
 import type { HueDriver } from '../drivers/hue.js';
 import { fetchShadeState, sendShade, shadeStatus } from './shade.js';
 import { ShadeTap } from './shade-tap.js';
+import { RotaryReports, type RotarySource } from './rotary-reports.js';
 
 // The dial lives in the bedroom — it controls only the two bedroom strips.
 const TARGET_IDS = ['hue:3', 'hue:4'];   // spaceship floor, cockpit
@@ -38,6 +39,14 @@ const SHADE_TAP_WAIT_MS = 500;
 // The board needs about this long to send a command to the blind and to
 // show it in its state.
 const SHADE_CMD_SETTLE_MS = 1500;
+// While the dial turns, read its resource from the bridge in a fast loop
+// (rotary-reports.ts tells why). One read takes about 15 ms.
+const ROTARY_READ_GAP_MS = 50;       // pause between two reads
+const ROTARY_READ_FOR_MS = 1500;     // read this long after the last report
+const ROTARY_READ_TIMEOUT_MS = 300;
+// A held button 1 or 2 usually comes before a turn. Read while it is held,
+// but not longer than this.
+const ROTARY_READ_HOLD_MS = 8000;
 
 // For the log: the time from the bridge's own stamp on an event to its
 // arrival here. It includes the clock difference between the bridge and
@@ -65,6 +74,10 @@ export function startTapDial(lightManager: LightManager): void {
   // The state read that starts at each button-2 press.
   let shadeFetch: Promise<unknown> = Promise.resolve();
   const shadeTap = new ShadeTap();
+  const rotaryReports = new RotaryReports();
+  let rotaryReadUntil = 0;
+  let rotaryHoldUntil = 0;
+  let rotaryReading = false;
   // During a rotation burst, compound on OUR last-sent targets, not on the
   // light's reported state — echoes lag behind (transition ramps + event
   // latency) and reading them back mid-turn rubber-bands the value.
@@ -90,6 +103,8 @@ export function startTapDial(lightManager: LightManager): void {
       ? `tap-dial: blind modifier = button 2 (${shadeButtonId.slice(0, 8)}…)`
       : 'tap-dial: no button 2 on the bridge — blind chord disabled');
   });
+  // Learn the last report of the dial, so the first read in a turn can act.
+  void readRotary();
 
   hue.onRemoteEvent = (item) => {
     if (item.type === 'button') {
@@ -103,6 +118,7 @@ export function startTapDial(lightManager: LightManager): void {
           // Get a fresh position now, so the first dial tick (or the tap)
           // starts from it.
           shadeFetch = fetchShadeState().catch(() => {});
+          readRotaryWhileHeld();
         } else if (ev === 'short_release' || ev === 'long_release') {
           shadeDown = false;
           // A short press with no dial turn is a tap.
@@ -112,18 +128,30 @@ export function startTapDial(lightManager: LightManager): void {
         return;
       }
       if (item.id !== modifierButtonId) return;      // buttons 3-4 pass through
-      if (ev === 'initial_press') modifierDown = true;
+      if (ev === 'initial_press') { modifierDown = true; readRotaryWhileHeld(); }
       else if (ev === 'short_release' || ev === 'long_release') modifierDown = false;
       console.log(`tap-dial: button1 ${ev} (modifier ${modifierDown ? 'DOWN' : 'up'})`);
       return;
     }
-    if (item.type !== 'relative_rotary') return;
-    const rot = item.relative_rotary?.rotary_report?.rotation
-             ?? item.relative_rotary?.last_event?.rotation;
+    if (item.type === 'relative_rotary') onRotary(item, 'stream');
+  };
+
+  function onRotary(item: any, via: RotarySource): void {
+    const report = item.relative_rotary?.rotary_report;
+    const rot = report?.rotation ?? item.relative_rotary?.last_event?.rotation;
     const steps = Number(rot?.steps) || 0;
     if (!steps) return;
+    const verdict = rotaryReports.accept(String(item.id), report?.updated, via, Date.now());
+    if (!verdict.act) {
+      // The stream gave a report that a read had before. The log shows how
+      // much time the read saved.
+      if (verdict.why === 'duplicate' && via === 'stream' && verdict.firstVia === 'read') {
+        console.log(`tap-dial: rotary on the stream ${verdict.afterMs}ms after the read`);
+      }
+      return;
+    }
     const dir = rot.direction === 'clock_wise' ? 1 : -1;
-    console.log(`tap-dial: rotary ${dir > 0 ? '+' : '-'}${steps} -> ${shadeDown ? 'blind' : modifierDown ? 'kelvin' : 'brightness'}${bridgeLag(item.relative_rotary?.rotary_report?.updated)}${rot.duration !== undefined ? ` batch=${rot.duration}ms` : ''}`);
+    console.log(`tap-dial: rotary ${dir > 0 ? '+' : '-'}${steps} -> ${shadeDown ? 'blind' : modifierDown ? 'kelvin' : 'brightness'}${bridgeLag(report?.updated)}${rot.duration !== undefined ? ` batch=${rot.duration}ms` : ''} via=${via}${verdict.firstOfTurn ? ' first' : ''}`);
     // The bridge delivers rotary ticks in clumps. Replaying each tick as its
     // own command made a spin land as separate ramps ("two bursts") plus a
     // backlog. Accumulate the deltas and send one command per flush window:
@@ -133,7 +161,37 @@ export function startTapDial(lightManager: LightManager): void {
     else if (modifierDown) pendMired += -dir * steps * MIRED_PER_STEP;  // cw = cooler
     else pendBri += dir * steps * BRI_PER_STEP;                    // cw = brighter
     scheduleFlush();
-  };
+    rotaryReadUntil = Date.now() + ROTARY_READ_FOR_MS;
+    startRotaryReads();
+  }
+
+  async function readRotary(): Promise<void> {
+    const items = await hue!.getClipFast('relative_rotary', ROTARY_READ_TIMEOUT_MS);
+    for (const item of items ?? []) onRotary(item, 'read');
+  }
+
+  function readRotaryWhileHeld(): void {
+    rotaryHoldUntil = Date.now() + ROTARY_READ_HOLD_MS;
+    startRotaryReads();
+  }
+
+  function startRotaryReads(): void {
+    if (rotaryReading) return;
+    rotaryReading = true;
+    void (async () => {
+      try {
+        for (;;) {
+          const now = Date.now();
+          const held = (modifierDown || shadeDown) && now < rotaryHoldUntil;
+          if (now >= rotaryReadUntil && !held) break;
+          await readRotary();
+          await new Promise((r) => setTimeout(r, ROTARY_READ_GAP_MS));
+        }
+      } finally {
+        rotaryReading = false;
+      }
+    })();
+  }
 
   let pendBri = 0;
   let pendMired = 0;

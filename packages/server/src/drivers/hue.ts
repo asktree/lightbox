@@ -203,6 +203,35 @@ export class HueDriver implements LightDriver {
     });
   }
 
+  // Fast CLIP v2 GET for a short burst of reads (tap-dial). It keeps one
+  // connection open, so a read takes about 15 ms; a new connection for each
+  // read takes about 135 ms. The result is null after an error or a timeout.
+  private clipAgent = new https.Agent({ keepAlive: true, maxSockets: 1 });
+  getClipFast(rtype: string, timeoutMs: number): Promise<any[] | null> {
+    if (!this.config) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      const done = (v: any[] | null) => { clearTimeout(timer); resolve(v); };
+      const req = https.request({
+        hostname: this.config!.bridgeIp,
+        path: `/clip/v2/resource/${rtype}`,
+        method: 'GET',
+        agent: this.clipAgent,
+        headers: { 'hue-application-key': this.config!.username },
+        rejectUnauthorized: false,
+      }, (res) => {
+        let data = '';
+        res.on('data', (c) => { data += c; });
+        res.on('end', () => {
+          try { done(JSON.parse(data).data ?? null); } catch { done(null); }
+        });
+        res.on('error', () => done(null));
+      });
+      const timer = setTimeout(() => { req.destroy(); resolve(null); }, timeoutMs);
+      req.on('error', () => done(null));
+      req.end();
+    });
+  }
+
   private async buildV2Mapping(): Promise<void> {
     if (!this.config) return;
 
