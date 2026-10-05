@@ -166,30 +166,46 @@ blind driver.
 
 ## 6. Travel limits and direction
 
-### 6.1 With the remote (known method)
+### 6.1 With the remote (the method from the manual)
 
-The sequence comes from users of this model and from search snippets of the
-Yoolax manual. It is not fully verified. If the motor goes into a strange state,
-stop and wait about one minute before you try again.
+Source: the Yoolax manual 58630 (link below), section "16-channel remote
+control", pages 35 to 47. That manual is for the Matter motor. The remote is the
+same, so the same steps are expected for the Zigbee motor. They are not tested
+here yet. An earlier version of this section had steps for a different remote
+(hold up/down + ♥ for 6 s); do not use them.
 
-1. **Pair the remote again.** Hold the motor button for about 2 s, until the blind
-   jogs one time. Then press **P2** one time. Then press **P1** one time. The blind
-   jogs to confirm.
-2. **Start limit setup.** Hold **up/down + ♥** for 6 s, until the blind jogs one time.
-3. **Top limit.** Move the blind to the top position. Hold **up/down + ♥** for 2 s,
-   until the blind jogs two times.
-4. **Bottom limit.** Move the blind to the bottom position. Hold **up/down + ♥** for
-   2 s, until the blind jogs two times.
-5. If up and down are reversed, look in the remote manual for a direction-reverse
-   step. If you reverse the motor, send `invert` on the console to turn the
-   firmware flip off.
+The remote: top row **∧** (open), **□** (stop), **∨** (close). Second row: two
+round-arrow buttons for small steps. Third row: **CH−**, **♥** (favorite),
+**CH+**. **P1** (left) and **P2** (right) are in the battery compartment.
+
+With no limits, the blind does not stop by itself. Stop it with **□**.
+
+1. **Channel.** Press **CH−** or **CH+** to the channel of this blind.
+2. **Setting mode.** Hold **P1** for 3 s. The screen flashes `nn`. Setting mode
+   stops after 3 minutes with no button press, or when P1 is held for 5 s.
+3. **Top limit.** Move the blind to the top position. Press **∧ and ♥**
+   together. Two jogs: the limit is set. One jog: an old top limit was deleted;
+   press again to set it.
+4. **Bottom limit.** Move the blind to the bottom position. Press **∨ and ♥**
+   together. Two jogs: set. One jog: deleted; press again.
+5. Other key pairs in setting mode: **∧ and ∨** deletes both limits (and the
+   favorite). **∧ and □** unpairs the remote from the motor. The manual also has
+   pairs for direction, speed and the favorite position (pages 40 and 41).
+6. **Pair the remote again** (page 46), in setting mode: hold the motor button
+   for 2 s until the blind jogs one time. Press **P2** one time; the blind jogs
+   two times. Press **P1** one time.
+7. If you reverse the motor direction, send `invert` on the console to turn
+   the firmware flip off.
+
+To see if the limits are set (page 45): press the motor button one time. If the
+blind moves, the limits are set. Press it again to stop.
 
 Motor button reference: 2 s = sleep on/off, 6 s = Zigbee pairing (blue flash),
 16 s = **factory reset** (do not do this by accident; it also removes the remote
 pairing). Three orange flashes = asleep.
 
 Manuals: Zigbee manual is model 58628/58629 on the Yoolax product-manual page.
-Matter version (different motor, for reference):
+Matter version (different motor, same 16-channel remote; it has a text layer):
 https://cdn.shopify.com/s/files/1/0558/5109/0060/files/58630-Program_Matter_Shades_with_Remote.pdf
 
 ### 6.2 Over Zigbee (not tested — an experiment)
@@ -228,10 +244,47 @@ Rules to read the log:
   `ackMs` is 0 or more and there is no answer line, the blind refused the frame.
 - A read on the Basic cluster (0x0000) gives no line. The core keeps the answer.
 
-Suggested order: `POST /dp` to see which datapoints exist. Then read `0x0017`,
-`0x0007` and `0xF000`–`0xF003` on cluster 0x0102. Write only after that. Stop
-the motor (`POST /stop`) if it moves in a way that is not expected. Use the
-remote method if this fails.
+**Read results, 2026-10-05 (limits not set, blind did not move):**
+
+| Item | Value | Meaning |
+|---|---|---|
+| dp 1 (enum) | 1 | control: 0 open, 1 stop, 2 close |
+| dp 2 (value) | 0 | go-to position |
+| dp 3 (value) | 0 | position |
+| dp 5 (enum) | 0 | motor direction: 0 forward, 1 back |
+| dp 10 (value) | 0 | not known (travel time on other Tuya motors) |
+| dp 11 (enum) | 1 | not known |
+| dp 12 (bitmap) | 0 | fault |
+| dp 13 (value) | 81 | battery % |
+| dp 21 (value) | 35 | not known |
+| dp 107 (bool) | 0 | not known (a limit state on one other TS0301 motor) |
+| 0x0001/0x0021 | 0xa2 | battery, half-percent units (81 %) |
+| 0x0102/0x0000 | 0 | type: roller shade |
+| 0x0102/0x0007 | 0x03 | ConfigStatus: operational, online, **not closed loop** |
+| 0x0102/0x0008 | 0 | lift % |
+| 0x0102/0x0017 | 0x00 | Mode; the attribute exists (bit 0 reverse, bit 1 calibration) |
+| 0x0102/0xF000 | 0 (u8) | Tuya attribute, meaning not known |
+| 0x0102/0xF001 | 0 (bool) | Tuya attribute (calibration on other devices) |
+| 0x0102/0xF002 | 0 (enum8) | Tuya attribute (motor reversal on other devices) |
+| 0x0102/0xF003 | no answer | refused |
+| 0x0102/0xF006 | 0 (enum8) | Tuya attribute, meaning not known |
+
+The dump has no dp 7 and no dp 16. Read these again after the limits are set;
+a value that changed shows what holds the limit state.
+
+**Research, 2026-10-05:** no source documents a Zigbee command that sets the
+limits on this motor. Zigbee2MQTT has three TS0301 covers. `TS0301_cover_1`
+(A-OK AM25) has the same dp 1, 2, 3, 5, 13 as this motor and no limit
+datapoint. `TS0301_cover_2` uses dp 16 for limits but has a different datapoint
+layout. The plain `TS0301` entry (Yookee) uses only the standard cluster. A
+Zemismart ZM15B converter uses dp 107 (enum) as limit state and dp 118 for
+limit commands. Hubitat users of the Yoolax TS0301 set the limits with the
+remote.
+
+**Do not write a limit or calibration command with nobody at the blind.** A
+shade with no limits has no stop; a wrong command can roll it too far. Stop the
+motor (`POST /stop`) if it moves in a way that is not expected. The remote
+method (section 6.1) is the safe one.
 
 ## 7. Firmware
 
