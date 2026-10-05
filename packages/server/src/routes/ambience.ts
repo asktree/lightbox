@@ -5,6 +5,8 @@
 //              curtains run twinkle
 // Toggled by the screenbox panel (POST with its room's light ids); the mode
 // itself is just in-memory server state the panels can read back.
+// `lightsOnly: true` re-modes only the given lights. The shared mode and the
+// curtains stay as they are. Kea's `lb norm` uses it for the bedroom.
 import { Router } from 'express';
 import { lookup } from 'node:dns/promises';
 import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
@@ -226,6 +228,12 @@ export function createAmbienceRouter(lightManager: LightManager): Router {
         }
         changed.push(id);
       } catch { /* one flaky light shouldn't block the mode switch */ }
+    }
+
+    if (req.body?.lightsOnly === true) {
+      saveState(state);   // keep the per-light memory; the shared mode does not change
+      res.json({ mode: state.mode, changed, curtains: {} });
+      return;
     }
 
     state.mode = m;
