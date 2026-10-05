@@ -9,6 +9,10 @@
 # the stash, and compares each file with its trial. Copies of the local files
 # stay in ~/.local/state/lightbox/pulls/<time>/.
 #
+# An untracked local file that an incoming commit adds: if the two have the
+# same content, the script moves the local file into that folder, so git can
+# write its own. If the content differs, the script stops before any change.
+#
 # Usage: scripts/hearth-pull.sh        (run it in the checkout to update)
 set -u
 repo="$(cd "$(dirname "$0")/.." && pwd)"
@@ -53,6 +57,25 @@ while [ "$i" -lt "$n" ]; do
   i=$((i + 1))
 done
 
+# Untracked files that the incoming commits add.
+git ls-files --others --exclude-standard | sort > "$work/untracked.txt"
+comm -12 "$work/incoming.txt" "$work/untracked.txt" > "$work/untracked-overlap.txt"
+ufiles=()
+while IFS= read -r f; do
+  [ -n "$f" ] && ufiles+=("$f")
+done < "$work/untracked-overlap.txt"
+un="${#ufiles[@]}"
+i=0
+while [ "$i" -lt "$un" ]; do
+  f="${ufiles[$i]}"
+  if ! git show "origin/main:$f" | cmp -s - "$f"; then
+    echo "ABORT: the untracked file $f differs from the incoming file. Nothing is changed."
+    exit 5
+  fi
+  echo "untracked file equals the incoming file: $f"
+  i=$((i + 1))
+done
+
 sha=""
 if [ "$n" -gt 0 ]; then
   git stash push -q -m "$tag" -- "${files[@]}" || { echo "ABORT: stash failed"; exit 3; }
@@ -60,9 +83,22 @@ if [ "$n" -gt 0 ]; then
   [ -n "$sha" ] || { echo "ABORT: no stash entry. The local files are in $work/*.live"; exit 3; }
 fi
 
+i=0
+while [ "$i" -lt "$un" ]; do
+  f="${ufiles[$i]}"
+  mkdir -p "$work/untracked/$(dirname "$f")" && mv "$f" "$work/untracked/$f" || { echo "ABORT: cannot move $f"; exit 3; }
+  i=$((i + 1))
+done
+
 if ! git merge -q --ff-only origin/main; then
   echo "ABORT: fast-forward failed. Put the local changes back."
   [ -n "$sha" ] && git stash apply -q "$sha"
+  i=0
+  while [ "$i" -lt "$un" ]; do
+    f="${ufiles[$i]}"
+    mkdir -p "$(dirname "$f")" && mv "$work/untracked/$f" "$f"
+    i=$((i + 1))
+  done
   exit 4
 fi
 
