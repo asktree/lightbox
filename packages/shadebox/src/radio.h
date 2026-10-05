@@ -41,6 +41,9 @@ void tick();  // call every loop
 // Queue a command. Returns false if no blind is paired.
 bool submit(Kind kind, int arg = 0);
 
+// A command waits in the slot, or the last one has no acknowledge yet.
+bool busy();
+
 // Queue a raw frame (blind.h). It uses the same slot as a command. The
 // window stays open some seconds after the acknowledge, for the answer.
 bool submitProbe(const blind::Probe &probe);
