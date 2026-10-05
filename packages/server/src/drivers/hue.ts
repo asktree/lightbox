@@ -5,6 +5,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import https from 'https';
+import { RecentKeys, remoteEventKey } from '../lib/recent-keys.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -13,6 +14,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ES_IDLE_MS = 120_000;
 // Backstop: recycle the stream this often even if it looks alive.
 const ES_MAX_AGE_MS = 30 * 60_000;
+// A recycle opens the new stream first. The old stream stays open this long
+// after the new one is connected, and at most ES_DRAIN_MAX_MS in all.
+const ES_DRAIN_MS = 1_500;
+const ES_DRAIN_MAX_MS = 15_000;
 const CONFIG_DIR = join(__dirname, '../../data');
 const CONFIG_FILE = join(CONFIG_DIR, 'hue-config.json');
 
@@ -392,6 +397,7 @@ export class HueDriver implements LightDriver {
   async dispose(): Promise<void> {
     this.disposed = true;
     this.clearEsTimers();
+    this.endDrain();
     if (this.esReconnectTimer) { clearTimeout(this.esReconnectTimer); this.esReconnectTimer = undefined; }
     if (this.reachableTimer) { clearInterval(this.reachableTimer); this.reachableTimer = undefined; }
     // Close EventStream connection
@@ -431,6 +437,38 @@ export class HueDriver implements LightDriver {
     if (this.esAgeTimer) { clearTimeout(this.esAgeTimer); this.esAgeTimer = undefined; }
   }
 
+  // A planned recycle (silence, age) of a stream that can still be alive.
+  // With a plain reconnect the driver was deaf for 2 s or more each time
+  // (each 2 minutes when no light changes), and a Tap Dial press in that gap
+  // was lost: the bridge does not send an event again. So open the new
+  // stream first and keep the old one until the new one is connected. The
+  // bridge sends an event on the two streams in that time; remoteSeen drops
+  // the second copy of a button or dial event.
+  private esDrainGen = -1;
+  private esDrainReq?: ReturnType<typeof https.request>;
+  private esDrainTimer?: NodeJS.Timeout;
+  private remoteSeen = new RecentKeys();
+
+  private recycle(gen: number, reason: string): void {
+    if (gen !== this.esGen || this.disposed) return;   // stale connection or already handled
+    console.log(`Hue: EventStream recycle (${reason})`);
+    this.clearEsTimers();
+    this.endDrain();                                    // one old stream at most
+    this.esDrainGen = gen;
+    this.esDrainReq = this.eventStreamReq;
+    this.eventStreamReq = undefined;
+    // The old stream also goes away if the new one does not connect.
+    this.esDrainTimer = setTimeout(() => this.endDrain(), ES_DRAIN_MAX_MS);
+    this.openEventStream();
+  }
+
+  private endDrain(): void {
+    if (this.esDrainTimer) { clearTimeout(this.esDrainTimer); this.esDrainTimer = undefined; }
+    this.esDrainReq?.destroy();
+    this.esDrainReq = undefined;
+    this.esDrainGen = -1;
+  }
+
   private scheduleReconnect(gen: number, reason: string): void {
     if (gen !== this.esGen || this.disposed) return;   // stale connection or already handled
     this.esGen++;                                       // later events from this connection are ignored
@@ -465,7 +503,7 @@ export class HueDriver implements LightDriver {
 
     const armIdle = () => {
       if (this.esIdleTimer) clearTimeout(this.esIdleTimer);
-      this.esIdleTimer = setTimeout(() => this.scheduleReconnect(gen, `no data for ${ES_IDLE_MS / 1000}s`), ES_IDLE_MS);
+      this.esIdleTimer = setTimeout(() => this.recycle(gen, `no data for ${ES_IDLE_MS / 1000}s`), ES_IDLE_MS);
     };
     // Connect-phase timeout: a connect that never answers must not hang.
     this.esIdleTimer = setTimeout(() => this.scheduleReconnect(gen, 'connect timeout'), 10_000);
@@ -481,13 +519,22 @@ export class HueDriver implements LightDriver {
       console.log('Hue: EventStream connected');
       armIdle();
       if (this.esAgeTimer) clearTimeout(this.esAgeTimer);
-      this.esAgeTimer = setTimeout(() => this.scheduleReconnect(gen, 'periodic refresh'), ES_MAX_AGE_MS);
+      this.esAgeTimer = setTimeout(() => this.recycle(gen, 'periodic refresh'), ES_MAX_AGE_MS);
+      // The new stream is up: the old one of a recycle can go soon.
+      if (this.esDrainReq) {
+        if (this.esDrainTimer) clearTimeout(this.esDrainTimer);
+        this.esDrainTimer = setTimeout(() => this.endDrain(), ES_DRAIN_MS);
+      }
       let buffer = '';
 
       res.on('data', (chunk: Buffer) => {
-        if (gen !== this.esGen) return;
-        this.esBackoffMs = 0;
-        armIdle();
+        // Data counts from the current stream, and from the old stream of a
+        // recycle until that one is closed.
+        if (gen !== this.esGen && gen !== this.esDrainGen) return;
+        if (gen === this.esGen) {
+          this.esBackoffMs = 0;
+          armIdle();
+        }
         buffer += chunk.toString();
 
         // SSE messages are "\n\n"-separated blocks of lines. The bridge
@@ -524,6 +571,9 @@ export class HueDriver implements LightDriver {
 
       for (const item of event.data) {
         if (item.type === 'button' || item.type === 'relative_rotary') {
+          // The same event can come on two streams during a recycle.
+          const key = remoteEventKey(item);
+          if (key !== null && this.remoteSeen.seen(key)) continue;
           this.onRemoteEvent?.(item);
           continue;
         }
