@@ -88,7 +88,7 @@ system, and it runs on hearth.
 | Item | Facts |
 |---|---|
 | Blind | Yoolax motorized roller shade, **Zigbee** motor. Yoolax support confirmed this (order 111-3828171-0633027). Hubitat users report it as model **TS0301**. It speaks standard ZCL Window Covering (cluster `0x0102`) and Tuya `0xEF00`. Both work. Battery motor, so it is a "sleepy" end device: commands can take some seconds. |
-| Remote | Long white 16-channel remote with a screen. **P1/P2** are inside the battery compartment, above the AAA bay. |
+| Remote | Long white 16-channel remote with a screen. **P1/P2** are inside the battery compartment, above the AAA bay. (2026-10-05: Iggy calls it the "easyone" remote; the exact model is not known, see section 6.1.) |
 | Board | Seeed **XIAO ESP32-C6**. It is the Zigbee coordinator: it makes a one-device Zigbee network for the blind. |
 | Server | **hearth** (`hearth.local`), the always-on Mac. Lightbox runs there. |
 
@@ -168,11 +168,16 @@ blind driver.
 
 ### 6.1 With the remote (the method from the manual)
 
+**Open point, 2026-10-05:** Iggy says that her remote is the "easyone" remote
+with a small screen, and that it is not the 16-channel remote in the pictures
+of this manual. No manual for an "easyone" remote was found. Get a photo or the
+model text of her remote, and find its steps, before she presses key pairs.
+The steps below are for the Yoolax 16-channel remote only.
+
 Source: the Yoolax manual 58630 (link below), section "16-channel remote
-control", pages 35 to 47. That manual is for the Matter motor. The remote is the
-same, so the same steps are expected for the Zigbee motor. They are not tested
-here yet. An earlier version of this section had steps for a different remote
-(hold up/down + ♥ for 6 s); do not use them.
+control", pages 35 to 47. That manual is for the Matter motor. They are not
+tested here. An earlier version of this section had steps from user reports
+(hold up/down + ♥ for 6 s); their source remote is not known.
 
 The remote: top row **∧** (open), **□** (stop), **∨** (close). Second row: two
 round-arrow buttons for small steps. Third row: **CH−**, **♥** (favorite),
