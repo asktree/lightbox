@@ -78,6 +78,11 @@ restart needed for .ts/.tsx edits.
 **Config/data changes** (e.g. `tuya-devices.json`, routes added while the
 server had an import error): run `pnpm redev`.
 
+**Updates on hearth**: the live checkout on hearth has local changes that
+are not committed. Do not use `git pull` there. Run `scripts/hearth-pull.sh`
+in that checkout. It fast-forwards to `origin/main` and keeps the local
+changes. It stops before any change if a file has a merge conflict.
+
 ## State & Log Locations (never /tmp)
 
 macOS purges /tmp after ~3 days — durable state and logs must not live there.
