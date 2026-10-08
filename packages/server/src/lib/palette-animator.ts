@@ -264,6 +264,23 @@ export class PaletteAnimator extends EventEmitter {
   }
 
   /**
+   * Pause every playing palette that drives one of these lights. A light is
+   * driven when it has a position on the room's track and is not excluded.
+   * Returns the ids of the rooms that were paused.
+   */
+  async pauseRoomsWithLights(lightIds: string[]): Promise<string[]> {
+    const paused: string[] = [];
+    for (const state of this.roomStates.values()) {
+      if (!state.isPlaying) continue;
+      const drives = lightIds.some((id) => id in state.positions && !state.excludedLightIds.has(id));
+      if (!drives) continue;
+      await this.pause(state.roomId);
+      paused.push(state.roomId);
+    }
+    return paused;
+  }
+
+  /**
    * Set animation speed for a room
    */
   async setSpeed(roomId: string, secondsPerNode: number): Promise<void> {

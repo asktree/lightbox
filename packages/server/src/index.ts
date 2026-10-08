@@ -202,8 +202,8 @@ async function start() {
 
     // Hue Tap Dial: bare rotation = brightness; button-1-held rotation =
     // kelvin; button-2-held rotation = the blind. Buttons 3-4 keep their
-    // bridge behavior.
-    startTapDial(lightManager);
+    // bridge behavior. A kelvin turn pauses the palette on those lights.
+    startTapDial(lightManager, paletteAnimator);
 
     // Day log: 5-minute snapshots of the room settings, for the natural
     // daily-curve project. Read-only.

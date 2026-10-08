@@ -1,7 +1,8 @@
 // Hue Tap Dial -> stack control.
 //   bare rotation                 = brightness for the lights that are on
 //   rotation while button 1 held  = kelvin: shift each CT-mode light (and
-//                                   the curtains twinkle) along the locus
+//                                   the curtains twinkle) along the locus,
+//                                   and pause any palette that drives them
 //   rotation while button 2 held  = the blind: the chord cancels any
 //                                   movement, then the dial sets the openness
 //   button 2 tapped alone         = the blind: go to the far end, then
@@ -13,6 +14,7 @@
 // Clockwise raises the value in all modes (brighter / cooler / more open).
 import type { LightManager } from '../lib/light-manager.js';
 import type { HueDriver } from '../drivers/hue.js';
+import type { PaletteAnimator } from '../lib/palette-animator.js';
 import { fetchShadeState, sendShade, shadeStatus } from './shade.js';
 import { ShadeTap } from './shade-tap.js';
 import { RotaryReports, type RotarySource } from './rotary-reports.js';
@@ -56,7 +58,7 @@ function bridgeLag(updated: unknown): string {
   return Number.isNaN(t) ? '' : ` lag=${Date.now() - t}ms`;
 }
 
-export function startTapDial(lightManager: LightManager): void {
+export function startTapDial(lightManager: LightManager, paletteAnimator: PaletteAnimator): void {
   const hue = lightManager.getDriverByBrand<HueDriver>('hue');
   if (!hue) return;
 
@@ -307,7 +309,13 @@ export function startTapDial(lightManager: LightManager): void {
   }
 
   function shiftKelvin(deltaMired: number): void {
-    for (const light of targets()) {
+    const lights = targets();
+    // A kelvin turn means white light. Stop the palette first, so that its
+    // next tick does not paint a color over the new kelvin.
+    void paletteAnimator.pauseRoomsWithLights(lights.map((l) => l.id)).then((rooms) => {
+      if (rooms.length) console.log(`tap-dial: kelvin paused the palette in ${rooms.join(', ')}`);
+    });
+    for (const light of lights) {
       const e = sessionFor(light.id);
       const curMired = e.mired
         ?? (light.state.temperature !== undefined ? 1e6 / light.state.temperature : 1e6 / 2700);
