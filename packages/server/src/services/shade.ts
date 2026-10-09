@@ -36,30 +36,58 @@ export interface ShadeState {
 }
 
 // macOS getaddrinfo stalls ~5s on .local names (see ambience.ts) — resolve
-// IPv4 explicitly and cache. A failed request drops the cache entry.
+// IPv4 explicitly and cache. The board keeps its IP, but it may not answer
+// mDNS while its radio is on Zigbee. So a failed request does not drop the
+// IP: it only marks it for a new lookup in the background. A request never
+// waits on a lookup while an old IP is known (IGG-1344).
+const IP_FRESH_MS = 10 * 60_000;
+const LOOKUP_TIMEOUT_MS = 3_000;
 let cachedIp: { ip: string; at: number } | null = null;
+let lookingUp: Promise<string> | null = null;
+
+function lookupIp(): Promise<string> {
+  lookingUp ??= Promise.race([
+    lookup(HOST, { family: 4 }).then(({ address }) => address),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`mDNS lookup of ${HOST} timed out`)), LOOKUP_TIMEOUT_MS)),
+  ])
+    .then((ip) => { cachedIp = { ip, at: Date.now() }; return ip; })
+    .finally(() => { lookingUp = null; });
+  return lookingUp;
+}
+
 async function resolveIp(): Promise<string> {
-  if (cachedIp && Date.now() - cachedIp.at < 10 * 60_000) return cachedIp.ip;
-  const { address } = await lookup(HOST, { family: 4 });
-  cachedIp = { ip: address, at: Date.now() };
-  return address;
+  if (!cachedIp) return lookupIp();
+  if (Date.now() - cachedIp.at >= IP_FRESH_MS) lookupIp().catch(() => {});
+  return cachedIp.ip;
 }
 
 let lastState: ShadeState | null = null;
 let lastStateAt = 0;
 let lastError: string | null = null;
 
-async function request(method: 'GET' | 'POST', path: string): Promise<ShadeState> {
+// `cancel`, plus a timeout. (AbortSignal.any needs Node 20.3.)
+function withTimeout(cancel: AbortSignal, ms: number): AbortSignal {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(new DOMException('The operation timed out.', 'TimeoutError')), ms);
+  const stop = () => { clearTimeout(timer); ac.abort(cancel.reason); };
+  if (cancel.aborted) stop(); else cancel.addEventListener('abort', stop, { once: true });
+  ac.signal.addEventListener('abort', () => clearTimeout(timer), { once: true });
+  return ac.signal;
+}
+
+async function request(method: 'GET' | 'POST', path: string, cancel?: AbortSignal): Promise<ShadeState> {
   try {
     const ip = await resolveIp();
-    const r = await fetch(`http://${ip}${path}`, { method, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    const signal = cancel ? withTimeout(cancel, REQUEST_TIMEOUT_MS) : AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+    const r = await fetch(`http://${ip}${path}`, { method, signal });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     lastState = (await r.json()) as ShadeState;
     lastStateAt = Date.now();
     lastError = null;
     return lastState;
   } catch (err) {
-    cachedIp = null;
+    // Look up the IP again in the background, in case the board has a new one.
+    if (cachedIp && !cancel?.aborted) cachedIp.at = 0;
     lastError = err instanceof Error ? err.message : String(err);
     throw err;
   }
@@ -86,6 +114,9 @@ function targetOf(cmd: Exclude<ShadeCommand, { kind: 'stop' }>): number {
 
 let pending: { cmd: ShadeCommand; since: number } | null = null;
 let pumping = false;
+// Cancels the command request in flight. A newer command does not wait for
+// an old request to time out: the newest intent goes out at once.
+let inflight: AbortController | null = null;
 
 // One position check runs at a time. A newer command starts a new one.
 let positionTimer: NodeJS.Timeout | null = null;
@@ -138,7 +169,8 @@ async function pump(): Promise<void> {
       const job = pending;
       try {
         // The reply has the position at the start of the move.
-        const start = await request('POST', pathFor(job.cmd));
+        inflight = new AbortController();
+        const start = await request('POST', pathFor(job.cmd), inflight.signal);
         if (pending === job) {
           pending = null;
           schedulePositionCheck(job.cmd, moveTimeMs(job.cmd, start), POSITION_TRIES);
@@ -151,6 +183,8 @@ async function pump(): Promise<void> {
         } else {
           await new Promise((r) => setTimeout(r, RETRY_MS));
         }
+      } finally {
+        inflight = null;
       }
     }
   } finally {
@@ -163,6 +197,7 @@ export function sendShade(cmd: ShadeCommand): void {
   if (positionTimer) { clearTimeout(positionTimer); positionTimer = null; }
   positionGen++;
   pending = { cmd, since: Date.now() };
+  inflight?.abort();
   void pump();
 }
 

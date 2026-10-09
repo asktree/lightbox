@@ -123,8 +123,10 @@ export function startTapDial(lightManager: LightManager, paletteAnimator: Palett
           readRotaryWhileHeld();
         } else if (ev === 'short_release' || ev === 'long_release') {
           shadeDown = false;
-          // A short press with no dial turn is a tap.
-          if (ev === 'short_release' && !shadeRotated) void tapShade();
+          // A press with no dial turn is a tap. A slow press ends in
+          // long_release, and it is also a tap (IGG-1344: most presses were
+          // dropped because only short_release counted).
+          if (!shadeRotated) void tapShade();
         }
         console.log(`tap-dial: button2 ${ev} (blind ${shadeDown ? 'DOWN' : 'up'})${bridgeLag(item.button?.button_report?.updated)}`);
         return;
@@ -235,6 +237,8 @@ export function startTapDial(lightManager: LightManager, paletteAnimator: Palett
         shadePollTimer = null;
         return;
       }
+      // Do not compete with a command that is not delivered yet.
+      if (shadeStatus().pending) return;
       fetchShadeState().catch(() => {});
     }, SHADE_POLL_MS);
   }
