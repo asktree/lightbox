@@ -104,6 +104,8 @@ importers:
         specifier: ^6.0.0
         version: 6.4.1(@types/node@25.0.3)(jiti@1.21.7)(tsx@4.21.0)
 
+  packages/igled: {}
+
   packages/music-scraper: {}
 
   packages/musicbox:
@@ -197,6 +199,8 @@ importers:
 
   packages/screenbox: {}
 
+  packages/screenbox-art: {}
+
   packages/server:
     dependencies:
       '@abandonware/noble':
@@ -248,6 +252,8 @@ importers:
       vitest:
         specifier: ^4.1.10
         version: 4.1.10(@types/node@25.0.3)(vite@6.4.1(@types/node@25.0.3)(jiti@1.21.7)(tsx@4.21.0))
+
+  packages/shadebox: {}
 
   packages/shared:
     devDependencies:

@@ -126,6 +126,12 @@ resume seamlessly.
    configurable: `'spotify'` (autopilot state file) or `'local'` (thin
    player pushing to :3002/api/playback). A supervisor reconciles
    `wantActive` every 5s and rebuilds dead DTLS streams.
+   **Remote audio output**: when Spotify plays on a different computer, run
+   `pnpm audio:report` on that computer (`scraper/output_reporter.py`,
+   standard library only). It posts the output device and CoreAudio latency
+   to `/api/audio-latency/remote` each 3 s. While a report is fresh (15 s),
+   stem-sync and `/api/playhead` use it in place of the server's own output
+   (`services/audio-output.ts`). Stop the script when the music moves back.
 4. **Twinklybox** follows :3002 playback + envelopes (or mic/syscap live
    audio) into WLED/DDP patterns.
 
