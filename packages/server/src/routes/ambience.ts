@@ -50,6 +50,15 @@ export function kelvinToRgbBytes(k: number): { r: number; g: number; b: number }
   return { r: Math.round((r / m) * 255), g: Math.round((g / m) * 255), b: Math.round((b / m) * 255) };
 }
 
+// A wheel color {h, s} as 0-255 linear RGB bytes, the same way as
+// kelvinToRgbBytes. The peak channel is 255.
+export function hsToRgbBytes(h: number, sat: number): { r: number; g: number; b: number } {
+  let { r, g, b } = xyToLinearRgb(hsToXy(h, sat));
+  r = Math.max(0, r); g = Math.max(0, g); b = Math.max(0, b);
+  const m = Math.max(r, g, b, 1e-6);
+  return { r: Math.round((r / m) * 255), g: Math.round((g / m) * 255), b: Math.round((b / m) * 255) };
+}
+
 export async function postRoutine(body: object, hosts: readonly string[] = CURTAIN_HOSTS): Promise<Record<string, boolean>> {
   const results: Record<string, boolean> = {};
   await Promise.all(hosts.map(async (host) => {
@@ -83,7 +92,9 @@ export function soapBody(): object {
 export function twinkleBody(): object {
   return {
     kind: 'twinkle',
-    rgb: kelvinToRgbBytes(state.curtainsKelvin),
+    rgb: state.curtainsColor
+      ? hsToRgbBytes(state.curtainsColor.h, state.curtainsColor.s)
+      : kelvinToRgbBytes(state.curtainsKelvin),
     val: state.curtainsVal,
     periodMs: state.curtainsPeriodMs,
     cut: state.curtainsCut,
@@ -117,6 +128,7 @@ interface AmbienceState {
   lastColor: Record<string, { h: number; s: number }>;
   lastKelvin: Record<string, number>;
   curtainsKelvin: number;    // the twinkle dots' blackbody color (normal mode)
+  curtainsColor: { h: number; s: number } | null;  // a wheel hue; overrides kelvin when set
   curtainsVal: number;       // the twinkle dots' peak brightness, 0-255
   curtainsPeriodMs: number;  // one twinkle fade in->out
   curtainsCut: boolean;      // cut off-hue fade-tail frames on the box
@@ -135,7 +147,7 @@ function loadState(): AmbienceState {
     if (s.mode === 'color' || s.mode === 'normal') {
       return {
         mode: s.mode, lastColor: s.lastColor ?? {}, lastKelvin: s.lastKelvin ?? {},
-        curtainsKelvin: s.curtainsKelvin ?? 2900, curtainsVal: s.curtainsVal ?? 200,
+        curtainsKelvin: s.curtainsKelvin ?? 2900, curtainsColor: s.curtainsColor ?? null, curtainsVal: s.curtainsVal ?? 200,
         curtainsPeriodMs: s.curtainsPeriodMs ?? 6000, curtainsCut: s.curtainsCut ?? true,
         soapSpeed: s.soapSpeed ?? 32, soapSmoothness: s.soapSmoothness ?? 200, soapPalette: s.soapPalette ?? 'default',
         soapBlack: s.soapBlack ?? 0, soapBri: s.soapBri ?? 255,
@@ -143,7 +155,7 @@ function loadState(): AmbienceState {
     }
   } catch { /* first run / unreadable — start fresh */ }
   return {
-    mode: 'color', lastColor: {}, lastKelvin: {}, curtainsKelvin: 2900, curtainsVal: 200, curtainsPeriodMs: 6000, curtainsCut: true,
+    mode: 'color', lastColor: {}, lastKelvin: {}, curtainsKelvin: 2900, curtainsColor: null, curtainsVal: 200, curtainsPeriodMs: 6000, curtainsCut: true,
     soapSpeed: 32, soapSmoothness: 200, soapPalette: 'default', soapBlack: 0, soapBri: 255,
   };
 }
@@ -176,6 +188,8 @@ export function saveStateDebounced(): void {
 // Only in normal mode — in color mode the curtains show soap.
 export async function shiftCurtainsKelvin(deltaMired: number): Promise<void> {
   if (state.mode !== 'normal') return;
+  // A wheel hue is not on the blackbody locus. Keep it.
+  if (state.curtainsColor) return;
   const m = 1e6 / state.curtainsKelvin + deltaMired;
   const k = Math.round(1e6 / Math.max(1e6 / KELVIN_MAX, Math.min(1e6 / KELVIN_MIN, m)));
   if (k === state.curtainsKelvin) return;
@@ -188,11 +202,12 @@ export function createAmbienceRouter(lightManager: LightManager): Router {
   const router = Router();
 
   const curtainsJson = () => ({
-    kelvin: state.curtainsKelvin, val: state.curtainsVal, periodMs: state.curtainsPeriodMs, cut: state.curtainsCut,
+    kelvin: state.curtainsKelvin, color: state.curtainsColor, val: state.curtainsVal, periodMs: state.curtainsPeriodMs, cut: state.curtainsCut,
   });
   router.get('/', (_req, res) => res.json({ mode: state.mode, curtainsKelvin: state.curtainsKelvin, curtainsVal: state.curtainsVal, curtains: curtainsJson() }));
 
-  // The twinkle dots: color (kelvin, along the blackbody locus), peak
+  // The twinkle dots: color (kelvin, along the blackbody locus, or h + s
+  // from the client's wheel pin — kelvin clears the wheel color), peak
   // brightness (val 0-255), fade period (periodMs) and the tail cut (cut) —
   // screenbox drags the curtains pin / its rail rows. Applies live; save is
   // debounced so a drag doesn't hammer the disk.
@@ -201,11 +216,18 @@ export function createAmbienceRouter(lightManager: LightManager): Router {
     const v = Number(req.body?.val);
     const p = Number(req.body?.periodMs);
     const cut = req.body?.cut;
-    if (!Number.isFinite(k) && !Number.isFinite(v) && !Number.isFinite(p) && typeof cut !== 'boolean') {
-      res.status(400).json({ error: 'kelvin, val, periodMs and/or cut required' });
+    const h = Number(req.body?.h);
+    const sat = Number(req.body?.s);
+    const hasHs = Number.isFinite(h) && Number.isFinite(sat);
+    if (!hasHs && !Number.isFinite(k) && !Number.isFinite(v) && !Number.isFinite(p) && typeof cut !== 'boolean') {
+      res.status(400).json({ error: 'h+s, kelvin, val, periodMs and/or cut required' });
       return;
     }
-    if (Number.isFinite(k)) state.curtainsKelvin = Math.max(KELVIN_MIN, Math.min(KELVIN_MAX, Math.round(k)));
+    if (Number.isFinite(k)) {
+      state.curtainsKelvin = Math.max(KELVIN_MIN, Math.min(KELVIN_MAX, Math.round(k)));
+      state.curtainsColor = null;
+    }
+    if (hasHs) state.curtainsColor = { h: ((h % 360) + 360) % 360, s: Math.max(0, Math.min(100, sat)) };
     if (Number.isFinite(v)) state.curtainsVal = Math.max(0, Math.min(255, Math.round(v)));
     if (Number.isFinite(p)) state.curtainsPeriodMs = Math.max(500, Math.min(60000, Math.round(p)));
     if (typeof cut === 'boolean') state.curtainsCut = cut;

@@ -1,7 +1,7 @@
 import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import { motion } from 'framer-motion';
 import type { Light } from '@lightbox/shared';
-import { findClosestPointOnTrack } from '@lightbox/shared';
+import { findClosestPointOnTrack, blackbodyXy, xyToHs } from '@lightbox/shared';
 import { useLightsStore } from '../stores/lights';
 import { usePalettesStore, useRoomPlayState, useRoomPositions } from '../stores/palettes';
 import { useDebugStore } from '../stores/debug';
@@ -49,6 +49,17 @@ function hsvToHex(h: number, s: number, v: number = 100): string {
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 }
 
+// The curtains pin drags the twinkle hue of both curtain boxes together.
+// It is not a light, so it uses its own drag id.
+const CURTAINS_ID = '__curtains__';
+const CURTAINS_SEND_MS = 80;
+
+interface CurtainsTwinkle {
+  mode: 'color' | 'normal';
+  kelvin: number;
+  color: { h: number; s: number } | null;
+}
+
 export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect, roomId, previewPaletteId, kelvinBarRef }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -66,6 +77,57 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect,
   const editPaletteMode = usePalettesStore((s) => s.editPaletteMode);
 
   const diagnostics = useDebugStore((s) => s.diagnostics);
+
+  // Twinkle state of the curtains. The pin shows only in normal mode,
+  // because in color mode the curtains run soap, not twinkle.
+  const [curtains, setCurtains] = useState<CurtainsTwinkle | null>(null);
+  const curtainsSendRef = useRef<{ last: number; pending: { h: number; s: number } | null; timer: number | null }>(
+    { last: 0, pending: null, timer: null },
+  );
+  const draggingRef = useRef<string | null>(null);
+  draggingRef.current = dragging;
+
+  useEffect(() => {
+    let alive = true;
+    const load = () => {
+      if (draggingRef.current === CURTAINS_ID) return;
+      fetch('/api/ambience', { signal: AbortSignal.timeout(3000) })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((j) => {
+          if (!alive || !j?.curtains || draggingRef.current === CURTAINS_ID) return;
+          setCurtains({ mode: j.mode, kelvin: j.curtains.kelvin, color: j.curtains.color ?? null });
+        })
+        .catch(() => {});
+    };
+    load();
+    const t = window.setInterval(load, 5000);
+    return () => { alive = false; window.clearInterval(t); };
+  }, []);
+
+  const flushCurtains = useCallback(() => {
+    const q = curtainsSendRef.current;
+    if (q.timer !== null) { window.clearTimeout(q.timer); q.timer = null; }
+    if (!q.pending) return;
+    const body = q.pending;
+    q.pending = null;
+    q.last = Date.now();
+    fetch('/api/ambience/twinkle', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(3000),
+    }).catch(() => {});
+  }, []);
+
+  // Send at most one twinkle update for each CURTAINS_SEND_MS. The last
+  // position of a drag always goes out.
+  const sendCurtainsColor = useCallback((color: { h: number; s: number }) => {
+    const q = curtainsSendRef.current;
+    q.pending = color;
+    const wait = CURTAINS_SEND_MS - (Date.now() - q.last);
+    if (wait <= 0) flushCurtains();
+    else if (q.timer === null) q.timer = window.setTimeout(flushCurtains, wait);
+  }, [flushCurtains]);
 
   // Get room-specific palette state - split for efficiency
   const { activePaletteId } = useRoomPlayState(roomId);
@@ -241,6 +303,15 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect,
   const handleMouseMove = useCallback((e: React.MouseEvent | MouseEvent) => {
     if (!dragging || !containerRef.current) return;
 
+    if (dragging === CURTAINS_ID) {
+      const rect = containerRef.current.getBoundingClientRect();
+      const hs = positionToHs(e.clientX - rect.left, e.clientY - rect.top);
+      const color = { h: Math.round(hs.h), s: Math.round(hs.s) };
+      setCurtains((c) => (c ? { ...c, color } : c));
+      sendCurtainsColor(color);
+      return;
+    }
+
     // Dragged into the kelvin bar → switch to CT mode (temperature-capable
     // lights only; the bar hands the light back when dragged into the wheel).
     const bar = kelvinBarRef?.current;
@@ -263,14 +334,19 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect,
 
     const { h, s } = positionToHs(x, y);
     setLightState(dragging, { color: { h: Math.round(h), s: Math.round(s) } }, 50);
-  }, [dragging, positionToHs, setLightState, lights, kelvinBarRef]);
+  }, [dragging, positionToHs, setLightState, lights, kelvinBarRef, sendCurtainsColor]);
 
   const handleMouseUp = useCallback(() => {
+    if (dragging === CURTAINS_ID) {
+      flushCurtains();
+      setDragging(null);
+      return;
+    }
     if (dragging) {
       stopControlling(dragging);
       setDragging(null);
     }
-  }, [dragging, stopControlling]);
+  }, [dragging, stopControlling, flushCurtains]);
 
   const handleMouseDown = useCallback((lightId: string) => {
     startControlling(lightId);
@@ -305,6 +381,11 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect,
 
   // When palette is active, don't show individual light pins (they're on the track)
   const showLightPins = !activePalette;
+  const showCurtainsPin = showLightPins && curtains?.mode === 'normal';
+  // With no wheel color yet, place the pin at the hue of the twinkle kelvin.
+  const curtainsHs = curtains
+    ? curtains.color ?? xyToHs(blackbodyXy(curtains.kelvin))
+    : { h: 0, s: 0 };
 
   return (
     <div
@@ -420,7 +501,49 @@ export function ColorWheel({ lights, size = 300, selectedLightId, onLightSelect,
         );
       })}
 
-      {colorLights.length === 0 && !isEditing && !activePalette && (
+      {/* Curtains pin - one pin for both curtain boxes (normal mode) */}
+      {showCurtainsPin && (() => {
+        const pos = hsToPosition(curtainsHs.h, curtainsHs.s);
+        const isDragging = dragging === CURTAINS_ID;
+        return (
+          <div
+            onMouseDown={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setDragging(CURTAINS_ID);
+            }}
+            className={`absolute flex items-center justify-center cursor-grab active:cursor-grabbing ${
+              isDragging ? 'z-20' : 'z-10'
+            }`}
+            style={{
+              left: 0,
+              top: 0,
+              width: pinRadius * 2,
+              height: pinRadius * 2,
+              transform: `translate(${pos.x - pinRadius}px, ${pos.y - pinRadius}px)`,
+              transition: isDragging ? 'none' : 'transform 100ms ease-out',
+            }}
+          >
+            <div
+              className="w-full h-full rounded-md border-white border-[3px]"
+              style={{
+                backgroundColor: hsvToHex(curtainsHs.h, curtainsHs.s),
+                boxShadow: `0 2px 8px rgba(0,0,0,0.3)`,
+              }}
+            />
+            {!isDragging && (
+              <div
+                className="absolute -top-5 left-1/2 -translate-x-1/2 text-[10px] text-white whitespace-nowrap pointer-events-none z-30"
+                style={{ textShadow: '0 1px 2px rgba(0,0,0,0.5), 0 0 6px rgba(0,0,0,0.3)' }}
+              >
+                Curtains
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {colorLights.length === 0 && !showCurtainsPin && !isEditing && !activePalette && (
         <div className="absolute inset-0 flex items-center justify-center text-zinc-500 text-sm pointer-events-none">
           No color lights on
         </div>
