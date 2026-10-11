@@ -26,7 +26,8 @@ import {
   type LightSnapshot,
 } from '../drivers/hue-rest-pulse.js';
 import { getSharedEntertainmentDriver } from '../drivers/hue-entertainment.js';
-import { getPlayheadOffsetMs, getLatencyRegistry } from './latency-calibration.js';
+import { getPlayheadOffsetMs, getLightLatencyMs, getLatencyRegistry } from './latency-calibration.js';
+import { resolveAudioOutput, type AudioOutput } from './audio-output.js';
 import { STEMS, parseEnvelope, type Stem, type Envelope } from './envelope-parse.js';
 import type { PaletteAnimator } from '../lib/palette-animator.js';
 
@@ -330,15 +331,15 @@ function readPlayhead(): Playhead {
   }
 }
 
-// The public playhead contract (GET /api/playhead): the ear-time playhead.
-// earPosS = source position minus the audio-output latency of the *current*
-// output device, so consumers (twinklybox, future fixtures) never need to
-// know about speakers — they just add their own command→photon latency.
-// A measured registry value beats the CoreAudio-reported one, but only when
-// it was measured on the device that's playing right now; a measurement
-// taken on other speakers doesn't transfer.
-export function readEarPlayhead() {
-  const ph = readPlayhead();
+// The audio output that plays now: a fresh report from a remote computer, or
+// the local reading from the autopilot state. Cached for 1 s, because the
+// drive loop asks at 50Hz and the sources change each few seconds.
+const AUDIO_OUT_CACHE_MS = 1000;
+let audioOutCache: { atMs: number; value: AudioOutput } | null = null;
+
+function currentAudioOutput(): AudioOutput {
+  const now = Date.now();
+  if (audioOutCache && now - audioOutCache.atMs < AUDIO_OUT_CACHE_MS) return audioOutCache.value;
   let device: string | null = null;
   let reportedMs: number | null = null;
   try {
@@ -346,20 +347,35 @@ export function readEarPlayhead() {
     device = typeof raw.output_device_name === 'string' ? raw.output_device_name : null;
     reportedMs = typeof raw.output_latency_ms === 'number' ? raw.output_latency_ms : null;
   } catch { /* no autopilot state — no device info */ }
-  const measured = getLatencyRegistry().audio;
-  const measuredApplies = !!measured && !!device && measured.outputDeviceName === device;
-  const latencyMs = measuredApplies ? measured!.latencyMs : reportedMs ?? 0;
+  const value = resolveAudioOutput({ device, reportedMs }, getLatencyRegistry().audio, now);
+  audioOutCache = { atMs: now, value };
+  return value;
+}
+
+// Per-light playhead correction, in ms of playhead to subtract: the audio
+// latency of the output that plays now, minus this light's measured
+// command→photon latency. When the current output is unknown, use the
+// registry pair. config.offsetMs is only a fallback for unmeasured lights.
+function effectiveOffsetMs(rid: string, out: AudioOutput): number {
+  const lightMs = getLightLatencyMs(rid);
+  if (lightMs != null && out.latencySource !== 'none') return Math.round(out.latencyMs - lightMs);
+  return getPlayheadOffsetMs(rid) ?? config.offsetMs;
+}
+
+// The public playhead contract (GET /api/playhead): the ear-time playhead.
+// earPosS = source position minus the audio-output latency of the *current*
+// output device, so consumers (twinklybox, future fixtures) never need to
+// know about speakers — they just add their own command→photon latency.
+export function readEarPlayhead() {
+  const ph = readPlayhead();
+  const out = currentAudioOutput();
   return {
     trackId: ph.trackId,
     posS: ph.posS,
-    earPosS: ph.posS - latencyMs / 1000,
+    earPosS: ph.posS - out.latencyMs / 1000,
     playing: ph.playing,
     source: config.playheadSource,
-    audio: {
-      latencyMs,
-      latencySource: measuredApplies ? 'measured' : reportedMs != null ? 'reported' : 'none',
-      device,
-    },
+    audio: out,
   };
 }
 
@@ -379,15 +395,13 @@ function tick(): void {
   }
 
   const env = envelope && envelope.trackId === ph.trackId ? envelope : null;
+  const audioOut = currentAudioOutput();
 
   for (const rt of runtimes) {
     if (rt.streamChannelId === null) continue;
     // Per-light playhead perspective: render the moment this light's photons
-    // will coincide with the sound at the ear. Measured offsets (audio-out
-    // latency minus this light's command→photon latency) come from the
-    // calibration registry; config.offsetMs is only a fallback for
-    // unmeasured lights.
-    const offMs = getPlayheadOffsetMs(rt.binding.rid) ?? config.offsetMs;
+    // will coincide with the sound at the ear.
+    const offMs = effectiveOffsetMs(rt.binding.rid, audioOut);
     const posS = ph.posS - offMs / 1000;
     const idx = env ? Math.max(0, Math.min(env.numSamples - 1, Math.floor(posS * env.sr))) : 0;
     let target = 0;
@@ -655,6 +669,7 @@ export function getStemSyncStatus() {
     try { return getSharedEntertainmentDriver(); } catch { return null; }
   })();
   const ph = readPlayhead();
+  const audioOut = currentAudioOutput();
   return {
     active,
     wantActive, // false+wantActive=true reads as "reconnecting" in the UI
@@ -663,6 +678,7 @@ export function getStemSyncStatus() {
     config,
     bindings,
     playhead: { ...ph, source: config.playheadSource },
+    audio: audioOut,
     envelope: envelope ? {
       trackId: envelope.trackId,
       sr: envelope.sr,
@@ -675,7 +691,7 @@ export function getStemSyncStatus() {
       light: rt.resolvedName,
       stems: rt.binding.stems,
       colorMode: rt.binding.colorMode ?? 'palette',
-      effectiveOffsetMs: getPlayheadOffsetMs(rt.binding.rid) ?? config.offsetMs,
+      effectiveOffsetMs: effectiveOffsetMs(rt.binding.rid, audioOut),
       streamChannelId: rt.streamChannelId,
       value: Number(rt.value.toFixed(3)),
       level: Number(rt.level.toFixed(3)),

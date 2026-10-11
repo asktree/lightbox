@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { spawn } from 'child_process';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import { getRemoteOutputReport, setRemoteOutputReport, clearRemoteOutputReport } from '../services/audio-output.js';
 
 // Audio output latency endpoint. Spawns scraper/audio_latency.py against
 // CoreAudio and returns the measured (output_latency_ms, output_device_name).
@@ -72,6 +73,33 @@ export function createAudioLatencyRouter(): Router {
     }
     const reading = await measure();
     res.json(reading);
+  });
+
+  // Remote output report. A computer that plays the music (not this one)
+  // sends its output device and CoreAudio latency here each few seconds
+  // (scraper/output_reporter.py). The report expires when the sender stops.
+  //   POST   /api/audio-latency/remote  { host, device, latencyMs }
+  //   GET    /api/audio-latency/remote  -> the fresh report, or null
+  //   DELETE /api/audio-latency/remote  -> drop the report now
+  r.post('/remote', (req, res) => {
+    const { host, device, latencyMs } = req.body ?? {};
+    if (typeof host !== 'string' || !host || host.length > 200) {
+      return res.status(400).json({ error: 'host must be a string' });
+    }
+    if (device != null && (typeof device !== 'string' || device.length > 200)) {
+      return res.status(400).json({ error: 'device must be a string or null' });
+    }
+    if (typeof latencyMs !== 'number' || !Number.isFinite(latencyMs) || latencyMs < 0 || latencyMs > 10000) {
+      return res.status(400).json({ error: 'latencyMs must be a number from 0 to 10000' });
+    }
+    res.json(setRemoteOutputReport(host, device ?? null, Math.round(latencyMs)));
+  });
+
+  r.get('/remote', (_req, res) => res.json(getRemoteOutputReport()));
+
+  r.delete('/remote', (_req, res) => {
+    clearRemoteOutputReport();
+    res.json({ ok: true });
   });
 
   return r;

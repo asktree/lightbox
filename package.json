@@ -10,6 +10,7 @@
     "mcp": "pnpm --filter @lightbox/mcp dev",
     "musicbox": "pnpm --filter @lightbox/musicbox dev",
     "musicbox2": "pnpm --filter @lightbox/musicbox2 dev",
+    "audio:report": "python3 packages/music-scraper/scraper/output_reporter.py",
     "igled:build": "pnpm --filter @lightbox/igled compile",
     "igled:ota:couch1": "pnpm --filter @lightbox/igled ota:couch1",
     "igled:ota:window": "pnpm --filter @lightbox/igled ota:window",

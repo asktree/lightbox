@@ -98,6 +98,11 @@ export function getPlayheadOffsetMs(rid: string): number | null {
   return Math.round(a.latencyMs - l.latencyMs);
 }
 
+// One light's measured command→photon latency. Null until measured.
+export function getLightLatencyMs(rid: string): number | null {
+  return registry.lights[rid]?.latencyMs ?? null;
+}
+
 export function setManualLightLatency(rid: string, name: string, latencyMs: number): void {
   registry.lights[rid] = {
     name, latencyMs, jitterMs: 0, samples: [], measuredAt: Date.now(), source: 'manual',
