@@ -7,6 +7,8 @@ import { fileURLToPath } from 'url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG_DIR = join(__dirname, '../../data');
 const DEVICES_FILE = join(CONFIG_DIR, 'tuya-devices.json');
+// find (3 s) + connect + the first state read. A healthy bulb needs about 1 s.
+const CONNECT_TIMEOUT_MS = 10_000;
 
 interface TuyaDeviceConfig {
   name: string;
@@ -204,6 +206,15 @@ export class TuyaDriver implements LightDriver {
       } catch (err: any) {
         console.error(`Tuya: failed to connect to ${config.name}:`, err.message);
 
+        // The first api can have a half-open socket (connect timeout). Close
+        // it without listeners, the same teardown as rebuildApi.
+        const failed = this.devices.get(id)?.api;
+        if (failed) {
+          try { failed.removeAllListeners?.(); } catch { /* ignore */ }
+          try { failed.on?.('error', () => { /* swallow during teardown */ }); } catch { /* ignore */ }
+          try { failed.disconnect?.(); } catch { /* ignore */ }
+        }
+
         // Still add device as unreachable so it shows in UI
         const device: TuyaDevice = {
           config,
@@ -343,11 +354,23 @@ export class TuyaDriver implements LightDriver {
     const { api, config } = device;
 
     try {
-      await api.find({ timeout: 3 });
-      await api.connect();
-
-      // Get initial state
-      const status = await api.get({ schema: true });
+      // A bulb can accept the socket and then never answer. Bound the whole
+      // sequence, because server startup waits for it.
+      let timer: NodeJS.Timeout | undefined;
+      const sequence = (async () => {
+        await api.find({ timeout: 3 });
+        await api.connect();
+        // Get initial state
+        return api.get({ schema: true });
+      })();
+      // A late failure must not become an unhandled rejection.
+      sequence.catch(() => {});
+      const status = await Promise.race([
+        sequence,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('connection timed out')), CONNECT_TIMEOUT_MS);
+        }),
+      ]).finally(() => clearTimeout(timer));
       if (status?.dps) {
         device.state = this.parseState(config, status.dps);
       }
