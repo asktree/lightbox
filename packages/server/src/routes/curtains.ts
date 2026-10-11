@@ -50,7 +50,7 @@ export function createCurtainsRouter(): Router {
 
   const saved = () => ({
     soap: { speed: state.soapSpeed, smoothness: state.soapSmoothness, palette: state.soapPalette, black: state.soapBlack, bri: state.soapBri },
-    twinkle: { kelvin: state.curtainsKelvin, val: state.curtainsVal, periodMs: state.curtainsPeriodMs, cut: state.curtainsCut },
+    twinkle: { kelvin: state.curtainsKelvin, color: state.curtainsColor, val: state.curtainsVal, periodMs: state.curtainsPeriodMs, cut: state.curtainsCut },
   });
 
   // Live routine on each box, the palette bank, and the persisted settings.
@@ -91,7 +91,7 @@ export function createCurtainsRouter(): Router {
     const sat = clamp(b.sat, 0, 255);               if (sat !== undefined) out.sat = sat;
     // Twinkle color as a blackbody kelvin (same path screenbox uses).
     const kelvin = clamp(b.kelvin, KELVIN_MIN, KELVIN_MAX);
-    if (kelvin !== undefined) { out.rgb = kelvinToRgbBytes(kelvin); state.curtainsKelvin = kelvin; }
+    if (kelvin !== undefined) { out.rgb = kelvinToRgbBytes(kelvin); state.curtainsKelvin = kelvin; state.curtainsColor = null; }
     if (b.rgb && typeof b.rgb === 'object') {
       const r = clamp(b.rgb.r, 0, 255), g = clamp(b.rgb.g, 0, 255), bb = clamp(b.rgb.b, 0, 255);
       if (r !== undefined && g !== undefined && bb !== undefined) out.rgb = { r, g, b: bb };
