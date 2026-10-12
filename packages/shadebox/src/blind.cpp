@@ -39,6 +39,9 @@ static constexpr uint32_t QUIET_MS = 3500;
 static constexpr uint32_t POS_FIRST_TRY_MS = 2500;
 static constexpr uint32_t POS_RETRY_MS = 5000;
 static constexpr uint8_t POS_MAX_TRIES = 6;
+// A failed bind means no reports. Try it again a few times.
+static constexpr uint32_t BIND_RETRY_MS = 10000;
+static constexpr uint8_t BIND_MAX_TRIES = 3;
 static constexpr uint32_t MAX_TRAVEL_MS = 90000;
 
 static const char *protoName(Protocol p) {
@@ -170,6 +173,8 @@ void BlindEndpoint::findEndpoint(esp_zb_zdo_match_desc_req_param_t *req) {
     _short = addr;
     persist();
     logbuf::line("[blind] rejoined as 0x%04x", addr);
+    _bindTries = 0;
+    _bindRetryAtMs = 0;
     configure();
     wantPosition();
     return;
@@ -248,7 +253,8 @@ void BlindEndpoint::wantPosition() {
   _needPos = true;
 }
 
-// Ask the blind to keep us informed. Runs in the Zigbee task (no lock).
+// Ask the blind to keep us informed. Runs in the Zigbee task (no lock), or
+// from tick() under ZbLock for a bind retry.
 void BlindEndpoint::configure() {
   if (_proto == Protocol::Zcl) {
     // Bind the blind's covering cluster to us so reports have somewhere to go…
@@ -294,8 +300,23 @@ void BlindEndpoint::configure() {
   }
 }
 
-void BlindEndpoint::onBind(esp_zb_zdp_status_t status, void *) {
-  logbuf::line("[zb] bind %s", status == ESP_ZB_ZDP_STATUS_SUCCESS ? "ok" : "failed");
+void BlindEndpoint::onBind(esp_zb_zdp_status_t status, void *ctx) {
+  auto *self = static_cast<BlindEndpoint *>(ctx);
+  if (status == ESP_ZB_ZDP_STATUS_SUCCESS) {
+    logbuf::line("[zb] bind ok");
+    self->_bindTries = 0;
+    self->_bindRetryAtMs = 0;
+    return;
+  }
+  if (self->_bindTries < BIND_MAX_TRIES) {
+    self->_bindTries++;
+    self->_bindRetryAtMs = millis() + BIND_RETRY_MS;
+    logbuf::line("[zb] bind failed (status %d); try %u of %u in %lu s", (int)status, self->_bindTries, BIND_MAX_TRIES,
+                 (unsigned long)(BIND_RETRY_MS / 1000));
+  } else {
+    self->_bindRetryAtMs = 0;
+    logbuf::line("[zb] bind failed (status %d); no more tries", (int)status);
+  }
 }
 
 // ─── Incoming: position reports ─────────────────────────────────────────────
@@ -401,6 +422,14 @@ void BlindEndpoint::beginMove(int dir, int target) {
 }
 
 void BlindEndpoint::tick() {
+  uint32_t bindAt = _bindRetryAtMs;
+  if (bindAt && (int32_t)(millis() - bindAt) >= 0 && !radio::busy()) {
+    _bindRetryAtMs = 0;
+    // Give Zigbee the radio while the bind goes out; the rejoin path does not.
+    if (radio::wifiSettled()) radio::hold(3000, true);
+    ZbLock lock;
+    configure();
+  }
   if (_needPos && _proto != Protocol::Unknown && (int32_t)(millis() - _posTryAtMs) >= 0 && !radio::busy()) {
     if (_posTries++ >= POS_MAX_TRIES) {
       _needPos = false;

@@ -14,6 +14,12 @@
 //
 // Commands go through a one-slot queue. A newer command replaces one that
 // was not sent yet (latest wins).
+//
+// A window ends at most s_maxMs + 1.5 s after it opens, also when new
+// commands come during it. If two commands in a row get no acknowledge and
+// the blind has been silent for 5 min, the board restarts (at most each
+// 15 min) so the blind joins again. The last command survives the restart
+// and is sent when the blind is heard.
 
 #pragma once
 #include "blind.h"
@@ -55,6 +61,9 @@ void hold(uint32_t ms, bool untilHeard = false);
 
 // A frame came from the blind, or the stack confirmed delivery to it.
 void heard();
+
+// Wi-Fi is connected long enough that a Zigbee window will not drop it.
+bool wifiSettled();
 
 // Window lengths: `holdMs` after the acknowledge, `maxMs` without one.
 void tune(uint32_t holdMs, uint32_t maxMs);
