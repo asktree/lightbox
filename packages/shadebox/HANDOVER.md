@@ -4,6 +4,27 @@ Status of the Yoolax blind project on 2026-10-03, for the next Claude session on
 **hearth**. All the code and all the known facts are in this file and in `src/`.
 The project was started from the laptop on 2026-10-02.
 
+## 0a. Update 2026-10-12: 10 s delay, self-heal (IGG-1415)
+
+Symptom: `wb 0` moved the blind about 10 s late, and the dial was slow.
+
+Cause (from `/log` on Oct 11): at about 22:29Z the blind rejoined as 0x3bbd
+and the bind failed. The rejoin path sends the bind in Wi-Fi mode. After
+that the blind acknowledged no command (`ack -1`, `heardAgoS` 21945). Each
+new command during an open window restarted the `maxMs` count, so windows
+chained to 11 s. Wi-Fi then dropped for up to 33 s, and HTTP and the dial
+were late.
+
+Fix in firmware:
+- A window ends at most `maxMs` + 1.5 s after it opens.
+- A failed bind is tried again from `tick()` after 10 s, up to 3 times,
+  with a short Zigbee hold when Wi-Fi is settled.
+- Self-heal: 2 commands in a row with no acknowledge, and nothing heard
+  from the blind for 5 min, restart the board (at most each 15 min of
+  uptime). The blind joins again after a restart (see section 0). The last
+  user command is kept in RTC memory and sent when the blind is heard,
+  if that is within 2 min of boot. `/log` shows each step.
+
 ## 0. Update 2026-10-04 (hearth)
 
 Iggy's decisions: the board stays on a USB charger in the bedroom, on Wi-Fi.

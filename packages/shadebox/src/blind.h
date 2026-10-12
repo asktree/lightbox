@@ -129,6 +129,8 @@ private:
   volatile bool _needPos = false;
   volatile uint32_t _posTryAtMs = 0;
   volatile uint8_t _posTries = 0;
+  volatile uint8_t _bindTries = 0;       // failed binds since the last rejoin
+  volatile uint32_t _bindRetryAtMs = 0;  // 0 = no bind retry due
 };
 
 }  // namespace blind

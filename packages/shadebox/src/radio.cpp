@@ -1,6 +1,8 @@
 #include "radio.h"
 
+#include <esp_attr.h>
 #include <esp_ieee802154.h>
+#include <esp_system.h>
 
 #include "logbuf.h"
 #include "net.h"
@@ -64,6 +66,33 @@ static volatile uint32_t s_windowMs = 0;
 static volatile uint32_t s_lastHeardMs = 0;
 static volatile bool s_everHeard = false;
 
+// A window never stays open longer than this past s_maxMs, also when new
+// commands come during the window. Each send restarts the s_maxMs count; with
+// a silent blind, chained sends held Zigbee mode for 11 s and Wi-Fi dropped.
+static constexpr uint32_t WINDOW_CAP_EXTRA_MS = 1500;
+
+// Self-heal. On Oct 11 the blind rejoined, its bind failed, and then it
+// acknowledged nothing for hours. A board restart makes it join again (see
+// HANDOVER). Restart when commands keep failing and the blind is silent.
+static constexpr uint32_t HEAL_MISSES = 2;                 // timeouts in a row
+static constexpr uint32_t HEAL_SILENT_MS = 300000;         // nothing heard for this long
+static constexpr uint32_t HEAL_MIN_UPTIME_MS = 15 * 60000; // at most one restart each 15 min
+static constexpr uint32_t CARRY_MAX_MS = 120000;           // drop a carried command after this
+static constexpr uint32_t CARRY_MAGIC = 0x5ADEB0B5;
+static volatile uint32_t s_missed = 0;
+
+// The last user command survives ESP.restart() here, so the blind still
+// does what was asked when it joins again.
+struct Carry {
+  uint32_t magic;
+  uint8_t kind;
+  int32_t arg;
+};
+RTC_NOINIT_ATTR static Carry s_carry;
+static Kind s_lastKind = Kind::None;
+static int s_lastArg = 0;
+static bool s_carrying = false;
+
 static bool due(uint32_t at) { return (int32_t)(millis() - at) >= 0; }
 
 static void enterZigbee() {
@@ -98,6 +127,11 @@ void begin(blind::BlindEndpoint &shade) {
   esp_zb_lock_acquire(portMAX_DELAY);
   esp_zb_zcl_command_send_status_handler_register(onSendStatus);
   esp_zb_lock_release();
+  if (esp_reset_reason() == ESP_RST_SW && s_carry.magic == CARRY_MAGIC && s_carry.kind <= (uint8_t)Kind::Go) {
+    s_carrying = true;
+    logbuf::line("[radio] restarted to heal; command %u waits for the blind", s_carry.kind);
+  }
+  s_carry.magic = 0;
 }
 
 bool submit(Kind kind, int arg) {
@@ -133,6 +167,7 @@ void heard() {
   uint32_t now = millis();
   s_lastHeardMs = now;
   s_everHeard = true;
+  s_missed = 0;
   if (s_awaiting) {
     s_awaiting = false;
     s_ackMs = (int32_t)(now - s_sentAtMs);
@@ -158,7 +193,7 @@ void setWindowless(bool on) {
 
 // Wi-Fi must be settled before a window opens. With no Wi-Fi at all, do not
 // hold a command from the console for ever.
-static bool wifiSettled() {
+bool wifiSettled() {
   if (net::connected()) return net::connectedForMs() >= WIFI_SETTLE_MS;
   return millis() > 30000;
 }
@@ -174,11 +209,43 @@ static void send(Kind kind, int arg, const blind::Probe &probe) {
     default: return;
   }
   s_probing = kind == Kind::Probe;
+  if (kind != Kind::Refresh && kind != Kind::Probe) {
+    s_lastKind = kind;
+    s_lastArg = arg;
+  }
   s_sentAtMs = millis();
   s_awaiting = true;
 }
 
+// A command got no acknowledge. Restart the board if the blind looks lost.
+static void missed() {
+  s_missed++;
+  uint32_t now = millis();
+  bool silent = !s_everHeard || now - s_lastHeardMs >= HEAL_SILENT_MS;
+  if (s_missed < HEAL_MISSES || !silent || now < HEAL_MIN_UPTIME_MS) return;
+  logbuf::line("[radio] %lu commands with no acknowledge, blind silent for %ld s: restart to make it join again",
+               (unsigned long)s_missed, s_everHeard ? (long)((now - s_lastHeardMs) / 1000) : -1L);
+  if (s_lastKind != Kind::None) {
+    s_carry.kind = (uint8_t)s_lastKind;
+    s_carry.arg = s_lastArg;
+    s_carry.magic = CARRY_MAGIC;
+  }
+  delay(200);  // let the log line reach /log readers
+  ESP.restart();
+}
+
 void tick() {
+  if (s_carrying) {
+    if (millis() > CARRY_MAX_MS) {
+      s_carrying = false;
+      logbuf::line("[radio] blind did not join in time; carried command dropped");
+    } else if (s_everHeard && s_pendingKind == Kind::None && !s_awaiting) {
+      s_carrying = false;
+      logbuf::line("[radio] blind is back; send the carried command");
+      submit((Kind)s_carry.kind, s_carry.arg);
+    }
+  }
+
   portENTER_CRITICAL(&s_mux);
   Kind kind = s_pendingKind;
   int arg = s_pendingArg;
@@ -212,6 +279,7 @@ void tick() {
       s_ackMs = -1;
       s_timeouts++;
       logbuf::line("[radio] no acknowledge from the blind (no window)");
+      missed();
     } else if (due(s_sentAtMs + FALLBACK_MS) && wifiSettled()) {
       // The polls of the blind do not get through. Give Zigbee the radio;
       // the frame waits in the stack for the next poll.
@@ -221,11 +289,12 @@ void tick() {
   }
   if (!due(s_holdUntilMs)) return;
   if (s_awaiting) {
-    if (!due(s_sentAtMs + s_maxMs)) return;
+    if (!due(s_sentAtMs + s_maxMs) && !due(s_enteredAtMs + s_maxMs + WINDOW_CAP_EXTRA_MS)) return;
     s_awaiting = false;
     s_ackMs = -1;
     s_timeouts++;
     logbuf::line("[radio] no acknowledge from the blind in the window");
+    missed();
   } else if (!due(s_closeAtMs)) {
     return;
   }
