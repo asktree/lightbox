@@ -1,0 +1,10 @@
+{
+  "name": "@lightbox/bassbed",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Bass shaker feed: BlackHole in, low-pass and per-frequency limits, headphone jack out. Python — package.json exists only for workspace discovery.",
+  "scripts": {
+    "setup": "python3 -m venv .venv && .venv/bin/pip install -r requirements.txt",
+    "start": ".venv/bin/python bassbed_ui.py"
+  }
+}
