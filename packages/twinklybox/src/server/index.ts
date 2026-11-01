@@ -166,16 +166,21 @@ app.post('/api/connect', async (req, res) => {
   }
 });
 
+// Hold the loop in a local: a /api/connect that runs during the await can
+// set the module `loop` to null (a slow stop on an unreachable device once
+// crashed the server this way).
 app.post('/api/stream/start', async (_req, res) => {
-  if (!loop) return res.status(400).json({ error: 'not connected — POST /api/connect first' });
-  await loop.start();
-  res.json(loop.getStats());
+  const l = loop;
+  if (!l) return res.status(400).json({ error: 'not connected — POST /api/connect first' });
+  await l.start();
+  res.json(l.getStats());
 });
 
 app.post('/api/stream/stop', async (_req, res) => {
-  if (!loop) return res.status(400).json({ error: 'not connected' });
-  await loop.stop();
-  res.json(loop.getStats());
+  const l = loop;
+  if (!l) return res.status(400).json({ error: 'not connected' });
+  await l.stop();
+  res.json(l.getStats());
 });
 
 app.get('/api/stream/state', (_req, res) => {

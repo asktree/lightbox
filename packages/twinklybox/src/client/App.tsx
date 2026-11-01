@@ -27,7 +27,7 @@ function usePersistedState<T>(key: string, initial: T): [T, React.Dispatch<React
 // pattern params and push them via /api/pattern. The server drives the
 // UDP frame loop.
 
-type PatternKind = 'solid' | 'gradient' | 'perlin' | 'planes' | 'strobe' | 'megadrome' | 'twinkle';
+type PatternKind = 'solid' | 'gradient' | 'perlin' | 'planes' | 'strobe' | 'megadrome' | 'twinkle' | 'breathe';
 type Axis = 'x' | 'y' | 'z' | 'index';
 
 type DriverKind = 'twinkly' | 'wled' | 'serial' | 'stack';
@@ -248,6 +248,17 @@ export default function App() {
   const [twinklePeriod, setTwinklePeriod] = usePersistedState('twinkle.period', 6);
   const [twinkleHueJitter, setTwinkleHueJitter] = usePersistedState('twinkle.hueJitter', 0);
 
+  // Breathe: slow ambient pulse. Defaults are a warm amber-rose, ~20 s per
+  // breath, 25% dip in total light.
+  const [breatheHue, setBreatheHue] = usePersistedState('breathe.hue', 22);
+  const [breatheHueSpread, setBreatheHueSpread] = usePersistedState('breathe.hueSpread', 14);
+  const [breatheSat, setBreatheSat] = usePersistedState('breathe.sat', 0.85);
+  const [breatheVal, setBreatheVal] = usePersistedState('breathe.val', 0.85);
+  const [breathePeriod, setBreathePeriod] = usePersistedState('breathe.period', 20);
+  const [breatheDepth, setBreatheDepth] = usePersistedState('breathe.depth', 0.25);
+  const [breatheContrast, setBreatheContrast] = usePersistedState('breathe.contrast', 0.75);
+  const [breatheScale, setBreatheScale] = usePersistedState('breathe.scale', 1.2);
+
   const [strobeHue, setStrobeHue] = usePersistedState('strobe.hue', 0);
   const [strobeHzVal, setStrobeHzVal] = usePersistedState('strobe.hz', 4);
   const [strobeDuty, setStrobeDuty] = usePersistedState('strobe.duty', 0.1);
@@ -318,6 +329,7 @@ export default function App() {
     mdOriginX, mdOriginY, mdOriginZ, mdRotation, mdD, mdD2, mdNoise2Pos, mdNoise2, mdPulse, mdHueOffset, mdHueRange, mdSat, mdVal, mdBaseline, mdPropGain, mdPropDeadzone, mdNormMode, mdMinMaxGain, mdBandMode, mdFloatSpeed, mdFloatDir, mdSpinSpeed, mdDSpeed,
     strobeHue, strobeHzVal, strobeDuty, strobeVal,
     twinkleHue, twinkleSat, twinkleVal, twinkleDensity, twinklePeriod, twinkleHueJitter,
+    breatheHue, breatheHueSpread, breatheSat, breatheVal, breathePeriod, breatheDepth, breatheContrast, breatheScale,
   ]);
 
   function buildPattern() {
@@ -338,6 +350,7 @@ export default function App() {
       };
       case 'strobe':    return { kind, hue: strobeHue, sat: 1, val: strobeVal, hz: strobeHzVal, duty: strobeDuty };
       case 'twinkle':   return { kind, hue: twinkleHue, sat: twinkleSat, val: twinkleVal, density: twinkleDensity, period: twinklePeriod, hueJitter: twinkleHueJitter };
+      case 'breathe':   return { kind, hue: breatheHue, hueSpread: breatheHueSpread, sat: breatheSat, val: breatheVal, period: breathePeriod, depth: breatheDepth, contrast: breatheContrast, scale: breatheScale };
     }
   }
 
@@ -434,7 +447,7 @@ export default function App() {
 
       <section className="bg-zinc-900 rounded p-3 space-y-2">
         <div className="flex gap-2">
-          {(['solid', 'gradient', 'perlin', 'planes', 'megadrome', 'strobe', 'twinkle'] as PatternKind[]).map((k) => (
+          {(['solid', 'gradient', 'perlin', 'planes', 'megadrome', 'strobe', 'twinkle', 'breathe'] as PatternKind[]).map((k) => (
             <button
               key={k}
               onClick={() => setKind(k)}
@@ -690,6 +703,19 @@ export default function App() {
             <Slider label="density" min={0.005} max={0.5} step={0.005} value={twinkleDensity} onChange={setTwinkleDensity} />
             <Slider label="period (s)" min={1} max={20} step={0.5} value={twinklePeriod} onChange={setTwinklePeriod} />
             <Slider label="hue jitter" min={0} max={60} step={1} value={twinkleHueJitter} onChange={setTwinkleHueJitter} />
+          </div>
+        )}
+
+        {kind === 'breathe' && (
+          <div className="space-y-2 pt-2">
+            <Slider label="hue" min={0} max={360} step={1} value={breatheHue} onChange={setBreatheHue} accentHue={breatheHue} />
+            <Slider label="hue spread" min={0} max={60} step={1} value={breatheHueSpread} onChange={setBreatheHueSpread} />
+            <Slider label="sat" min={0} max={1} step={0.01} value={breatheSat} onChange={setBreatheSat} />
+            <Slider label="val" min={0} max={1} step={0.01} value={breatheVal} onChange={setBreatheVal} />
+            <Slider label="breath (s)" min={6} max={60} step={1} value={breathePeriod} onChange={setBreathePeriod} />
+            <Slider label="dip" min={0} max={0.9} step={0.01} value={breatheDepth} onChange={setBreatheDepth} />
+            <Slider label="contrast" min={0} max={1} step={0.01} value={breatheContrast} onChange={setBreatheContrast} />
+            <Slider label="band size" min={0.3} max={4} step={0.1} value={breatheScale} onChange={setBreatheScale} />
           </div>
         )}
       </section>

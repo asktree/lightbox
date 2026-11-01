@@ -626,6 +626,77 @@ export function renderStrobe(out: Uint8Array, ctx: PatternContext, p: StrobePara
   for (let i = 0; i < ctx.numLeds; i++) writePixel(out, i, ctx.bytesPerLed, r, g, b);
 }
 
+// Breathe: a slow ambient pulse. Two layers:
+//   - Global breath: total light output eases down by `depth` (0.25 = the
+//     room gets 25% darker at the trough) and back up, once per `period`.
+//     The level is held in LINEAR light, so the room never goes dark.
+//   - Local swell: soft bands roll through the 3D layout, one crest per
+//     breath, warped by noise. Their contrast grows as the breath falls, so
+//     the even glow gathers into moving pools of light, then spreads again.
+// After the local field is built, it is rescaled so its mean linear light
+// matches the breath target. That keeps the room level smooth however the
+// bands fall on the layout.
+export interface BreatheParams {
+  kind: 'breathe';
+  hue: number;       // 0–360, base hue
+  hueSpread: number; // ± degrees: crests shift one way, troughs the other
+  sat: number;       // 0–1
+  val: number;       // 0–1, peak brightness
+  period: number;    // seconds for one full breath (bright → dim → bright)
+  depth: number;     // 0–0.9, drop in total light at the trough (0.25 = 25%)
+  contrast: number;  // 0–1, local variance at the trough (0 = flat pulse)
+  scale: number;     // band density across the layout
+}
+
+// The frame loop applies gamma ~2.2 after the pattern, so linear light =
+// (v/255)^2.2. Breathe works in linear light and converts back.
+const BREATHE_GAMMA = 2.2;
+let breatheLin = new Float32Array(0);
+
+export function renderBreathe(out: Uint8Array, ctx: PatternContext, p: BreatheParams) {
+  const N = ctx.numLeds;
+  if (breatheLin.length < N) breatheLin = new Float32Array(N);
+  const T = Math.max(4, p.period);
+  const ph = ctx.tSec / T;
+  // b: 0 at full, 1 at the trough. Cosine ease reads as a slow breath.
+  const b = 0.5 - 0.5 * Math.cos(2 * Math.PI * ph);
+  const depth = Math.max(0, Math.min(0.9, p.depth));
+  const target = 1 - depth * b;
+  // Some contrast stays at full so the field never looks flat, then it grows.
+  const c = Math.max(0, Math.min(1, p.contrast)) * (0.3 + 0.7 * b);
+  // The band direction turns slowly (one turn per ~7 breaths), so the swell
+  // comes from a different side each time.
+  const ang = 2 * Math.PI * (ph / 7);
+  const dx = Math.cos(ang), dy = Math.sin(ang), dz = 0.35;
+  const seg = (ctx.segment ?? 0) * 997.7;
+
+  let sum = 0;
+  for (let i = 0; i < N; i++) {
+    let x: number, y: number, z: number;
+    if (ctx.coords) { const q = ctx.coords[i]; x = q.x; y = q.y; z = q.z; }
+    else { x = i / Math.max(1, N - 1); y = 0; z = 0; }
+    const warp = valueNoise3(x * 2.3 + seg, y * 2.3, z * 2.3 + ph * 0.6) - 0.5;
+    const u = (x * dx + y * dy + z * dz) * p.scale + warp * 0.8;
+    const w = 0.5 + 0.5 * Math.sin(2 * Math.PI * (u - ph)); // 0..1, crest = 1
+    const l = 1 - c * (1 - w * w);
+    breatheLin[i] = l;
+    sum += l;
+  }
+  // Rescale so mean linear light = target × headroom. Headroom < 1 leaves
+  // room for crests above the mean without clipping at full.
+  const mean = sum / Math.max(1, N);
+  const k = mean > 0 ? (0.8 * target) / mean : 0;
+  const inv = 1 / BREATHE_GAMMA;
+  for (let i = 0; i < N; i++) {
+    const lin = Math.min(1, breatheLin[i] * k);
+    const v = p.val * Math.pow(lin, inv);
+    const w = (breatheLin[i] - (1 - c)) / Math.max(1e-6, c); // 0..1 local crest
+    const h = p.hue + (w - 0.5) * 2 * p.hueSpread;
+    const [r, g, bl] = hsvToRgb(h, p.sat, v);
+    writePixel(out, i, ctx.bytesPerLed, r, g, bl);
+  }
+}
+
 // Orientation debug: lights a single distinct-colored pixel in each corner of
 // each vertical half of the display (so a stacked rig shows both boxes). The
 // corner color scheme is fixed — TL=red, TR=green, BL=blue, BR=yellow — so you
@@ -665,7 +736,7 @@ export function renderDebugCorners(out: Uint8Array, ctx: PatternContext, _p: Deb
 // Union for dispatch
 export type Pattern =
   | SolidParams | GradientParams | PerlinParams | PlanesParams | StrobeParams | MegadromeParams
-  | TwinkleParams | DebugCornersParams;
+  | TwinkleParams | BreatheParams | DebugCornersParams;
 
 export function render(out: Uint8Array, ctx: PatternContext, p: Pattern) {
   switch (p.kind) {
@@ -675,6 +746,7 @@ export function render(out: Uint8Array, ctx: PatternContext, p: Pattern) {
     case 'planes':    return renderPlanes(out, ctx, p);
     case 'strobe':    return renderStrobe(out, ctx, p);
     case 'twinkle':   return renderTwinkle(out, ctx, p);
+    case 'breathe':   return renderBreathe(out, ctx, p);
     case 'megadrome': return renderMegadrome(out, ctx, p);
     case 'debugcorners': return renderDebugCorners(out, ctx, p);
   }
