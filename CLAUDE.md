@@ -106,6 +106,11 @@ resume seamlessly.
 - `~/.config/musicbox/` — Spotify credentials + `.spotipy_cache` (shared by
   the autopilot daemon and every ingest subprocess; writes are atomic)
 - `~/music-library/tracks/<id>/` — audio.ogg, stems/, envelope caches
+- `~/music-library/listens.db` — durable Spotify listen log (every play,
+  table `listens`). `scraper/listen_log.py` runs every 30 min from launchd
+  `com.lightbox.listen-log` (plist in `music-scraper/launchd/`), independent of
+  the autopilot. State/log: `~/.local/state/lightbox/listen-log.{json,log}`.
+  After 48 h without a good poll it files one Ledger card (MEW-170).
 
 ## Music → Lights Pipeline
 
