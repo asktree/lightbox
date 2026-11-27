@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Spotify listen log (MEW-170). Install:
+     cp launchd/com.lightbox.listen-log.plist ~/Library/LaunchAgents/
+     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.lightbox.listen-log.plist -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.lightbox.listen-log</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/ix/Coding/lightbox/packages/music-scraper/.venv/bin/python</string>
+        <string>-m</string>
+        <string>scraper.listen_log</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/ix/Coding/lightbox/packages/music-scraper</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>1800</integer>
+    <key>StandardOutPath</key>
+    <string>/Users/ix/.local/state/lightbox/listen-log.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/ix/.local/state/lightbox/listen-log.log</string>
+</dict>
+</plist>
